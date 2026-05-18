@@ -23,7 +23,7 @@ export default function TopBar({ status, sidebarOpen, onToggleSidebar, yolo, onT
             {status.git && (
               <span className={`topbar-git ${status.git.hasChanges ? 'dirty' : ''}`}>
                 {status.git.branch || '(none)'}
-                {status.git.hasChanges && <span> ●</span>}
+                {status.git.hasChanges && <span> *</span>}
               </span>
             )}
           </>
@@ -33,7 +33,7 @@ export default function TopBar({ status, sidebarOpen, onToggleSidebar, yolo, onT
           onClick={onToggleYolo}
           title={yolo ? 'YOLO mode: ON - edits applied automatically' : 'YOLO mode: OFF - all edits require approval'}
         >
-          {yolo ? '⚡ YOLO' : 'YOLO'}
+          {yolo ? '[YOLO]' : 'YOLO'}
         </button>
       </div>
       <button className="topbar-toggle" onClick={onToggleSidebar}>

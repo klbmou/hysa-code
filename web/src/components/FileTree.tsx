@@ -9,17 +9,32 @@ interface FileTreeProps {
   onClose: () => void;
 }
 
-const FILE_ICONS: Record<string, string> = {
-  ts: '🟦', tsx: '⚛️', js: '🟨', jsx: '⚛️', json: '📋',
-  md: '📝', css: '🎨', html: '🌐', py: '🐍', rs: '🦀',
-  go: '🔷', java: '☕', c: '⚙️', cpp: '⚙️', h: '⚙️',
-  yaml: '📋', yml: '📋', toml: '📋', sh: '💻', bash: '💻',
-  sql: '🗃️', lock: '🔒', gitignore: '🙈',
-};
-
-function getIcon(name: string): string {
+function getExtBadge(name: string): { label: string; cls: string } {
   const ext = name.split('.').pop()?.toLowerCase() || '';
-  return FILE_ICONS[ext] || '📄';
+  const map: Record<string, { label: string; cls: string }> = {
+    ts: { label: 'TS', cls: 'ext-ts' },
+    tsx: { label: 'TSX', cls: 'ext-tsx' },
+    js: { label: 'JS', cls: 'ext-js' },
+    jsx: { label: 'JSX', cls: 'ext-jsx' },
+    json: { label: 'JSON', cls: 'ext-json' },
+    md: { label: 'MD', cls: 'ext-md' },
+    css: { label: 'CSS', cls: 'ext-css' },
+    html: { label: 'HTML', cls: 'ext-html' },
+    py: { label: 'PY', cls: 'ext-py' },
+    rs: { label: 'RS', cls: 'ext-rs' },
+    go: { label: 'GO', cls: 'ext-go' },
+    java: { label: 'JAVA', cls: 'ext-java' },
+    c: { label: 'C', cls: 'ext-c' },
+    cpp: { label: 'CPP', cls: 'ext-cpp' },
+    yaml: { label: 'YAML', cls: 'ext-yaml' },
+    yml: { label: 'YML', cls: 'ext-yaml' },
+    toml: { label: 'TOML', cls: 'ext-toml' },
+    sh: { label: 'SH', cls: 'ext-sh' },
+    bash: { label: 'BASH', cls: 'ext-sh' },
+    sql: { label: 'SQL', cls: 'ext-sql' },
+    lock: { label: 'LOCK', cls: 'ext-lock' },
+  };
+  return map[ext] || { label: 'FILE', cls: 'ext-file' };
 }
 
 export default function FileTree({ files, fileCount, selectedFile, onSelect, collapsed, onClose }: FileTreeProps) {
@@ -33,7 +48,7 @@ export default function FileTree({ files, fileCount, selectedFile, onSelect, col
     <div className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
       <div className="sidebar-header">
         <span className="sidebar-title">Files ({fileCount})</span>
-        <button className="sidebar-close" onClick={onClose}>✕</button>
+        <button className="sidebar-close" onClick={onClose}>x</button>
       </div>
       <div className="sidebar-search">
         <input
@@ -43,16 +58,19 @@ export default function FileTree({ files, fileCount, selectedFile, onSelect, col
         />
       </div>
       <div className="sidebar-files">
-        {filtered.map((f) => (
-          <div
-            key={f}
-            className={`file-item ${selectedFile === f ? 'active' : ''}`}
-            onClick={() => onSelect(f)}
-          >
-            <span className="file-item-icon">{getIcon(f)}</span>
-            <span className="file-item-name">{f}</span>
-          </div>
-        ))}
+        {filtered.map((f) => {
+          const badge = getExtBadge(f);
+          return (
+            <div
+              key={f}
+              className={`file-item ${selectedFile === f ? 'active' : ''}`}
+              onClick={() => onSelect(f)}
+            >
+              <span className={`file-ext-badge ${badge.cls}`}>{badge.label}</span>
+              <span className="file-item-name">{f}</span>
+            </div>
+          );
+        })}
         {filtered.length === 0 && !search && (
           <div className="file-item" style={{ color: '#5c5c74', cursor: 'default', fontSize: '12px' }}>
             No project files found

@@ -8,12 +8,12 @@ interface WelcomeScreenProps {
 }
 
 const CARDS = [
-  { icon: '</>', title: 'Explain this project', action: 'Read the project files and explain the architecture, structure, and purpose of this codebase.' },
-  { icon: '🐛', title: 'Find bugs', action: 'Analyze the codebase for potential bugs, edge cases, and logic errors.' },
-  { icon: '✨', title: 'Create a feature', action: 'Design and implement a new feature for this project. Start by reading the relevant files.' },
-  { icon: '🎨', title: 'Improve UI', action: 'Review the UI components and suggest improvements for layout, styling, and user experience.' },
-  { icon: '🧪', title: 'Generate tests', action: 'Generate comprehensive unit or integration tests for the project files.' },
-  { icon: '🔧', title: 'Refactor safely', action: 'Refactor the codebase to improve maintainability without breaking existing functionality.' },
+  { icon: '</>', title: 'Explain project', action: 'Read the project files and explain the architecture, structure, and purpose of this codebase.' },
+  { icon: 'BUG', title: 'Find bugs', action: 'Analyze the codebase for potential bugs, edge cases, and logic errors.' },
+  { icon: '+', title: 'Create feature', action: 'Design and implement a new feature for this project. Start by reading the relevant files.' },
+  { icon: 'UI', title: 'Improve UI', action: 'Review the UI components and suggest improvements for layout, styling, and user experience.' },
+  { icon: 'TEST', title: 'Generate tests', action: 'Generate comprehensive unit or integration tests for the project files.' },
+  { icon: 'REF', title: 'Refactor safely', action: 'Refactor the codebase to improve maintainability without breaking existing functionality.' },
 ];
 
 export default function WelcomeScreen({ onHint, fileCount, status, yolo }: WelcomeScreenProps) {
@@ -24,12 +24,12 @@ export default function WelcomeScreen({ onHint, fileCount, status, yolo }: Welco
         <div className="welcome-mascot-body"><span>&gt;_</span></div>
       </div>
       <h1 className="welcome-title">What are we building today?</h1>
-      <p className="welcome-sub">Ask HYSA to inspect files, edit code, run commands, explain bugs, or improve your project safely.</p>
+      <p className="welcome-sub">Ask HYSA to inspect, edit, debug, explain, or improve this project.</p>
 
       {status && (
         <div className="welcome-summary">
-          <div className="welcome-summary-item"><span className="welcome-summary-icon">📁</span> {fileCount ?? 0} files</div>
-          <div className="welcome-summary-item"><span className="welcome-summary-icon">⚡</span> {status.provider} · {status.model}</div>
+          <div className="welcome-summary-item"><span className="ws-icon-files">{fileCount ?? 0}</span> files</div>
+          <div className="welcome-summary-item"><span className="ws-icon-provider">{status.provider}</span></div>
           <div className="welcome-summary-item">
             <span className={`welcome-summary-dot ${yolo ? 'yolo' : 'safe'}`} />
             {yolo ? 'YOLO mode' : 'Safe mode'}
@@ -40,10 +40,9 @@ export default function WelcomeScreen({ onHint, fileCount, status, yolo }: Welco
       <div className="welcome-cards">
         {CARDS.map(c => (
           <div key={c.title} className="welcome-card" onClick={() => onHint(c.action)}>
-            <span className="welcome-card-icon">{c.icon}</span>
+            <span className="welcome-card-icon"><span className={`wc-icon-${c.icon === '</>' ? 'code' : c.icon.toLowerCase()}`}>{c.icon}</span></span>
             <div className="welcome-card-body">
               <span className="welcome-card-title">{c.title}</span>
-              <span className="welcome-card-desc">{c.action}</span>
             </div>
           </div>
         ))}

@@ -58,11 +58,10 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
       )}
       <div className="composer-model-pill">
         <span className="model-tag">
-          {status ? `${status.provider} · ${status.model}` : 'Loading...'}
+          {status ? `${status.provider} / ${status.model}` : 'Loading...'}
         </span>
-        <span className="composer-context-hint">Context: current project files</span>
       </div>
-      <div className={`composer-box${value.trim() ? ' has-text' : ''}`}>
+      <div className={`composer-box${value.trim() ? ' has-text' : ''}${loading ? ' loading' : ''}`}>
         <textarea
           ref={textareaRef}
           className="composer-textarea"
@@ -76,14 +75,12 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
         <div className="composer-bottom">
           {loading ? (
             <div className="composer-loading">
-              <div className="dot-pulse"><span></span><span></span><span></span></div>
-              <span>HYSA is thinking...</span>
               {onCancel && (
                 <button className="thinking-cancel" onClick={onCancel}>Cancel</button>
               )}
             </div>
           ) : (
-            <div className="composer-info">Enter to send · Shift+Enter for newline</div>
+            <div className="composer-info">Enter to send / Shift+Enter for newline</div>
           )}
           <button
             className={`composer-send${value.trim() ? ' has-text' : ''}`}

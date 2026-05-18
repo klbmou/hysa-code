@@ -49,25 +49,27 @@ export default function RightPanel({
 
   return (
     <div className="right-panel">
-      <div className="right-panel-tabs">
-        <div className={`right-panel-tab ${tab === 'code' ? 'active' : ''}`} onClick={() => onTabChange('code')}>Code</div>
-        <div className={`right-panel-tab ${tab === 'diff' ? 'active' : ''}`} onClick={() => onTabChange('diff')}>Diff</div>
-        <div className={`right-panel-tab ${tab === 'terminal' ? 'active' : ''}`} onClick={() => onTabChange('terminal')}>Terminal</div>
-        <button className="right-panel-close" onClick={onClose}>✕</button>
+      <div className="right-panel-header">
+        <div className="right-panel-tabs">
+          <button className={`rp-tab ${tab === 'code' ? 'active' : ''}`} onClick={() => onTabChange('code')}>Code</button>
+          <button className={`rp-tab ${tab === 'diff' ? 'active' : ''}`} onClick={() => onTabChange('diff')}>Diff</button>
+          <button className={`rp-tab ${tab === 'terminal' ? 'active' : ''}`} onClick={() => onTabChange('terminal')}>Terminal</button>
+        </div>
+        <button className="rp-close" onClick={onClose}>x</button>
       </div>
       <div className="right-panel-body">
         {tab === 'code' && (
           selectedFile ? (
             <>
-              <div className="right-panel-file-header">
-                <span className="right-panel-file-path">{selectedFile}</span>
-                <div className="right-panel-file-actions">
-                  {saveMsg && (
-                    <span className={`right-panel-save-msg ${saveMsg.includes('Error') ? 'error' : 'success'}`}>{saveMsg}</span>
-                  )}
-                  <button className="rp-btn rp-btn-copy" onClick={handleCopyFile}>{copied ? '✓' : 'Copy'}</button>
-                  <button className="rp-btn rp-btn-save" onClick={onSave}>Save</button>
-                </div>
+              <div className="rp-file-info">
+                <span className="rp-file-path">{selectedFile}</span>
+              </div>
+              <div className="rp-actions">
+                {saveMsg && (
+                  <span className={`rp-save-msg ${saveMsg.includes('Error') ? 'error' : 'success'}`}>{saveMsg}</span>
+                )}
+                <button className="rp-action-btn" onClick={handleCopyFile}>{copied ? 'Copied' : 'Copy'}</button>
+                <button className="rp-action-btn primary" onClick={onSave}>Save</button>
               </div>
               <div className="right-panel-editor">
                 <Editor
@@ -91,22 +93,24 @@ export default function RightPanel({
             </>
           ) : (
             <div className="right-panel-empty">
-              <span className="right-panel-empty-icon">&gt;_</span>
-              <span>Select a file to inspect or ask HYSA to read the project.</span>
+              <span className="rp-empty-icon">&gt;_</span>
+              <span>Select a file to preview</span>
             </div>
           )
         )}
         {tab === 'diff' && (
           diffContent ? (
-            <div className="right-panel-diff">
-              <div className="right-panel-diff-header">{diffPath || 'Diff'}</div>
-              {diffContent.split('\n').map((line, i) => {
-                let cls = '';
-                if (line.startsWith('+')) cls = 'diff-add';
-                else if (line.startsWith('-')) cls = 'diff-remove';
-                else if (line.startsWith('@@')) cls = 'diff-header';
-                return <div key={i} className={cls}>{line}</div>;
-              })}
+            <div className="rp-diff">
+              <div className="rp-diff-path">{diffPath || 'Diff'}</div>
+              <div className="rp-diff-body">
+                {diffContent.split('\n').map((line, i) => {
+                  let cls = '';
+                  if (line.startsWith('+')) cls = 'diff-add';
+                  else if (line.startsWith('-')) cls = 'diff-remove';
+                  else if (line.startsWith('@@')) cls = 'diff-header';
+                  return <div key={i} className={cls}>{line}</div>;
+                })}
+              </div>
             </div>
           ) : (
             <div className="right-panel-empty">No diff to show</div>
@@ -114,11 +118,11 @@ export default function RightPanel({
         )}
         {tab === 'terminal' && (
           terminalOutput ? (
-            <div className="right-panel-terminal">
+            <div className="rp-terminal">
               <div className={terminalType === 'error' ? 'term-error' : 'term-output'}>{terminalOutput}</div>
             </div>
           ) : (
-            <div className="right-panel-empty">No terminal output yet</div>
+            <div className="right-panel-empty">No terminal output</div>
           )
         )}
       </div>

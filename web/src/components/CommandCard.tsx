@@ -28,7 +28,7 @@ export default function CommandCard({ command, onRun }: CommandCardProps) {
     <div className="command-card">
       <div className="command-card-inner">
         <div className="command-card-header">
-          ⚡ Command
+          <span className="cc-icon-run">&gt;_</span> Command
         </div>
         <pre className="command-card-command">{command}</pre>
         {!result && (
@@ -37,7 +37,7 @@ export default function CommandCard({ command, onRun }: CommandCardProps) {
               {running ? 'Running...' : 'Run'}
             </button>
             <button className="btn-cancel" onClick={() => setResult({ ok: false, msg: 'Command cancelled' })}>
-              Cancel
+              Discard
             </button>
           </div>
         )}

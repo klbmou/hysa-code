@@ -6,9 +6,9 @@ interface ToolEventProps {
 }
 
 const ICONS: Record<string, string> = {
-  read: '</>',
+  read: '>',
   edit: '+/-',
-  done: '✓',
+  done: 'OK',
   run: '->',
   error: '!!',
   fallback: '~>',
@@ -21,7 +21,7 @@ export default function ToolEvent({ type, message }: ToolEventProps) {
         <div className="tool-event-dot" />
         <div className="tool-event-line" />
       </div>
-      <span className="tool-event-icon">{ICONS[type] || '•'}</span>
+      <span className="tool-event-icon">{ICONS[type] || '*'}</span>
       <span className="tool-event-msg">{message}</span>
     </div>
   );
