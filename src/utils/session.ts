@@ -17,6 +17,7 @@ export interface SessionData {
   recentEdits: SessionEdit[];
   lastDirectory: string;
   sessionCount: number;
+  yolo?: boolean;
 }
 
 const MAX_HISTORY = 20;
@@ -79,4 +80,14 @@ export function incrementSessionCount(): number {
   session.lastDirectory = process.cwd();
   saveSession(session);
   return session.sessionCount;
+}
+
+export function getYolo(): boolean {
+  return loadSession().yolo ?? false;
+}
+
+export function setYolo(enabled: boolean): void {
+  const session = loadSession();
+  session.yolo = enabled;
+  saveSession(session);
 }

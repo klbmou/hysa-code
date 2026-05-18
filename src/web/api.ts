@@ -8,6 +8,7 @@ import { getGitInfo } from '../utils/git.js';
 import { createClient, isOnlyGreeting } from '../ai/client.js';
 import type { Message } from '../ai/types.js';
 import { buildSystemPrompt } from '../prompts/system.js';
+import { getYolo, setYolo } from '../utils/session.js';
 import { detectSecrets } from '../utils/secrets.js';
 import { estimateTokens, truncateMessages } from '../context/tokens.js';
 
@@ -163,4 +164,13 @@ export async function runCommand(command: string): Promise<{ stdout: string; std
 export function getFilePreview(path: string, content: string): string | null {
   const fullPath = resolve(workingDir, path);
   return previewEdit(fullPath, content);
+}
+
+export function getYoloStatus(): { enabled: boolean } {
+  return { enabled: getYolo() };
+}
+
+export function setYoloStatus(enabled: boolean): { enabled: boolean } {
+  setYolo(enabled);
+  return { enabled };
 }

@@ -282,6 +282,7 @@ hysa doctor --provider puter
 | `/find <filename>` | Find files by name |
 | `/read <path>` | Read a file directly |
 | `/run <command>` | Execute a shell command (with approval) |
+| `/yolo`             | Toggle YOLO mode (auto-apply edits) |
 | `/exit` | Exit HYSA Code |
 
 ---
@@ -298,6 +299,79 @@ hysa doctor --provider puter
 | **Ignore rules** | Respects `.gitignore` — never reads `node_modules`, `.env`, `.git`, `dist` |
 
 See [SECURITY.md](SECURITY.md) for details.
+
+---
+
+## YOLO Mode
+
+YOLO mode enables a faster workflow by automatically applying edits and running safe commands without confirmation prompts.
+
+### How to enable
+
+```bash
+# CLI flag (start chat with YOLO enabled)
+hysa chat --yolo
+
+# Toggle during chat
+/yolo on
+/yolo off
+/yolo status
+```
+
+### What changes
+
+| Behavior | Normal Mode | YOLO Mode |
+|----------|-------------|-----------|
+| File edits | Show diff, ask "Apply?" | Show diff, apply automatically |
+| Pending edits | Show diff, ask "Apply?" | Show diff, apply automatically |
+| Safe commands | Ask "Run this?" (default Yes) | Run automatically |
+| Caution commands | Ask "Run this?" (default No) | Ask "Run this?" (default Yes) |
+| Dangerous commands | Always ask with warning | Always ask with warning |
+| File backups | Created automatically | Created automatically |
+
+### Safety
+
+YOLO mode still protects you:
+
+- **Backups are always created** before edits (`~/.hysa/backups/`)
+- **Dangerous commands always require approval** (rm -rf, git reset --hard, sudo, etc.)
+- **Protected files are never auto-edited** (.env, package-lock.json, node_modules/, .git/, dist/, build/)
+- **Diff is still shown** before applying — you can see what changed
+- **YOLO mode is session-only** by default — not saved between sessions (use `hysa chat --yolo` or `/yolo on` each session)
+
+### When to use
+
+- **Familiar projects** where you trust the AI's edits
+- **Repetitive tasks** like fixing type errors, adding imports
+- **Quick prototyping and iteration**
+
+### When to avoid
+
+- **Critical production code** — always review edits carefully
+- **Sensitive files** containing secrets or credentials
+- **When you're learning** — reviewing diffs helps understand changes
+- **New codebases** — let the AI prove itself first
+
+### Command classification
+
+Commands are classified into three safety levels:
+
+**Safe** — run automatically in YOLO mode:
+- `npm run build`, `npm run check`
+- `npm test`, `node index.js`
+- `git diff`, `git status`
+- And 30+ other common commands
+
+**Caution** — still require confirmation in YOLO mode:
+- `git push --force`, `git reset`, `git merge`
+- `rm`, `del`
+- `npm uninstall`, `docker rm`
+
+**Dangerous** — always require confirmation:
+- `rm -rf`, `sudo`, `dd`, `format`
+- `git reset --hard`, `git clean`
+- `npm publish`, any command with `--force`
+- `Remove-Item` (PowerShell)
 
 ---
 
@@ -439,7 +513,8 @@ Open http://localhost:8787 in your browser.
   - **Diff** — review file changes before applying (Apply / Reject buttons)
   - **Command** — approve or cancel shell commands proposed by the AI
   - **Activity** — tool call log (reads, edits, commands)
-- **Top bar** — current provider, model, tier, git branch and dirty state
+- **Top bar** — current provider, model, tier, git branch, YOLO toggle
+- **AI Chat** (center) — full AI conversation panel, same provider/model as CLI
 
 ### Safety
 

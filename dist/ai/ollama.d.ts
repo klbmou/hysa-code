@@ -1,0 +1,7 @@
+import type { AIClient } from './types.js';
+export declare function checkOllama(baseUrl: string): Promise<{
+    ok: boolean;
+    message: string;
+}>;
+export declare function createOllamaClient(baseUrl: string, model: string): AIClient;
+//# sourceMappingURL=ollama.d.ts.map

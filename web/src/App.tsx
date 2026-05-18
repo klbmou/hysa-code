@@ -58,6 +58,7 @@ export default function App() {
   const [diffPath, setDiffPath] = useState<string | null>(null);
   const [terminalOutput, setTerminalOutput] = useState<string | null>(null);
   const [terminalType, setTerminalType] = useState<'output' | 'error'>('output');
+  const [yolo, setYolo] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
@@ -80,6 +81,9 @@ export default function App() {
     fetch('/api/project/tree').then(r => r.json()).then(data => {
       setFiles(data.files || []);
       setFileCount(data.fileCount || 0);
+    }).catch(() => {});
+    fetch('/api/yolo').then(r => r.json()).then(data => {
+      if (data && typeof data.enabled === 'boolean') setYolo(data.enabled);
     }).catch(() => {});
   }, []);
 
@@ -184,6 +188,19 @@ export default function App() {
     return msgs;
   }, []);
 
+  // Toggle YOLO mode
+  const toggleYolo = useCallback(async () => {
+    const newVal = !yolo;
+    setYolo(newVal);
+    try {
+      await fetch('/api/yolo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: newVal }),
+      });
+    } catch {}
+  }, [yolo]);
+
   // Send chat message
   const sendMessage = useCallback(async (input: string) => {
     const userItem: ChatItem = { id: nextId(), kind: 'user_msg', content: input };
@@ -263,7 +280,7 @@ export default function App() {
 
   return (
     <div className="app">
-      <TopBar status={status} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(!sidebarOpen)} />
+      <TopBar status={status} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(!sidebarOpen)} yolo={yolo} onToggleYolo={toggleYolo} />
       <div className="app-body">
         <FileTree
           files={files}
@@ -350,7 +367,7 @@ export default function App() {
           />
         )}
       </div>
-      <StatusBar fileCount={fileCount} loading={loading} messageCount={chatItems.length} />
+      <StatusBar fileCount={fileCount} loading={loading} messageCount={chatItems.length} yolo={yolo} />
     </div>
   );
 }

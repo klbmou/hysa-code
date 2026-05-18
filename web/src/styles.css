@@ -115,6 +115,22 @@ body {
   color: var(--warning);
 }
 
+.topbar-yolo {
+  cursor: pointer;
+  transition: all 0.15s;
+  border-color: var(--border);
+}
+
+.topbar-yolo:hover {
+  border-color: var(--text-muted);
+}
+
+.topbar-yolo.yolo-on {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.3);
+  color: var(--warning);
+}
+
 .topbar-toggle {
   margin-left: auto;
   background: var(--bg-surface);
@@ -968,6 +984,11 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.statusbar-item.yolo-indicator {
+  color: var(--warning);
+  font-weight: 600;
 }
 
 /* ── Thinking Indicator ────────────────────────── */

@@ -22,7 +22,7 @@ import { writeFileWithBackup, previewEdit } from './files/writer.js';
 import { Spinner } from './utils/spinner.js';
 import { detectSecrets } from './utils/secrets.js';
 import { getGitInfo, getCommitSuggestion } from './utils/git.js';
-import { addTask, addRecentFile, addEdit, incrementSessionCount } from './utils/session.js';
+import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo } from './utils/session.js';
 import { grepSearch, findFiles } from './utils/searcher.js';
 import { classifyCommand } from './utils/commands.js';
 import type { AgentMode } from './agent/types.js';
@@ -180,7 +180,7 @@ function getCategoryTag(category: ProviderCategory, provider: ProviderType): str
   return color(`${tierLabel.icon}  ${tierLabel.label}`);
 }
 
-function showHeader(config: HysaConfig, gitInfo?: { branch: string | null; hasChanges: boolean }, contextTokens?: number, agentMode?: AgentMode): void {
+function showHeader(config: HysaConfig, gitInfo?: { branch: string | null; hasChanges: boolean }, contextTokens?: number, agentMode?: AgentMode, yolo?: boolean): void {
   const providerLabel = PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider;
   const category = PROVIDER_CATEGORIES[config.currentProvider];
   const categoryTag = getCategoryTag(category, config.currentProvider);
@@ -194,6 +194,10 @@ function showHeader(config: HysaConfig, gitInfo?: { branch: string | null; hasCh
   if (agentMode) {
     const modeTag = MODE_LABELS[agentMode] || agentMode;
     lines.push(pc.bold(pc.magenta(`│  ${pc.dim('Mode:')} ${modeTag.padEnd(43)}│`)));
+  }
+
+  if (yolo) {
+    lines.push(pc.bold(pc.magenta(`│  ${pc.yellow('Mode: ⚡ YOLO').padEnd(47)}│`)));
   }
 
   if (gitInfo?.branch) {
@@ -248,6 +252,7 @@ function showHelp(agentMode?: AgentMode): void {
   console.log(pc.cyan('  /exit              Exit HYSA Code'));
   console.log(pc.cyan('  /apply             Apply the pending edit'));
   console.log(pc.cyan('  /pending           Show pending edit details'));
+  console.log(pc.cyan('  /yolo              Toggle YOLO mode (auto-apply edits)'));
 
   if (agentMode && agentMode !== 'chat') {
     console.log(pc.dim(`\n  Active mode: ${MODE_LABELS[agentMode]}`));
@@ -434,6 +439,7 @@ function runCommandSync(command: string): { stdout: string; stderr: string } {
 
 async function handleToolCall(
   toolCall: ToolCall,
+  yolo = false,
 ): Promise<string> {
   const { type, params } = toolCall;
 
@@ -467,6 +473,12 @@ async function handleToolCall(
       const newContent = params.newContent;
       if (!filePath || !newContent) return 'Error: missing filePath or newContent parameter';
 
+      // YOLO safety: never auto-edit protected files
+      const protectedPatterns = [/(^|\/)\..+/, /package-lock\.json$/, /node_modules\//, /\.git\//, /\/dist\//, /\/build\//];
+      if (yolo && protectedPatterns.some(p => p.test(filePath))) {
+        return `YOLO blocked: ${filePath} is a protected file.`;
+      }
+
       const spinner = new Spinner();
       spinner.start(`✏️  Preparing edit: ${filePath}`);
 
@@ -479,6 +491,14 @@ async function handleToolCall(
       spinner.stop();
       console.log(`\n${pc.yellow('✏️  Proposed edit:')} ${pc.bold(filePath)}`);
       console.log(formatDiff(diff));
+
+      if (yolo) {
+        writeFileWithBackup(filePath, newContent);
+        invalidateCache();
+        console.log(pc.green(`YOLO: Applied edit to ${filePath}\n`));
+        addEdit({ file: filePath, timestamp: new Date().toISOString(), summary: `Edited ${filePath}` });
+        return `Edit applied successfully to ${filePath}`;
+      }
 
       const approved = await confirm({ message: 'Apply this edit?', default: true });
       if (!approved) {
@@ -510,6 +530,17 @@ async function handleToolCall(
           return `Blocked: dangerous command rejected by user: ${command}`;
         }
         console.log(pc.yellow('  Running dangerous command...\n'));
+      } else if (yolo && safety === 'safe') {
+        // YOLO: auto-run safe commands
+        console.log(pc.green('  YOLO: Running safe command...\n'));
+      } else if (yolo && safety === 'caution') {
+        // YOLO: still ask for caution commands
+        console.log(pc.yellow('  ⚡ Caution command detected.'));
+        const approved = await confirm({ message: 'Run this command?', default: true });
+        if (!approved) {
+          console.log(pc.red('✗ Command rejected\n'));
+          return `Command execution rejected by user: ${command}`;
+        }
       } else {
         const approved = await confirm({ message: 'Run this command?', default: safety === 'safe' });
         if (!approved) {
@@ -690,8 +721,9 @@ function detectPendingEdit(aiMsg: string, projectInfo: {
   return null;
 }
 
-async function chatLoop(initialConfig: HysaConfig): Promise<void> {
+async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise<void> {
   let config = initialConfig;
+  let yoloMode = initialYolo;
   let client: AIClient;
   try {
     client = createClient(config);
@@ -727,7 +759,7 @@ async function chatLoop(initialConfig: HysaConfig): Promise<void> {
   let currentTask = getActiveTask();
   let pendingEdit: PendingEdit | null = null;
 
-  showHeader(config, gitInfo, tokenEstimate, currentAgentMode);
+  showHeader(config, gitInfo, tokenEstimate, currentAgentMode, yoloMode);
 
   console.log(pc.dim(`📁 ${projectInfo.type} project (${projectInfo.fileCount} files)`));
   if (gitInfo.branch) {
@@ -815,7 +847,7 @@ async function chatLoop(initialConfig: HysaConfig): Promise<void> {
         currentTask = createTask(`Session in ${mode} mode`, mode);
       }
 
-      showHeader(config, gitInfo, estimateTokens(messages.reduce((sum, m) => sum + m.content, '')), currentAgentMode);
+      showHeader(config, gitInfo, estimateTokens(messages.reduce((sum, m) => sum + m.content, '')), currentAgentMode, yoloMode);
       console.log(pc.green(`✓ Switched to ${MODE_LABELS[mode]} mode\n`));
       continue;
     }
@@ -831,7 +863,7 @@ async function chatLoop(initialConfig: HysaConfig): Promise<void> {
         fileCount: projectInfo.fileCount,
       }, currentAgentMode);
       const newTokenEstimate = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
-      showHeader(config, gitInfo, newTokenEstimate, currentAgentMode);
+      showHeader(config, gitInfo, newTokenEstimate, currentAgentMode, yoloMode);
       console.log(pc.green(`✓ Switched to ${PROVIDER_DEFAULTS[config.currentProvider].label} (${config.currentModel})\n`));
       continue;
     }
@@ -1071,6 +1103,54 @@ async function chatLoop(initialConfig: HysaConfig): Promise<void> {
       continue;
     }
 
+    // ── YOLO mode ──────────────────────────────────
+
+    if (trimmed.toLowerCase() === '/yolo') {
+      yoloMode = !yoloMode;
+      setYolo(yoloMode);
+      if (yoloMode) {
+        console.log(pc.yellow('\n  ⚡ YOLO mode enabled.'));
+        console.log(pc.yellow('  Edits will be applied automatically. Backups are still created.'));
+        console.log(pc.yellow('  Dangerous commands still require confirmation.\n'));
+      } else {
+        console.log(pc.green('  YOLO mode disabled.\n'));
+      }
+      showHeader(config, gitInfo, estimateTokens(messages.reduce((sum, m) => sum + m.content, '')), currentAgentMode, yoloMode);
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/yolo on') {
+      yoloMode = true;
+      setYolo(true);
+      console.log(pc.yellow('\n  ⚡ YOLO mode enabled.'));
+      console.log(pc.yellow('  Edits will be applied automatically. Backups are still created.'));
+      console.log(pc.yellow('  Dangerous commands still require confirmation.\n'));
+      showHeader(config, gitInfo, estimateTokens(messages.reduce((sum, m) => sum + m.content, '')), currentAgentMode, yoloMode);
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/yolo off') {
+      yoloMode = false;
+      setYolo(false);
+      console.log(pc.green('  YOLO mode disabled.\n'));
+      showHeader(config, gitInfo, estimateTokens(messages.reduce((sum, m) => sum + m.content, '')), currentAgentMode, yoloMode);
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/yolo status') {
+      const statusTag = yoloMode ? pc.yellow('ON') : pc.green('OFF');
+      console.log(pc.cyan(`\n  YOLO mode: ${statusTag}`));
+      if (yoloMode) {
+        console.log(pc.dim('  Edits are applied automatically'));
+        console.log(pc.dim('  Safe commands run without confirmation'));
+        console.log(pc.dim('  Dangerous commands still require approval'));
+        console.log(pc.dim('  Backups are still created before edits\n'));
+      } else {
+        console.log(pc.dim('  All edits and commands require approval\n'));
+      }
+      continue;
+    }
+
     if (['/apply', '/doit', '/do it'].includes(trimmed.toLowerCase()) || trimmed.toLowerCase() === '/go ahead') {
       if (!pendingEdit) {
         console.log(pc.yellow('  No pending edit to apply.\n'));
@@ -1083,6 +1163,22 @@ async function chatLoop(initialConfig: HysaConfig): Promise<void> {
         console.log(formatDiff(diff));
       }
       console.log();
+
+      if (yoloMode) {
+        const sp = new Spinner();
+        sp.start('✎ Applying (YOLO)...');
+        try {
+          writeFileWithBackup(pendingEdit.filePath, pendingEdit.content);
+          sp.succeed('Applied');
+          console.log(pc.green(`YOLO: Applied edit to ${relPath}\n`));
+        } catch (err: unknown) {
+          sp.fail('Failed');
+          console.log(pc.red(`  Error: ${(err as Error).message}\n`));
+        }
+        pendingEdit = null;
+        continue;
+      }
+
       const approved = await confirm({ message: 'Apply this edit?', default: true });
       if (!approved) {
         console.log(pc.red('✗ Edit rejected.\n'));
@@ -1113,6 +1209,22 @@ async function chatLoop(initialConfig: HysaConfig): Promise<void> {
         console.log(formatDiff(diff));
       }
       console.log();
+
+      if (yoloMode) {
+        const sp = new Spinner();
+        sp.start('✎ Applying (YOLO)...');
+        try {
+          writeFileWithBackup(pendingEdit.filePath, pendingEdit.content);
+          sp.succeed('Applied');
+          console.log(pc.green(`YOLO: Applied edit to ${relPath}\n`));
+        } catch (err: unknown) {
+          sp.fail('Failed');
+          console.log(pc.red(`  Error: ${(err as Error).message}\n`));
+        }
+        pendingEdit = null;
+        continue;
+      }
+
       const approved = await confirm({ message: 'Apply this edit?', default: true });
       if (!approved) {
         console.log(pc.red('✗ Edit rejected.\n'));
@@ -1332,7 +1444,7 @@ async function chatLoop(initialConfig: HysaConfig): Promise<void> {
       spinner.stop();
       const toolResults: string[] = [];
       for (const toolCall of response.toolCalls) {
-        const result = await handleToolCall(toolCall);
+        const result = await handleToolCall(toolCall, yoloMode);
         toolResults.push(result);
       }
 
@@ -1415,7 +1527,8 @@ export async function start(): Promise<void> {
   program
     .command('chat')
     .description('Start an interactive chat with the AI')
-    .action(async () => {
+    .option('-y, --yolo', 'Enable YOLO mode (auto-apply edits, skip confirmations for safe commands)')
+    .action(async (opts: { yolo?: boolean }) => {
       let config = getSettings();
       if (!config) {
         config = await setupFirstRun();
@@ -1426,7 +1539,8 @@ export async function start(): Promise<void> {
           config = await setupFirstRun();
         }
       }
-      await chatLoop(config);
+      const yolo = opts.yolo ?? getYolo();
+      await chatLoop(config, yolo);
     });
 
   program

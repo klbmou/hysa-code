@@ -5,10 +5,15 @@ const DANGEROUS_PATTERNS: RegExp[] = [
   /^dd\s+/i, /^mkfs/i, /^fdisk\s+/i, /^pvcreate/i,
   /^chmod\s+-?r?\s*777/i,
   /^chown\s+/i,
-  /^:\(\)\{/, // fork bomb
+  /^:\(\)\{/,
   />.*\/dev\/(sda|sdb|sdc|nvme|hd)/,
   /npm.*--force.*install/i,
   /pip.*--force-reinstall/i,
+  /Remove-Item/i,
+  /git\s+reset\s+--hard/i,
+  /git\s+clean/i,
+  /npm\s+publish/i,
+  /--force\b/,
 ];
 
 const SAFE_PATTERNS: RegExp[] = [
@@ -38,7 +43,17 @@ const SAFE_PATTERNS: RegExp[] = [
   /^uname\s+/i, /^hostname\s+/i,
 ];
 
-export type CommandSafety = 'safe' | 'dangerous' | 'unknown';
+const CAUTION_PATTERNS: RegExp[] = [
+  /^git\s+(push\s+--force|reset|rebase|merge|cherry-pick)\b/i,
+  /^rm\s+/i,
+  /^del\s+/i,
+  /^npm\s+(uninstall|remove|prune|audit\s+fix)\b/i,
+  /^docker\s+(rm|rmi|system\s+prune|volume\s+rm)\b/i,
+  /^kill\s+/i,
+  /^taskkill\s+/i,
+];
+
+export type CommandSafety = 'safe' | 'dangerous' | 'caution' | 'unknown';
 
 export function classifyCommand(command: string): CommandSafety {
   for (const pattern of DANGEROUS_PATTERNS) {
@@ -46,6 +61,9 @@ export function classifyCommand(command: string): CommandSafety {
   }
   for (const pattern of SAFE_PATTERNS) {
     if (pattern.test(command)) return 'safe';
+  }
+  for (const pattern of CAUTION_PATTERNS) {
+    if (pattern.test(command)) return 'caution';
   }
   return 'unknown';
 }

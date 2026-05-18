@@ -4,9 +4,11 @@ interface TopBarProps {
   status: { provider: string; model: string; tier: string; git: { branch: string | null; hasChanges: boolean } | null } | null;
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
+  yolo: boolean;
+  onToggleYolo: () => void;
 }
 
-export default function TopBar({ status, sidebarOpen, onToggleSidebar }: TopBarProps) {
+export default function TopBar({ status, sidebarOpen, onToggleSidebar, yolo, onToggleYolo }: TopBarProps) {
   return (
     <div className="topbar">
       <span className="topbar-logo">HYSA</span>
@@ -26,6 +28,13 @@ export default function TopBar({ status, sidebarOpen, onToggleSidebar }: TopBarP
             )}
           </>
         )}
+        <button
+          className={`topbar-pill topbar-yolo ${yolo ? 'yolo-on' : ''}`}
+          onClick={onToggleYolo}
+          title={yolo ? 'YOLO mode: ON - edits applied automatically' : 'YOLO mode: OFF - all edits require approval'}
+        >
+          {yolo ? '⚡ YOLO' : 'YOLO'}
+        </button>
       </div>
       <button className="topbar-toggle" onClick={onToggleSidebar}>
         {sidebarOpen ? 'Hide Files' : 'Files'}
