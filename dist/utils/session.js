@@ -66,4 +66,24 @@ export function setYolo(enabled) {
     session.yolo = enabled;
     saveSession(session);
 }
+export function getProviderHealth() {
+    return loadSession().providerHealth ?? [];
+}
+export function saveProviderHealth(entries) {
+    const session = loadSession();
+    session.providerHealth = entries;
+    saveSession(session);
+}
+export function clearProviderHealth() {
+    const session = loadSession();
+    session.providerHealth = [];
+    saveSession(session);
+}
+export function getLastProviderError() {
+    const entries = getProviderHealth();
+    if (entries.length === 0)
+        return null;
+    const last = entries[entries.length - 1];
+    return `${last.provider}/${last.model}: ${last.reason}`;
+}
 //# sourceMappingURL=session.js.map

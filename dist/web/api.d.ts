@@ -49,5 +49,14 @@ export declare function getYoloStatus(): {
 export declare function setYoloStatus(enabled: boolean): {
     enabled: boolean;
 };
+export declare function getFallbackStatus(): {
+    unhealthy: string[];
+    lastError: {
+        provider: string;
+        model: string;
+        reason: string;
+    } | null;
+    lastFallback: string | null;
+};
 export {};
 //# sourceMappingURL=api.d.ts.map

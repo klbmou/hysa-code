@@ -32,10 +32,11 @@
     "node": ">=18.0.0"
   },
   "files": [
-    "dist/",
-    "web/dist/",
+    "dist/**/*",
+    "web/dist/**/*",
+    "README.md",
     "LICENSE",
-    "README.md"
+    "package.json"
   ],
   "bin": {
     "hysa": "./dist/index.js"

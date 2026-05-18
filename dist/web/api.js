@@ -7,6 +7,7 @@ import { getGitInfo } from '../utils/git.js';
 import { createClient, isOnlyGreeting } from '../ai/client.js';
 import { buildSystemPrompt } from '../prompts/system.js';
 import { getYolo, setYolo } from '../utils/session.js';
+import { toHealthSummary, getLastError, getLastFallbackUsed } from '../ai/model-health.js';
 import { detectSecrets } from '../utils/secrets.js';
 import { truncateMessages } from '../context/tokens.js';
 const workingDir = resolve('.');
@@ -136,5 +137,14 @@ export function getYoloStatus() {
 export function setYoloStatus(enabled) {
     setYolo(enabled);
     return { enabled };
+}
+export function getFallbackStatus() {
+    const summary = toHealthSummary();
+    const lastErr = getLastError();
+    return {
+        unhealthy: summary,
+        lastError: lastErr ? { provider: lastErr.provider, model: lastErr.model, reason: lastErr.reason } : null,
+        lastFallback: getLastFallbackUsed(),
+    };
 }
 //# sourceMappingURL=api.js.map

@@ -7,7 +7,7 @@ export async function startWebServer(port = 8787) {
     const app = express();
     app.use(express.json({ limit: '10mb' }));
     // API routes
-    const { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus } = await import('./api.js');
+    const { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus } = await import('./api.js');
     app.get('/api/status', (_req, res) => {
         res.json(getStatus());
     });
@@ -90,6 +90,9 @@ export async function startWebServer(port = 8787) {
     app.post('/api/yolo', (req, res) => {
         const { enabled } = req.body;
         res.json(setYoloStatus(enabled));
+    });
+    app.get('/api/fallback', (_req, res) => {
+        res.json(getFallbackStatus());
     });
     // Serve static frontend
     const webDist = join(__dirname, '..', '..', 'web', 'dist');

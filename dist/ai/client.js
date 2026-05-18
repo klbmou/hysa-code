@@ -1,4 +1,4 @@
-import { PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_TIERS, FREE_API_PROVIDERS, PREMIUM_API_PROVIDERS, PROVIDER_SIGNUP_URLS, EXPERIMENTAL_BASE_URLS } from '../config/keys.js';
+import { PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_TIERS, PREMIUM_API_PROVIDERS, PROVIDER_SIGNUP_URLS, EXPERIMENTAL_BASE_URLS } from '../config/keys.js';
 import { createAnthropicClient } from './anthropic.js';
 import { createOpenAIClient } from './openai.js';
 import { createGeminiClient } from './gemini.js';
@@ -9,20 +9,182 @@ import { createDeepSeekClient } from './deepseek.js';
 import { createOpenAICompatibleClient } from './openai-compatible.js';
 import { createOpenCodeZenClient } from './opencode-zen.js';
 import { createHysaAIClient } from './hysa-ai.js';
-import { markWeakForTools, markUnhealthy, isUnhealthy, getPreferredModel } from './model-health.js';
+import { markHealth, isUnhealthy, isSkippedForRequest, setLastFallbackUsed, clearRequestSkips } from './model-health.js';
 const CHAT_TIMEOUT_MS = 45000;
 const FALLBACK_ATTEMPT_TIMEOUT_MS = 30000;
 const MAX_TOTAL_TIME_MS = 90000;
 const MAX_FALLBACK_ATTEMPTS = 3;
-const OPENROUTER_FREE_FALLBACK_MODELS = [
-    'qwen/qwen3-coder:free',
-    'deepseek/deepseek-chat:free',
-    'meta-llama/llama-3.1-8b-instruct:free',
-];
+// ── Error Categorization ──────────────────────────────
+export function categorizeError(msg) {
+    const lower = msg.toLowerCase();
+    if (lower.includes('429') || lower.includes('rate limit') || lower.includes('too many requests'))
+        return 'rate_limit';
+    if (lower.includes('quota') || lower.includes('402') || lower.includes('payment'))
+        return 'quota';
+    if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('abort'))
+        return 'timeout';
+    if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed') || lower.includes('network') || lower.includes('enotfound'))
+        return 'network';
+    if (lower.includes('401') || lower.includes('unauthorized') || lower.includes('forbidden') || lower.includes('api key') || lower.includes('invalid'))
+        return 'invalid_key';
+    if (lower.includes('404') || lower.includes('model not found') || lower.includes('not found') || lower.includes('unavailable') || lower.includes('no free') || lower.includes('not supported') || lower.includes('503') || lower.includes('service unavailable') || lower.includes('overloaded') || lower.includes('overload'))
+        return 'model_unavailable';
+    return 'unknown';
+}
+// ── Friendly Error Messages ───────────────────────────
+function friendlyRateLimit(provider) {
+    const label = PROVIDER_DEFAULTS[provider]?.label || provider;
+    const msgs = {
+        groq: `${label} is rate limited. This can happen because of requests-per-minute (RPM), tokens-per-minute (TPM), or daily free-tier quotas on Groq's side. It is not based on your current context token count. Wait a moment and retry, or the system will automatically fallback to another provider.`,
+        gemini: `${label} free tier quota may have been reached. Gemini limits requests to ~60/min with daily quotas. This is a provider-side limit, not related to your context token count. Automatically falling back...`,
+        openrouter: `${label} rate limit hit. Some OpenRouter free models have strict RPM/TPM limits on the provider side. This is separate from your local context tokens. Trying another model or provider...`,
+        deepseek: `${label} is rate limited. DeepSeek free tier has request and token limits on their side. This is not about your context size. Automatically falling back...`,
+        opencode_zen: `${label} free model is rate limited or temporarily unavailable. This is a provider-side limit, not context-token related. Trying another provider...`,
+    };
+    return msgs[provider] || `${label} is rate limited. Provider-side limits (RPM/TPM/daily quota) have been reached. This is not the same as context tokens. Automatically falling back...`;
+}
+function friendlyError(msg, provider) {
+    const lower = msg.toLowerCase();
+    const label = PROVIDER_DEFAULTS[provider]?.label || provider;
+    const cat = categorizeError(msg);
+    if (cat === 'rate_limit')
+        return friendlyRateLimit(provider);
+    if (cat === 'quota') {
+        if (provider === 'openrouter')
+            return `${label} requires credits or a paid plan for this model. Try a free model like qwen/qwen3-coder:free.`;
+        return `${label} quota exceeded. This is a provider-side billing or daily limit, not related to your context tokens.`;
+    }
+    if (cat === 'timeout')
+        return `${label} timed out after ${CHAT_TIMEOUT_MS / 1000}s. The provider may be slow or overloaded. Automatically falling back...`;
+    if (cat === 'network') {
+        if (provider === 'ollama' || provider === 'local_openai')
+            return `${label} is not running. Make sure the local server is started.`;
+        if (provider === 'openrouter')
+            return `Cannot reach ${label}. Check your internet connection or OpenRouter may be down.`;
+        return `Cannot reach ${label}. Check your internet connection.`;
+    }
+    if (cat === 'invalid_key') {
+        if (provider === 'opencode_zen')
+            return `${label} API key is invalid or missing. Get a key from https://opencode.ai/zen`;
+        const url = PROVIDER_SIGNUP_URLS[provider];
+        const keyHint = url ? `\n  Get a key: ${url}` : '';
+        return `${label} API key is invalid or missing.${keyHint}`;
+    }
+    if (cat === 'model_unavailable') {
+        if (provider === 'gemini')
+            return `${label} free tier is temporarily overloaded (503). Provider-side issue, not your context. Trying another provider...`;
+        if (provider === 'openrouter')
+            return `${label} model is temporarily unavailable. Trying another model or provider...`;
+        return `${label} is temporarily unavailable. Trying another provider...`;
+    }
+    return msg;
+}
+function isRetryableError(msg) {
+    const cat = categorizeError(msg);
+    return cat === 'rate_limit' || cat === 'timeout' || cat === 'network' || cat === 'model_unavailable' || cat === 'quota';
+}
+function getFallbackCandidates(current, config) {
+    const tier = PROVIDER_TIERS[current];
+    const candidates = [];
+    const added = new Set();
+    function add(provider, model) {
+        const m = model || PROVIDER_DEFAULTS[provider]?.model || '';
+        if (!m)
+            return;
+        const k = `${provider}:${m}`;
+        if (added.has(k))
+            return;
+        added.add(k);
+        candidates.push({ provider, model: m, label: `${PROVIDER_DEFAULTS[provider]?.label || provider} / ${m}` });
+    }
+    // A. Free API fallback chain
+    if (tier === 'free_api') {
+        add('openrouter', 'qwen/qwen3-coder:free');
+        add('openrouter', 'deepseek/deepseek-chat:free');
+        add('openrouter', 'openai/gpt-oss-120b:free');
+        if (current !== 'gemini')
+            add('gemini');
+        if (current !== 'deepseek')
+            add('deepseek');
+        if (current !== 'opencode_zen')
+            add('opencode_zen');
+        if (current !== 'groq')
+            add('groq');
+        // Experimental only if allowed
+        if (config.allowExperimentalProviders) {
+            add('pollinations');
+        }
+    }
+    // B. Local free fallback
+    if (tier === 'local_free') {
+        add('hysa_ai');
+        add('ollama');
+        add('local_openai');
+        // Fallback to free API if keys exist
+        if (config.apiKeys.openrouter)
+            add('openrouter', 'qwen/qwen3-coder:free');
+        if (config.apiKeys.gemini)
+            add('gemini');
+        if (config.apiKeys.deepseek)
+            add('deepseek');
+        if (config.apiKeys.opencode_zen)
+            add('opencode_zen');
+        if (config.apiKeys.groq)
+            add('groq');
+    }
+    // C. Premium fallback
+    if (tier === 'premium_api') {
+        for (const p of PREMIUM_API_PROVIDERS) {
+            if (p !== current && config.apiKeys[p])
+                add(p);
+        }
+        // Ask by trying free providers silently
+        if (config.apiKeys.openrouter)
+            add('openrouter', 'qwen/qwen3-coder:free');
+        if (config.apiKeys.gemini)
+            add('gemini');
+    }
+    // D. Experimental fallback
+    if (tier === 'experimental_free') {
+        if (config.allowExperimentalProviders) {
+            // Try other experimental providers
+            if (current !== 'pollinations')
+                add('pollinations');
+            if (current !== 'llm7')
+                add('llm7');
+            if (current !== 'puter')
+                add('puter');
+        }
+        // Also try free API if keys exist
+        if (config.apiKeys.openrouter)
+            add('openrouter', 'qwen/qwen3-coder:free');
+        if (config.apiKeys.gemini)
+            add('gemini');
+        if (config.apiKeys.deepseek)
+            add('deepseek');
+        if (config.apiKeys.opencode_zen)
+            add('opencode_zen');
+        if (config.apiKeys.groq)
+            add('groq');
+    }
+    return candidates;
+}
+// ── Provider/Model skip logic ────────────────────────
+function shouldSkipProvider(provider, model) {
+    if (isSkippedForRequest(provider, model))
+        return true;
+    const rec = isUnhealthy(provider, model);
+    if (rec)
+        return true;
+    return false;
+}
+// ── Extract debug info ──────────────────────────────
 function extractDebugInfo(err, provider, model, config, elapsed, timeoutMs, attempt) {
     const lines = [];
+    const cat = categorizeError(err?.message || '');
     lines.push(`  Provider: ${provider}`);
     lines.push(`  Model: ${model}`);
+    lines.push(`  Category: ${cat}`);
     if (elapsed)
         lines.push(`  Elapsed: ${elapsed}s`);
     if (timeoutMs)
@@ -30,16 +192,10 @@ function extractDebugInfo(err, provider, model, config, elapsed, timeoutMs, atte
     if (attempt !== undefined)
         lines.push(`  Attempt: ${attempt}`);
     lines.push(`  API key set: ${config.apiKeys[provider] ? 'yes' : 'no'}`);
-    if (provider === 'openrouter') {
-        lines.push(`  Base URL: https://openrouter.ai/api/v1`);
-    }
-    else if (EXPERIMENTAL_BASE_URLS[provider]) {
-        lines.push(`  Base URL: ${EXPERIMENTAL_BASE_URLS[provider] || 'default'}`);
-    }
     const e = err;
     if (e.status)
         lines.push(`  HTTP Status: ${e.status}`);
-    if (e.response?.status)
+    else if (e.response?.status)
         lines.push(`  HTTP Status: ${e.response.status}`);
     if (e.message) {
         const statusMatch = e.message.match(/(\d{3})/);
@@ -47,86 +203,9 @@ function extractDebugInfo(err, provider, model, config, elapsed, timeoutMs, atte
             lines.push(`  HTTP Status: ${statusMatch[1]}`);
         lines.push(`  Error: ${e.message.slice(0, 500)}`);
     }
-    if (e.response?.data) {
-        const body = typeof e.response.data === 'string' ? e.response.data : JSON.stringify(e.response.data);
-        lines.push(`  Body: ${body.slice(0, 300)}`);
-    }
     return lines.join('\n');
 }
-function friendlyError(msg, provider) {
-    const lower = msg.toLowerCase();
-    if (lower.includes('timed out') || lower.includes('timeout') || lower.includes('abort')) {
-        const label = PROVIDER_DEFAULTS[provider]?.label || provider;
-        return `${label} timed out after ${CHAT_TIMEOUT_MS / 1000}s. Try /model or run hysa doctor.`;
-    }
-    if (lower.includes('429') || lower.includes('too many requests') || lower.includes('rate limit') || lower.includes('quota')) {
-        if (provider === 'gemini')
-            return 'Gemini free tier quota exceeded. Daily limit may have been reached.';
-        if (provider === 'opencode_zen')
-            return 'OpenCode Zen free model is rate limited or temporarily unavailable. Try again or use /model.';
-        if (provider === 'openrouter')
-            return 'OpenRouter rate limit hit. Some free models have strict limits. Try /model and select a different model.';
-        return `${PROVIDER_DEFAULTS[provider]?.label || provider} is rate limited. Try again later or use /model to switch.`;
-    }
-    if (lower.includes('503') || lower.includes('service unavailable') || lower.includes('overloaded') || lower.includes('overload')) {
-        if (provider === 'gemini')
-            return 'Gemini free tier is temporarily overloaded (503). Try again in a moment.';
-        if (provider === 'openrouter')
-            return 'OpenRouter is temporarily overloaded. Try again or use /model to switch.';
-        return `${PROVIDER_DEFAULTS[provider]?.label || provider} is temporarily unavailable. Try again or use /model.`;
-    }
-    if (lower.includes('401') || lower.includes('unauthorized') || lower.includes('forbidden') || lower.includes('api key')) {
-        if (provider === 'opencode_zen')
-            return 'OpenCode Zen requires an API key. Get one from https://opencode.ai/zen';
-        if (provider === 'openrouter') {
-            return `OpenRouter API key is invalid or missing. Get a key: ${PROVIDER_SIGNUP_URLS.openrouter}`;
-        }
-        const url = PROVIDER_SIGNUP_URLS[provider];
-        const keyHint = url ? `\n  Get a key: ${url}` : '';
-        return `${PROVIDER_DEFAULTS[provider]?.label || provider} API key is invalid or missing.${keyHint}`;
-    }
-    if (lower.includes('402')) {
-        if (provider === 'openrouter')
-            return 'OpenRouter requires credits or a paid plan for this model. Try /model and select openrouter/free.';
-    }
-    if (lower.includes('404') || (lower.includes('model not found') || lower.includes('not found') && lower.includes('model')) || lower.includes('model') && lower.includes('unavailable') || lower.includes('no free') || lower.includes('not supported')) {
-        if (provider === 'opencode_zen')
-            return 'This Zen model may no longer be free or available. Try /model to switch models.';
-        if (provider === 'openrouter') {
-            const alt = OPENROUTER_FREE_FALLBACK_MODELS.slice(0, 2).join(' or ');
-            return `This OpenRouter model may be unavailable. Try ${alt}.`;
-        }
-        return `Model not found for ${PROVIDER_DEFAULTS[provider]?.label || provider}. Try a different model with /model.`;
-    }
-    if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed') || lower.includes('network')) {
-        if (provider === 'ollama' || provider === 'local_openai') {
-            return `${PROVIDER_DEFAULTS[provider]?.label || provider} is not running. Make sure the local server is started.`;
-        }
-        if (provider === 'openrouter')
-            return 'Cannot reach OpenRouter. Check your internet connection or try again.';
-        return `Cannot reach ${PROVIDER_DEFAULTS[provider]?.label || provider}. Check your internet connection.`;
-    }
-    if (lower.includes('internal server') || lower.includes('500') || lower.includes('502') || lower.includes('503')) {
-        if (provider === 'openrouter')
-            return 'OpenRouter returned a server error. The provider may be overloaded. Try again later.';
-        return `${PROVIDER_DEFAULTS[provider]?.label || provider} returned an internal server error. Try again later.`;
-    }
-    return msg;
-}
-function isRetryableError(msg) {
-    const lower = msg.toLowerCase();
-    return (lower.includes('429') ||
-        lower.includes('rate limit') ||
-        lower.includes('timeout') ||
-        lower.includes('timed out') ||
-        lower.includes('econnrefused') ||
-        lower.includes('econnreset') ||
-        lower.includes('503') ||
-        lower.includes('service unavailable') ||
-        lower.includes('too many requests') ||
-        lower.includes('overloaded') ||
-        lower.includes('quota'));
-}
+// ── Client creation ──────────────────────────────────
 function tryCreateClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBaseUrl, localOpenAiModel) {
     try {
         return createSingleClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBaseUrl, localOpenAiModel);
@@ -135,7 +214,7 @@ function tryCreateClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBas
         return null;
     }
 }
-function createSingleClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBaseUrl, localOpenAiModel) {
+export function createSingleClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBaseUrl, localOpenAiModel) {
     switch (provider) {
         case 'anthropic': {
             const key = apiKeys.anthropic;
@@ -189,45 +268,8 @@ function createSingleClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAi
             throw new Error(`Unsupported provider: ${provider}`);
     }
 }
-function wrapClient(client, provider) {
-    return {
-        async sendMessage(messages, systemPrompt, signal) {
-            try {
-                return await client.sendMessage(messages, systemPrompt, signal);
-            }
-            catch (err) {
-                const raw = err.message || String(err);
-                throw new Error(friendlyError(raw, provider));
-            }
-        },
-    };
-}
-function getFallbackProviders(current, config) {
-    const tier = PROVIDER_TIERS[current];
-    const fallbacks = [];
-    if (tier === 'free_api') {
-        for (const p of FREE_API_PROVIDERS) {
-            if (p !== current) {
-                const key = config.apiKeys[p];
-                if (key)
-                    fallbacks.push(p);
-            }
-        }
-    }
-    if (tier !== 'premium_api') {
-        for (const p of PREMIUM_API_PROVIDERS) {
-            const key = config.apiKeys[p];
-            if (key)
-                fallbacks.push(p);
-        }
-    }
-    if (tier !== 'local_free') {
-        fallbacks.push('ollama');
-    }
-    return fallbacks;
-}
+// ── Fallback Client ─────────────────────────────────
 function createFallbackClient(primary, config) {
-    const fallbackProviders = getFallbackProviders(primary, config);
     const debug = !!config.debug;
     return {
         async sendMessage(messages, systemPrompt, signal) {
@@ -235,10 +277,21 @@ function createFallbackClient(primary, config) {
             let lastProvider = primary;
             const startTime = Date.now();
             let totalAttempts = 0;
+            const skippedReasons = [];
+            const attemptLog = [];
             const tryProvider = async (provider, model, timeoutMs, attemptLabel) => {
-                const client = tryCreateClient(provider, model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
-                if (!client)
+                if (shouldSkipProvider(provider, model)) {
+                    const reason = isSkippedForRequest(provider, model) ? 'already failed this request' : isUnhealthy(provider, model) ? 'marked unhealthy' : 'unknown';
+                    skippedReasons.push(`  [skip] ${attemptLabel}: ${PROVIDER_DEFAULTS[provider]?.label || provider} / ${model} (${reason})`);
+                    if (debug)
+                        console.log(`  [debug] ${skippedReasons[skippedReasons.length - 1]}`);
                     return null;
+                }
+                const client = tryCreateClient(provider, model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+                if (!client) {
+                    skippedReasons.push(`  [skip] ${attemptLabel}: ${provider} / ${model} (could not create client)`);
+                    return null;
+                }
                 const ac = new AbortController();
                 const timer = setTimeout(() => ac.abort(), timeoutMs);
                 if (signal) {
@@ -258,16 +311,17 @@ function createFallbackClient(primary, config) {
                     try {
                         lastProvider = provider;
                         attemptStart = Date.now();
-                        return await tryOnce();
+                        const result = await tryOnce();
+                        markHealth(provider, model, 'healthy', 'success');
+                        return result;
                     }
                     catch (err) {
                         retries++;
                         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
                         lastError = err;
                         const errMsg = lastError.message || '';
-                        if (errMsg.toLowerCase().includes('timed out') || errMsg.includes('Abort')) {
-                            markUnhealthy(provider, model);
-                        }
+                        const cat = categorizeError(errMsg);
+                        markHealth(provider, model, 'unhealthy', friendlyError(errMsg, provider), cat);
                         if (debug) {
                             console.log(`  [debug] ${attemptLabel} failed (retry ${retries}/${maxRetries}) after ${((Date.now() - attemptStart) / 1000).toFixed(1)}s:`);
                             console.log(extractDebugInfo(err, provider, model, config, elapsed, timeoutMs, totalAttempts));
@@ -296,23 +350,19 @@ function createFallbackClient(primary, config) {
                 return result;
             // Check total time
             if (Date.now() - startTime >= MAX_TOTAL_TIME_MS) {
-                const label = PROVIDER_DEFAULTS[primary]?.label || primary;
-                throw new Error(`${label} is unavailable after ${((Date.now() - startTime) / 1000).toFixed(0)}s. All retries and fallbacks exhausted.\n  Use /model to switch providers manually.`);
+                throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts);
             }
-            // Model-level fallback: try other models on the same provider
+            // Model-level fallback for OpenRouter
             if (primary === 'openrouter') {
                 const triedModels = new Set([primaryModel]);
-                const preferred = getPreferredModel(primary, PROVIDER_MODELS.openrouter);
-                const orderedModels = preferred !== primaryModel
-                    ? [preferred, ...PROVIDER_MODELS.openrouter.filter(m => m !== preferred && m !== primaryModel)]
-                    : PROVIDER_MODELS.openrouter.filter(m => m !== primaryModel);
+                const orderedModels = PROVIDER_MODELS.openrouter.filter(m => m !== primaryModel);
                 for (const altModel of orderedModels) {
                     if (triedModels.has(altModel))
                         continue;
                     triedModels.add(altModel);
                     if (Date.now() - startTime >= MAX_TOTAL_TIME_MS)
                         break;
-                    if (isUnhealthy(primary, altModel)) {
+                    if (shouldSkipProvider(primary, altModel)) {
                         if (debug)
                             console.log(`  [debug] Skipping unhealthy model: ${altModel}`);
                         continue;
@@ -322,65 +372,119 @@ function createFallbackClient(primary, config) {
                     result = await tryProvider(primary, altModel, FALLBACK_ATTEMPT_TIMEOUT_MS, 'Model fallback');
                     if (result) {
                         const errMsg = lastError ? friendlyError(lastError.message, primary) : null;
-                        console.log(`  ⚡ Switched temporarily to ${altModel} because ${errMsg || 'the previous model was unavailable'}.`);
+                        if (errMsg) {
+                            console.log(`  ⚡ ${errMsg}`);
+                            console.log(`  ⚡ Switched to ${altModel} on ${PROVIDER_DEFAULTS[primary]?.label || primary}.`);
+                        }
+                        else {
+                            console.log(`  ⚡ Switched temporarily to ${altModel}.`);
+                        }
+                        setLastFallbackUsed(`${PROVIDER_DEFAULTS[primary]?.label || primary} / ${altModel}`);
                         return result;
                     }
-                    markWeakForTools(primary, altModel);
                 }
             }
             // Check total time
             if (Date.now() - startTime >= MAX_TOTAL_TIME_MS) {
-                const label = PROVIDER_DEFAULTS[primary]?.label || primary;
-                throw new Error(`${label} is unavailable after ${((Date.now() - startTime) / 1000).toFixed(0)}s. All retries and fallbacks exhausted.\n  Use /model to switch providers manually.`);
+                throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts);
             }
-            // Provider-level fallback: try other providers
+            // Provider-level fallback
+            const candidates = getFallbackCandidates(primary, config);
             let fallbackCount = 0;
-            for (const p of fallbackProviders) {
+            const debugCandidateInfo = [];
+            for (const c of candidates) {
                 if (fallbackCount >= MAX_FALLBACK_ATTEMPTS)
                     break;
                 if (Date.now() - startTime >= MAX_TOTAL_TIME_MS)
                     break;
-                const model = PROVIDER_DEFAULTS[p]?.model || 'default';
-                if (debug)
-                    console.log(`  [debug] Provider fallback ${fallbackCount + 1}/${MAX_FALLBACK_ATTEMPTS}: ${p} / ${model}`);
-                const fbResult = await tryProvider(p, model, FALLBACK_ATTEMPT_TIMEOUT_MS, `Fallback ${fallbackCount + 1}`);
+                if (shouldSkipProvider(c.provider, c.model)) {
+                    debugCandidateInfo.push(`  [skip] ${c.label} (unhealthy or already failed)`);
+                    if (debug)
+                        console.log(`  [debug] ${debugCandidateInfo[debugCandidateInfo.length - 1]}`);
+                    continue;
+                }
+                if (debug) {
+                    console.log(`  [debug] Provider fallback ${fallbackCount + 1}/${MAX_FALLBACK_ATTEMPTS}: ${c.label}`);
+                }
+                result = await tryProvider(c.provider, c.model, FALLBACK_ATTEMPT_TIMEOUT_MS, `Fallback ${fallbackCount + 1}`);
                 fallbackCount++;
-                if (fbResult) {
-                    const fbLabel = PROVIDER_DEFAULTS[p]?.label || p;
+                if (result) {
+                    const label = PROVIDER_DEFAULTS[c.provider]?.label || c.provider;
                     const errMsg = lastError ? friendlyError(lastError.message, primary) : null;
                     if (errMsg) {
-                        console.log(`  ⚡ Switched temporarily to ${fbLabel} because ${errMsg}.`);
+                        console.log(`  ⚡ ${errMsg}`);
+                        console.log(`  ⚡ Switched temporarily to ${label} (${c.model}).`);
                     }
                     else {
-                        console.log(`  ⚡ Switched temporarily to ${fbLabel}.`);
+                        console.log(`  ⚡ Switched temporarily to ${label} (${c.model}).`);
                     }
-                    return fbResult;
+                    setLastFallbackUsed(c.label);
+                    if (debug) {
+                        const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                        console.log(`  [debug] Fallback succeeded after ${totalElapsed}s, ${totalAttempts} attempts.`);
+                    }
+                    return result;
+                }
+            }
+            // All fallbacks exhausted
+            if (debug && lastError) {
+                const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                console.log(`  [debug] All providers failed after ${totalElapsed}s, ${totalAttempts} attempts.`);
+                console.log(extractDebugInfo(lastError, lastProvider, lastProvider === primary ? primaryModel : '', config, totalElapsed, CHAT_TIMEOUT_MS, totalAttempts));
+                if (debugCandidateInfo.length > 0) {
+                    console.log(`  [debug] Skipped candidates:`);
+                    for (const si of debugCandidateInfo)
+                        console.log(si);
+                }
+                if (skippedReasons.length > 0) {
+                    console.log(`  [debug] Skipped during retry:`);
+                    for (const sr of skippedReasons)
+                        console.log(sr);
                 }
             }
             const primaryLabel = PROVIDER_DEFAULTS[primary]?.label || primary;
             const errMsg = lastError
                 ? friendlyError(lastError.message, primary)
                 : `${primaryLabel} is unavailable. No fallback providers configured.`;
-            if (debug && lastError) {
-                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                console.log(`  [debug] All providers failed after ${elapsed}s. Last error:`);
-                console.log(extractDebugInfo(lastError, primary, primaryModel, config, elapsed, CHAT_TIMEOUT_MS, totalAttempts));
-            }
-            throw new Error(`${errMsg}\n  Use /model to switch providers manually.`);
+            throw new Error(`${errMsg}\n  All fallback providers failed. Run hysa doctor to check your configuration.`);
         },
     };
 }
+function throwAllFailedError(lastError, primary, primaryModel, startTime, skipped, totalAttempts) {
+    const el = ((Date.now() - startTime) / 1000).toFixed(0);
+    const label = PROVIDER_DEFAULTS[primary]?.label || primary;
+    throw new Error(`${label} is unavailable after ${el}s (${totalAttempts} attempts). All retries and fallbacks exhausted.\n  Run hysa doctor to check your provider configuration.`);
+}
+// ── Greeting guard ──────────────────────────────────
+const GREETINGS = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'السلام', 'صباح', 'مساء', 'مرحبا', 'اهلا'];
+const CASUAL_RESPONSES = {
+    bro: "Yo — what do you want to build or fix?",
+    thanks: "You're welcome! What's next?",
+    ok: "Got it. What do you need help with?",
+    lol: "😄 Let me know what you want to build or fix.",
+};
 export function isOnlyGreeting(text) {
     const trimmed = text.trim().toLowerCase();
-    const greetings = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'السلام', 'صباح', 'مساء', 'مرحبا', 'اهلا'];
-    return greetings.some(g => trimmed === g || trimmed === `${g}!` || trimmed === `${g},` || trimmed.startsWith(g + ' ') && trimmed.split(/\s+/).length <= 3);
+    if (CASUAL_RESPONSES[trimmed])
+        return true;
+    return GREETINGS.some(g => trimmed === g || trimmed === `${g}!` || trimmed === `${g},` || (trimmed.startsWith(g + ' ') && trimmed.split(/\s+/).length <= 3));
+}
+export function getCasualResponse(text) {
+    const trimmed = text.trim().toLowerCase();
+    return CASUAL_RESPONSES[trimmed] || null;
 }
 function applyGreetingGuard(client) {
     return {
         async sendMessage(messages, systemPrompt, signal) {
-            const result = await client.sendMessage(messages, systemPrompt, signal);
             const lastUser = [...messages].reverse().find(m => m.role === 'user');
-            if (lastUser && isOnlyGreeting(lastUser.content)) {
+            if (lastUser) {
+                const casual = getCasualResponse(lastUser.content);
+                if (casual)
+                    return { message: casual, toolCalls: [] };
+            }
+            const result = await client.sendMessage(messages, systemPrompt, signal);
+            const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
+            if (lastUserMsg && isOnlyGreeting(lastUserMsg.content)) {
                 const hasReadFile = result.toolCalls?.some(tc => tc.type === 'read_file');
                 if (hasReadFile) {
                     return { message: 'Hi! How can I help with this project?', toolCalls: [] };
@@ -390,9 +494,11 @@ function applyGreetingGuard(client) {
         },
     };
 }
+// ── Public API ──────────────────────────────────────
 export function createClient(config, signal) {
     const { currentProvider: provider } = config;
     const tier = PROVIDER_TIERS[provider];
+    clearRequestSkips();
     if (tier === 'free_api' || tier === 'premium_api') {
         return applyGreetingGuard(createFallbackClient(provider, config));
     }
@@ -402,7 +508,21 @@ export function createClient(config, signal) {
             return client.sendMessage(messages, systemPrompt, signal);
         },
     };
-    const finalClient = tier === 'experimental_free' ? wrapClient(wrapped, provider) : wrapped;
-    return applyGreetingGuard(finalClient);
+    const finalClient = tier === 'experimental_free' ? wrapClient(wrapped, config.currentProvider) : wrapped;
+    // For local providers, still wrap in fallback for resilience
+    return applyGreetingGuard(createFallbackClient(provider, config));
+}
+function wrapClient(client, provider) {
+    return {
+        async sendMessage(messages, systemPrompt, signal) {
+            try {
+                return await client.sendMessage(messages, systemPrompt, signal);
+            }
+            catch (err) {
+                const raw = err.message || String(err);
+                throw new Error(friendlyError(raw, provider));
+            }
+        },
+    };
 }
 //# sourceMappingURL=client.js.map
