@@ -1,10 +1,7 @@
 src/
+web/src/
+web/node_modules/
 node_modules/
-tsconfig.json
-*.ts
-.gitignore
-.npmignore
-.github/
-CHANGELOG.md
-CONTRIBUTING.md
-SECURITY.md
+*.tgz
+stdout.txt
+stderr.txt

@@ -32,9 +32,9 @@
     "node": ">=18.0.0"
   },
   "files": [
-    "bin/**/*",
-    "dist/**/*",
-    "web/dist/**/*",
+    "bin/",
+    "dist/",
+    "web/dist/",
     "README.md",
     "LICENSE",
     "package.json"
