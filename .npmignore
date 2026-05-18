@@ -1,0 +1,10 @@
+src/
+node_modules/
+tsconfig.json
+*.ts
+.gitignore
+.npmignore
+.github/
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md

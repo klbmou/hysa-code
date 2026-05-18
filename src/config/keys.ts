@@ -1,0 +1,260 @@
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+import type { AgentMode } from '../agent/types.js';
+
+const CONFIG_DIR = join(homedir(), '.hysa');
+const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
+
+export type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'openrouter' | 'groq' | 'deepseek' | 'local_openai' | 'opencode_zen' | 'pollinations' | 'llm7' | 'puter';
+
+export type ProviderCategory = 'local_free' | 'cloud_free' | 'premium_api' | 'experimental_free';
+
+export interface HysaConfig {
+  currentProvider: ProviderType;
+  currentModel: string;
+  apiKeys: {
+    anthropic?: string;
+    openai?: string;
+    gemini?: string;
+    openrouter?: string;
+    groq?: string;
+    deepseek?: string;
+    opencode_zen?: string;
+    pollinations?: string;
+    llm7?: string;
+    puter?: string;
+  };
+  ollamaBaseUrl: string;
+  localOpenAiBaseUrl?: string;
+  localOpenAiModel?: string;
+  allowExperimentalProviders?: boolean;
+  experimentalConfirmed?: boolean;
+  agentMode?: AgentMode;
+  debug?: boolean;
+}
+
+export const PROVIDER_CATEGORIES: Record<ProviderType, ProviderCategory> = {
+  anthropic: 'premium_api',
+  openai: 'premium_api',
+  gemini: 'cloud_free',
+  ollama: 'local_free',
+  openrouter: 'cloud_free',
+  groq: 'cloud_free',
+  deepseek: 'cloud_free',
+  local_openai: 'local_free',
+  opencode_zen: 'cloud_free',
+  pollinations: 'experimental_free',
+  llm7: 'experimental_free',
+  puter: 'experimental_free',
+};
+
+export const PROVIDER_CATEGORY_LABELS: Record<ProviderCategory, string> = {
+  local_free: 'LOCAL FREE',
+  cloud_free: 'FREE API KEY',
+  premium_api: 'PREMIUM API',
+  experimental_free: 'EXPERIMENTAL FREE',
+};
+
+export const PROVIDER_DEFAULTS: Record<ProviderType, { model: string; label: string }> = {
+  anthropic: { model: 'claude-sonnet-4-20250514', label: 'Anthropic Claude' },
+  openai: { model: 'gpt-4o', label: 'OpenAI GPT' },
+  gemini: { model: 'gemini-2.5-flash', label: 'Google Gemini' },
+  ollama: { model: 'qwen2.5-coder', label: 'Ollama' },
+  openrouter: { model: 'qwen/qwen3-coder:free', label: 'OpenRouter' },
+  groq: { model: 'llama3-70b-8192', label: 'Groq' },
+  deepseek: { model: 'deepseek-chat', label: 'DeepSeek' },
+  local_openai: { model: 'local-model', label: 'LM Studio / Local OpenAI' },
+  opencode_zen: { model: 'big-pickle', label: 'OpenCode Zen' },
+  pollinations: { model: 'openai', label: 'Pollinations AI' },
+  llm7: { model: 'qwen2.5-coder-32b-instruct', label: 'LLM7' },
+  puter: { model: 'gpt-4o-mini', label: 'Puter AI' },
+};
+
+export const PROVIDER_MODELS: Record<ProviderType, string[]> = {
+  anthropic: ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],
+  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'],
+  gemini: ['gemini-2.5-flash', 'gemini-1.5-flash'],
+  ollama: ['qwen2.5-coder', 'llama3.1', 'deepseek-coder', 'codellama'],
+  openrouter: [
+    'qwen/qwen3-coder:free',
+    'deepseek/deepseek-chat:free',
+    'deepseek/deepseek-chat',
+    'openai/gpt-oss-120b:free',
+    'nvidia/nemotron-nano-12b-v2-vl:free',
+    'z-ai/glm-4.5-air:free',
+    'meta-llama/llama-3.1-8b-instruct:free',
+    'openrouter/free',
+    'qwen/qwen-2.5-coder-32b-instruct',
+  ],
+  groq: ['llama3-70b-8192', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
+  deepseek: ['deepseek-chat', 'deepseek-coder'],
+  local_openai: ['local-model'],
+  opencode_zen: [
+    'big-pickle',
+    'minimax-m2.5-free',
+    'nemotron-3-super-free',
+    'mimo-v2-pro-free',
+    'mimo-v2-omni-free',
+    'glm-4.7-free',
+    'kimi-k2.5-free',
+  ],
+  pollinations: ['openai', 'openai-fast', 'qwen-coder', 'deepseek-v3', 'gemini-2.5-flash-lite'],
+  llm7: ['qwen2.5-coder-32b-instruct', 'gpt-4o-mini-2024-07-18', 'deepseek-r1-0528'],
+  puter: ['gpt-4o-mini'],
+};
+
+export type ProviderTier = 'free_api' | 'local_free' | 'premium_api' | 'experimental_free';
+
+export const PROVIDER_TIERS: Record<ProviderType, ProviderTier> = {
+  anthropic: 'premium_api',
+  openai: 'premium_api',
+  gemini: 'free_api',
+  ollama: 'local_free',
+  openrouter: 'free_api',
+  groq: 'free_api',
+  deepseek: 'free_api',
+  local_openai: 'local_free',
+  opencode_zen: 'free_api',
+  pollinations: 'experimental_free',
+  llm7: 'experimental_free',
+  puter: 'experimental_free',
+};
+
+export const TIER_LABELS: Record<ProviderTier, { icon: string; label: string }> = {
+  free_api: { icon: '☁️', label: 'FREE API KEY' },
+  local_free: { icon: '🖥️', label: 'LOCAL FREE' },
+  premium_api: { icon: '🔑', label: 'PREMIUM API' },
+  experimental_free: { icon: '🧪', label: 'EXPERIMENTAL FREE' },
+};
+
+export const PROVIDER_DESCRIPTIONS: Record<ProviderType, string> = {
+  anthropic: 'Best for complex coding tasks. Paid, usage-based.',
+  openai: 'Fast and versatile. Paid, usage-based.',
+  gemini: "Google's latest. Free tier available (60 req/min quotas). Paid tier also available.",
+  ollama: 'Run models locally. Free, no internet needed. Requires download.',
+  local_openai: 'LM Studio / Jan / llama.cpp. OpenAI-compatible local server. No API key.',
+  openrouter: 'Gateway to many free + paid models. Requires free API key, no credit card.',
+  groq: 'Fast inference on open models. Requires free API key, no credit card.',
+  deepseek: 'Strong coding models. Requires free API key, no credit card.',
+  opencode_zen: 'Curated free/open models via OpenCode Zen. Some free for limited time. Requires API key.',
+  pollinations: '🧪 Experimental: Free text generation. No API key required by default. May log prompts, rate-limit, or disappear.',
+  llm7: '🧪 Experimental: Free OpenAI-compatible endpoint. API key optional. Not guaranteed stable.',
+  puter: '🧪 Experimental: Web-based AI. May require browser/session. Not suitable for CLI automation.',
+};
+
+export const PROVIDER_SIGNUP_URLS: Record<ProviderType, string> = {
+  anthropic: 'https://console.anthropic.com',
+  openai: 'https://platform.openai.com/api-keys',
+  gemini: 'https://aistudio.google.com/apikey',
+  ollama: 'https://ollama.com',
+  local_openai: 'https://lmstudio.ai',
+  openrouter: 'https://openrouter.ai/keys',
+  groq: 'https://console.groq.com',
+  deepseek: 'https://platform.deepseek.com',
+  opencode_zen: 'https://opencode.ai/zen',
+  pollinations: 'https://pollinations.ai',
+  llm7: '',
+  puter: 'https://puter.com',
+};
+
+export const FREE_API_PROVIDERS: ProviderType[] = ['opencode_zen', 'openrouter', 'groq', 'gemini', 'deepseek'];
+
+export const PREMIUM_API_PROVIDERS: ProviderType[] = ['anthropic', 'openai'];
+
+export const LOCAL_FREE_PROVIDERS: ProviderType[] = ['ollama', 'local_openai'];
+
+export const CLOUD_FREE_PROVIDERS: ProviderType[] = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini'];
+
+export const EXPERIMENTAL_FREE_PROVIDERS: ProviderType[] = ['pollinations', 'llm7', 'puter'];
+
+export const EXPERIMENTAL_BASE_URLS: Partial<Record<ProviderType, string>> = {
+  pollinations: 'https://text.pollinations.ai/v1',
+  llm7: '',
+  puter: '',
+};
+
+export function providerNeedsApiKey(provider: ProviderType): boolean {
+  return !providerHasOptionalApiKey(provider) && !isLocalProvider(provider);
+}
+
+export function providerHasOptionalApiKey(provider: ProviderType): boolean {
+  return provider === 'llm7' || provider === 'pollinations' || provider === 'puter';
+}
+
+function isLocalProvider(provider: ProviderType): boolean {
+  return provider === 'ollama' || provider === 'local_openai';
+}
+
+export function providerRequiresKey(provider: ProviderType): boolean {
+  return providerNeedsApiKey(provider) && !isLocalProvider(provider);
+}
+
+function ensureConfigDir(): void {
+  if (!existsSync(CONFIG_DIR)) {
+    mkdirSync(CONFIG_DIR, { recursive: true });
+  }
+}
+
+export function loadConfig(): HysaConfig | null {
+  try {
+    if (!existsSync(CONFIG_PATH)) return null;
+    const data = readFileSync(CONFIG_PATH, 'utf-8');
+    const parsed = JSON.parse(data);
+
+    // Migrate from v0.1 format: { provider, model, apiKey }
+    if (parsed.provider && !parsed.currentProvider) {
+      const migrated: HysaConfig = {
+        currentProvider: parsed.provider,
+        currentModel: parsed.model || PROVIDER_DEFAULTS[parsed.provider as ProviderType]?.model || 'claude-sonnet-4-20250514',
+        apiKeys: {},
+        ollamaBaseUrl: 'http://localhost:11434',
+      };
+      if (parsed.apiKey) {
+        (migrated.apiKeys as Record<string, string | undefined>)[parsed.provider as string] = parsed.apiKey;
+      }
+      saveConfig(migrated);
+      return migrated;
+    }
+
+    return parsed as HysaConfig;
+  } catch {
+    return null;
+  }
+}
+
+export function normalizeApiKey(key: string): string {
+  return key.trim().replace(/^Bearer\s+/i, '');
+}
+
+export function validateApiKey(key: string, provider?: ProviderType): { valid: boolean; key: string; error?: string } {
+  const cleaned = normalizeApiKey(key);
+
+  if (!cleaned) {
+    // Empty key is valid for optional/keyless providers
+    if (provider && (providerHasOptionalApiKey(provider) || isLocalProvider(provider))) {
+      return { valid: true, key: '' };
+    }
+    return { valid: false, key: '', error: 'Invalid API key format. Paste the key only, without spaces or extra text.' };
+  }
+
+  // Check for non-ASCII characters
+  for (let i = 0; i < cleaned.length; i++) {
+    if (cleaned.charCodeAt(i) > 127) {
+      return { valid: false, key: cleaned, error: 'Invalid API key format. Paste the key only, without spaces or extra text.' };
+    }
+  }
+
+  // OpenRouter-specific validation
+  if (provider === 'openrouter' && !cleaned.startsWith('sk-or-')) {
+    return { valid: false, key: cleaned, error: 'OpenRouter keys usually start with sk-or-v1-... Check your key and paste it again.' };
+  }
+
+  return { valid: true, key: cleaned };
+}
+
+export function saveConfig(config: HysaConfig): void {
+  ensureConfigDir();
+  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
+}

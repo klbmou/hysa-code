@@ -1,0 +1,23 @@
+import React from 'react';
+
+interface ToolEventProps {
+  type: 'read' | 'edit' | 'done' | 'run' | 'error';
+  message: string;
+}
+
+const ICONS: Record<string, string> = {
+  read: '📖',
+  edit: '✏️',
+  done: '✅',
+  run: '⚡',
+  error: '❌',
+};
+
+export default function ToolEvent({ type, message }: ToolEventProps) {
+  return (
+    <div className={`tool-event ${type}`}>
+      <span className="tool-event-icon">{ICONS[type] || '•'}</span>
+      <span>{message}</span>
+    </div>
+  );
+}

@@ -1,0 +1,82 @@
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+const SESSION_DIR = join(homedir(), '.hysa');
+const SESSION_PATH = join(SESSION_DIR, 'session.json');
+
+export interface SessionEdit {
+  file: string;
+  timestamp: string;
+  summary: string;
+}
+
+export interface SessionData {
+  recentTasks: string[];
+  recentFiles: string[];
+  recentEdits: SessionEdit[];
+  lastDirectory: string;
+  sessionCount: number;
+}
+
+const MAX_HISTORY = 20;
+
+function ensureDir(): void {
+  if (!existsSync(SESSION_DIR)) {
+    mkdirSync(SESSION_DIR, { recursive: true });
+  }
+}
+
+export function loadSession(): SessionData {
+  try {
+    if (!existsSync(SESSION_PATH)) {
+      return { recentTasks: [], recentFiles: [], recentEdits: [], lastDirectory: '', sessionCount: 0 };
+    }
+    const data = readFileSync(SESSION_PATH, 'utf-8');
+    return JSON.parse(data) as SessionData;
+  } catch {
+    return { recentTasks: [], recentFiles: [], recentEdits: [], lastDirectory: '', sessionCount: 0 };
+  }
+}
+
+export function saveSession(session: SessionData): void {
+  ensureDir();
+  writeFileSync(SESSION_PATH, JSON.stringify(session, null, 2), 'utf-8');
+}
+
+export function addTask(task: string): void {
+  const session = loadSession();
+  session.recentTasks = session.recentTasks.filter(t => t !== task);
+  session.recentTasks.unshift(task);
+  if (session.recentTasks.length > MAX_HISTORY) {
+    session.recentTasks = session.recentTasks.slice(0, MAX_HISTORY);
+  }
+  saveSession(session);
+}
+
+export function addRecentFile(file: string): void {
+  const session = loadSession();
+  session.recentFiles = session.recentFiles.filter(f => f !== file);
+  session.recentFiles.unshift(file);
+  if (session.recentFiles.length > MAX_HISTORY) {
+    session.recentFiles = session.recentFiles.slice(0, MAX_HISTORY);
+  }
+  saveSession(session);
+}
+
+export function addEdit(edit: SessionEdit): void {
+  const session = loadSession();
+  session.recentEdits.unshift(edit);
+  if (session.recentEdits.length > MAX_HISTORY) {
+    session.recentEdits = session.recentEdits.slice(0, MAX_HISTORY);
+  }
+  saveSession(session);
+}
+
+export function incrementSessionCount(): number {
+  const session = loadSession();
+  session.sessionCount++;
+  session.lastDirectory = process.cwd();
+  saveSession(session);
+  return session.sessionCount;
+}
