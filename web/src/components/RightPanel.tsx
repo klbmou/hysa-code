@@ -37,18 +37,22 @@ export default function RightPanel({
   diffContent, diffPath,
   terminalOutput, terminalType,
 }: RightPanelProps) {
+  const [copied, setCopied] = React.useState(false);
+
+  const handleCopyFile = () => {
+    if (!fileContent) return;
+    navigator.clipboard.writeText(fileContent).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  };
+
   return (
     <div className="right-panel">
       <div className="right-panel-tabs">
-        <div className={`right-panel-tab ${tab === 'code' ? 'active' : ''}`} onClick={() => onTabChange('code')}>
-          Code
-        </div>
-        <div className={`right-panel-tab ${tab === 'diff' ? 'active' : ''}`} onClick={() => onTabChange('diff')}>
-          Diff
-        </div>
-        <div className={`right-panel-tab ${tab === 'terminal' ? 'active' : ''}`} onClick={() => onTabChange('terminal')}>
-          Terminal
-        </div>
+        <div className={`right-panel-tab ${tab === 'code' ? 'active' : ''}`} onClick={() => onTabChange('code')}>Code</div>
+        <div className={`right-panel-tab ${tab === 'diff' ? 'active' : ''}`} onClick={() => onTabChange('diff')}>Diff</div>
+        <div className={`right-panel-tab ${tab === 'terminal' ? 'active' : ''}`} onClick={() => onTabChange('terminal')}>Terminal</div>
         <button className="right-panel-close" onClick={onClose}>✕</button>
       </div>
       <div className="right-panel-body">
@@ -56,14 +60,13 @@ export default function RightPanel({
           selectedFile ? (
             <>
               <div className="right-panel-file-header">
-                <span>{selectedFile}</span>
-                <div>
+                <span className="right-panel-file-path">{selectedFile}</span>
+                <div className="right-panel-file-actions">
                   {saveMsg && (
-                    <span style={{ marginRight: 8, fontSize: 11, color: saveMsg.includes('Error') ? '#ef4444' : '#22c55e' }}>
-                      {saveMsg}
-                    </span>
+                    <span className={`right-panel-save-msg ${saveMsg.includes('Error') ? 'error' : 'success'}`}>{saveMsg}</span>
                   )}
-                  <button onClick={onSave}>Save</button>
+                  <button className="rp-btn rp-btn-copy" onClick={handleCopyFile}>{copied ? '✓' : 'Copy'}</button>
+                  <button className="rp-btn rp-btn-save" onClick={onSave}>Save</button>
                 </div>
               </div>
               <div className="right-panel-editor">
@@ -87,15 +90,16 @@ export default function RightPanel({
               </div>
             </>
           ) : (
-            <div className="right-panel-empty">Select a file to view its contents</div>
+            <div className="right-panel-empty">
+              <span className="right-panel-empty-icon">&gt;_</span>
+              <span>Select a file to inspect or ask HYSA to read the project.</span>
+            </div>
           )
         )}
         {tab === 'diff' && (
           diffContent ? (
             <div className="right-panel-diff">
-              <div style={{ fontWeight: 600, color: '#a855f7', marginBottom: 8 }}>
-                {diffPath || 'Diff'}
-              </div>
+              <div className="right-panel-diff-header">{diffPath || 'Diff'}</div>
               {diffContent.split('\n').map((line, i) => {
                 let cls = '';
                 if (line.startsWith('+')) cls = 'diff-add';
@@ -111,9 +115,7 @@ export default function RightPanel({
         {tab === 'terminal' && (
           terminalOutput ? (
             <div className="right-panel-terminal">
-              <div className={terminalType === 'error' ? 'term-error' : 'term-output'}>
-                {terminalOutput}
-              </div>
+              <div className={terminalType === 'error' ? 'term-error' : 'term-output'}>{terminalOutput}</div>
             </div>
           ) : (
             <div className="right-panel-empty">No terminal output yet</div>

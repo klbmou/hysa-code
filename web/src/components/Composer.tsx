@@ -4,9 +4,19 @@ interface ComposerProps {
   onSend: (msg: string) => void;
   loading: boolean;
   status: { provider: string; model: string } | null;
+  onCancel?: () => void;
 }
 
-export default function Composer({ onSend, loading, status }: ComposerProps) {
+const QUICK_ACTIONS = [
+  { label: 'Read files', action: 'Read the project files and explain the structure' },
+  { label: 'Fix bug', action: 'Find and fix bugs in the codebase' },
+  { label: 'Generate tests', action: 'Generate unit tests for the codebase' },
+  { label: 'Improve UI', action: 'Review and improve the UI components' },
+  { label: 'Refactor', action: 'Refactor the codebase for better maintainability' },
+  { label: 'Run check', action: 'Run the project check command and report results' },
+];
+
+export default function Composer({ onSend, loading, status, onCancel }: ComposerProps) {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -30,14 +40,29 @@ export default function Composer({ onSend, loading, status }: ComposerProps) {
     }
   };
 
+  const handleQuickAction = (action: string) => {
+    setValue(action);
+    if (textareaRef.current) textareaRef.current.focus();
+  };
+
   return (
     <div className="composer-wrapper">
+      {!loading && (
+        <div className="composer-actions">
+          {QUICK_ACTIONS.map(qa => (
+            <button key={qa.label} className="composer-action-btn" onClick={() => handleQuickAction(qa.action)}>
+              {qa.label}
+            </button>
+          ))}
+        </div>
+      )}
       <div className="composer-model-pill">
         <span className="model-tag">
           {status ? `${status.provider} · ${status.model}` : 'Loading...'}
         </span>
+        <span className="composer-context-hint">Context: current project files</span>
       </div>
-      <div className="composer-box">
+      <div className={`composer-box${value.trim() ? ' has-text' : ''}`}>
         <textarea
           ref={textareaRef}
           className="composer-textarea"
@@ -51,15 +76,20 @@ export default function Composer({ onSend, loading, status }: ComposerProps) {
         <div className="composer-bottom">
           {loading ? (
             <div className="composer-loading">
-              <div className="dot-pulse">
-                <span></span><span></span><span></span>
-              </div>
-              Thinking...
+              <div className="dot-pulse"><span></span><span></span><span></span></div>
+              <span>HYSA is thinking...</span>
+              {onCancel && (
+                <button className="thinking-cancel" onClick={onCancel}>Cancel</button>
+              )}
             </div>
           ) : (
-            <div className="composer-info">Enter to send · Shift+Enter for new line</div>
+            <div className="composer-info">Enter to send · Shift+Enter for newline</div>
           )}
-          <button className="composer-send" onClick={handleSend} disabled={loading || !value.trim()}>
+          <button
+            className={`composer-send${value.trim() ? ' has-text' : ''}`}
+            onClick={handleSend}
+            disabled={loading || !value.trim()}
+          >
             Send
           </button>
         </div>

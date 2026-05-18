@@ -6,19 +6,23 @@ interface ToolEventProps {
 }
 
 const ICONS: Record<string, string> = {
-  read: '📖',
-  edit: '✏️',
-  done: '✅',
-  run: '⚡',
-  error: '❌',
-  fallback: '🔄',
+  read: '</>',
+  edit: '+/-',
+  done: '✓',
+  run: '->',
+  error: '!!',
+  fallback: '~>',
 };
 
 export default function ToolEvent({ type, message }: ToolEventProps) {
   return (
     <div className={`tool-event ${type}`}>
+      <div className="tool-event-track">
+        <div className="tool-event-dot" />
+        <div className="tool-event-line" />
+      </div>
       <span className="tool-event-icon">{ICONS[type] || '•'}</span>
-      <span>{message}</span>
+      <span className="tool-event-msg">{message}</span>
     </div>
   );
 }
