@@ -15,5 +15,4 @@ if (!fs.existsSync(distPath)) {
   process.exit(1);
 }
 
-const { start } = await import(pathToFileURL(distPath).href);
-await start();
+await import(pathToFileURL(distPath).href);
