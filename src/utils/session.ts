@@ -11,6 +11,15 @@ export interface SessionEdit {
   summary: string;
 }
 
+export interface ProviderHealthEntry {
+  provider: string;
+  model: string;
+  reason: string;
+  category: string;
+  timestamp: number;
+  failedCount: number;
+}
+
 export interface SessionData {
   recentTasks: string[];
   recentFiles: string[];
@@ -18,6 +27,7 @@ export interface SessionData {
   lastDirectory: string;
   sessionCount: number;
   yolo?: boolean;
+  providerHealth?: ProviderHealthEntry[];
 }
 
 const MAX_HISTORY = 20;
@@ -90,4 +100,27 @@ export function setYolo(enabled: boolean): void {
   const session = loadSession();
   session.yolo = enabled;
   saveSession(session);
+}
+
+export function getProviderHealth(): ProviderHealthEntry[] {
+  return loadSession().providerHealth ?? [];
+}
+
+export function saveProviderHealth(entries: ProviderHealthEntry[]): void {
+  const session = loadSession();
+  session.providerHealth = entries;
+  saveSession(session);
+}
+
+export function clearProviderHealth(): void {
+  const session = loadSession();
+  session.providerHealth = [];
+  saveSession(session);
+}
+
+export function getLastProviderError(): string | null {
+  const entries = getProviderHealth();
+  if (entries.length === 0) return null;
+  const last = entries[entries.length - 1];
+  return `${last.provider}/${last.model}: ${last.reason}`;
 }

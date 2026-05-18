@@ -28,7 +28,7 @@ type ChatItem = {
 } & (
   | { kind: 'user_msg'; content: string }
   | { kind: 'ai_msg'; content: string }
-  | { kind: 'tool_event'; eventType: 'read' | 'edit' | 'done' | 'run' | 'error'; message: string }
+  | { kind: 'tool_event'; eventType: 'read' | 'edit' | 'done' | 'run' | 'error' | 'fallback'; message: string }
   | { kind: 'diff_card'; filePath: string; content: string; diff: string }
   | { kind: 'command_card'; command: string }
 );

@@ -1,7 +1,7 @@
 import React from 'react';
 
 interface ToolEventProps {
-  type: 'read' | 'edit' | 'done' | 'run' | 'error';
+  type: 'read' | 'edit' | 'done' | 'run' | 'error' | 'fallback';
   message: string;
 }
 
@@ -11,6 +11,7 @@ const ICONS: Record<string, string> = {
   done: '✅',
   run: '⚡',
   error: '❌',
+  fallback: '🔄',
 };
 
 export default function ToolEvent({ type, message }: ToolEventProps) {

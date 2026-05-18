@@ -8,7 +8,8 @@ import { getGitInfo } from '../utils/git.js';
 import { createClient, isOnlyGreeting } from '../ai/client.js';
 import type { Message } from '../ai/types.js';
 import { buildSystemPrompt } from '../prompts/system.js';
-import { getYolo, setYolo } from '../utils/session.js';
+import { getYolo, setYolo, getProviderHealth } from '../utils/session.js';
+import { toHealthSummary, getLastError, getLastFallbackUsed } from '../ai/model-health.js';
 import { detectSecrets } from '../utils/secrets.js';
 import { estimateTokens, truncateMessages } from '../context/tokens.js';
 
@@ -173,4 +174,14 @@ export function getYoloStatus(): { enabled: boolean } {
 export function setYoloStatus(enabled: boolean): { enabled: boolean } {
   setYolo(enabled);
   return { enabled };
+}
+
+export function getFallbackStatus(): { unhealthy: string[]; lastError: { provider: string; model: string; reason: string } | null; lastFallback: string | null } {
+  const summary = toHealthSummary();
+  const lastErr = getLastError();
+  return {
+    unhealthy: summary,
+    lastError: lastErr ? { provider: lastErr.provider, model: lastErr.model, reason: lastErr.reason } : null,
+    lastFallback: getLastFallbackUsed(),
+  };
 }

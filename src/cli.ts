@@ -10,7 +10,7 @@ import { runDoctor } from './utils/doctor.js';
 import { fetchOpenRouterModels, filterFreeModels, formatModelsTable } from './ai/openrouter-models.js';
 import type { OpenRouterModel } from './ai/openrouter-models.js';
 import { getSettings, updateSettings, updateAgentMode } from './config/settings.js';
-import { createClient, isOnlyGreeting } from './ai/client.js';
+import { createClient, isOnlyGreeting, getCasualResponse, createSingleClient } from './ai/client.js';
 import type { AIClient, Message, ToolCall, AIResponse, ToolType } from './ai/types.js';
 import { buildProjectTree, getProjectInfo, invalidateCache } from './context/builder.js';
 import type { ProjectInfo } from './context/builder.js';
@@ -22,13 +22,15 @@ import { writeFileWithBackup, previewEdit } from './files/writer.js';
 import { Spinner } from './utils/spinner.js';
 import { detectSecrets } from './utils/secrets.js';
 import { getGitInfo, getCommitSuggestion } from './utils/git.js';
-import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo } from './utils/session.js';
+import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo, getProviderHealth, saveProviderHealth, clearProviderHealth, getLastProviderError } from './utils/session.js';
 import { grepSearch, findFiles } from './utils/searcher.js';
 import { classifyCommand } from './utils/commands.js';
 import type { AgentMode } from './agent/types.js';
 import { ALL_MODES, MODE_LABELS, MODE_DESCRIPTIONS } from './agent/modes.js';
 import { createTask, updateTask, loadTasks, getActiveTask } from './agent/tasks.js';
 import { listSymbols, findReferences, searchImports, summarizeFile, explainFunction } from './agent/tools.js';
+import { toHealthSummary, resetHealth, getLastError, getLastFallbackUsed, healthKey, loadHealthFromEntries, toHealthEntries } from './ai/model-health.js';
+import type { ErrorCategory } from './ai/model-health.js';
 
 // ── Setup ────────────────────────────────────────────────
 
@@ -207,7 +209,7 @@ function showHeader(config: HysaConfig, gitInfo?: { branch: string | null; hasCh
   }
 
   if (contextTokens !== undefined) {
-    const tokenText = `${pc.dim('Context:')} ~${contextTokens.toLocaleString()} tokens`;
+    const tokenText = `${pc.dim('Context estimate:')} ~${contextTokens.toLocaleString()} tokens`;
     lines.push(pc.bold(pc.magenta(`│  ${tokenText.padEnd(47)}│`)));
   }
 
@@ -244,6 +246,11 @@ function showHelp(agentMode?: AgentMode): void {
   console.log(pc.cyan('  /commit <msg>      Git commit with message'));
   console.log(pc.cyan('  /agents            Show agent status'));
   console.log(pc.cyan('  /health            Show provider health status'));
+  console.log(pc.cyan('  /fallback          Show fallback status'));
+  console.log(pc.cyan('  /fallback status   Show unhealthy providers'));
+  console.log(pc.cyan('  /fallback reset    Clear provider health records'));
+  console.log(pc.cyan('  /fallback test     Test configured providers'));
+  console.log(pc.cyan('  /usage             Show context estimate and quota info'));
   console.log(pc.cyan('  /models            Show OpenRouter free models (when using OpenRouter)'));
   console.log(pc.cyan('  /providers         List all available providers'));
   console.log(pc.cyan('  /experimental      Toggle experimental free providers'));
@@ -738,6 +745,12 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
   const gitInfo = getGitInfo(workingDir);
   incrementSessionCount();
 
+  // Load persistent provider health from session
+  const savedHealth = getProviderHealth();
+  if (savedHealth.length > 0) {
+    loadHealthFromEntries(savedHealth);
+  }
+
   // Build relevant files from important project files
   const relevantFiles = projectInfo.importantFiles;
 
@@ -798,7 +811,12 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     // ── Greeting guard (no AI call) ──────────────────
     const trimmed = userInput.trim();
     if (!trimmed.startsWith('/') && isOnlyGreeting(trimmed)) {
-      console.log(pc.cyan('  Hi! How can I help with this project?\n'));
+      const casual = getCasualResponse(trimmed);
+      if (casual) {
+        console.log(pc.cyan(`  ${casual}\n`));
+      } else {
+        console.log(pc.cyan('  Hi! How can I help with this project?\n'));
+      }
       continue;
     }
 
@@ -898,6 +916,82 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       continue;
     }
 
+    // ── Fallback commands ────────────────────────────
+
+    if (trimmed.toLowerCase() === '/fallback status') {
+      const summary = toHealthSummary();
+      const lastErr = getLastError();
+      const lastFb = getLastFallbackUsed();
+      console.log(pc.cyan('\nFallback Status:'));
+      if (summary.length === 0) {
+        console.log(pc.green('  All providers healthy.\n'));
+      } else {
+        console.log(pc.yellow('  Unhealthy providers/models:'));
+        for (const line of summary) console.log(line);
+        console.log();
+      }
+      if (lastErr) {
+        console.log(pc.dim(`  Last error: ${lastErr.provider}/${lastErr.model} — ${lastErr.reason.slice(0, 200)}`));
+        console.log(pc.dim(`  Time: ${new Date(lastErr.timestamp).toLocaleString()}`));
+      }
+      if (lastFb) {
+        console.log(pc.dim(`  Last fallback used: ${lastFb}`));
+      }
+      console.log(pc.dim('  Provider rate limits may depend on RPM/TPM/daily quota and are not the same as context tokens.\n'));
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/fallback reset') {
+      resetHealth();
+      clearProviderHealth();
+      console.log(pc.green('  Provider health records cleared. All providers will be retried.\n'));
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/fallback test') {
+      console.log(pc.cyan('\nTesting configured providers...\n'));
+      const testProviders: ProviderType[] = ['openrouter', 'gemini', 'deepseek', 'groq', 'opencode_zen'];
+      for (const prov of testProviders) {
+        const key = config.apiKeys[prov as keyof typeof config.apiKeys];
+        if (!key) {
+          console.log(`  ${pc.dim(`[skip] ${PROVIDER_DEFAULTS[prov]?.label || prov}: no API key`)}`);
+          continue;
+        }
+        const label = PROVIDER_DEFAULTS[prov]?.label || prov;
+        const model = config.currentProvider === prov ? config.currentModel : PROVIDER_DEFAULTS[prov]?.model || '';
+        process.stdout.write(`  ${label} (${model || 'default'})... `);
+        try {
+          const testClient = createSingleClient(prov, model || 'test', config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+          if (!testClient) {
+            console.log(pc.red('✗ could not create client'));
+            continue;
+          }
+          // Just check if the client was creatable - we can't easily do a lightweight ping
+          console.log(pc.green('✓ client created'));
+        } catch (err: unknown) {
+          console.log(pc.red(`✗ ${(err as Error).message.slice(0, 80)}`));
+        }
+      }
+      console.log(pc.dim('\n  Note: This only checks if clients can be created. Actual availability depends on network and provider status.\n'));
+      continue;
+    }
+
+    // Fallback shorthand aliases
+    const fbTrim = trimmed.toLowerCase();
+    if (fbTrim === '/fallback') {
+      // Show status as default
+      const summary = toHealthSummary();
+      console.log(pc.cyan('\nFallback Status:'));
+      if (summary.length === 0) {
+        console.log(pc.green('  All providers healthy.'));
+      } else {
+        console.log(pc.yellow('  Unhealthy providers/models:'));
+        for (const line of summary) console.log(line);
+      }
+      console.log(pc.dim('  Use /fallback status, /fallback reset, /fallback test for details.\n'));
+      continue;
+    }
+
     if (trimmed.toLowerCase() === '/providers') {
       console.log(pc.cyan('\nAvailable Providers:\n'));
       const allProviders: ProviderType[] = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini', 'ollama', 'local_openai', 'anthropic', 'openai'];
@@ -919,6 +1013,32 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       if (!config.allowExperimentalProviders) {
         console.log(pc.dim('  Experimental providers hidden. Enable with: hysa experimental on\n'));
       }
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/usage') {
+      const lastErr = getLastError();
+      const lastFb = getLastFallbackUsed();
+      const tokens = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+      const prov = config.currentProvider;
+      const label = PROVIDER_DEFAULTS[prov]?.label || prov;
+      console.log(pc.cyan('\nUsage Information:'));
+      console.log(`  Current provider: ${pc.bold(label)}`);
+      console.log(`  Current model:    ${config.currentModel}`);
+      console.log(`  Context estimate: ~${tokens.toLocaleString()} tokens`);
+      if (lastErr) {
+        console.log(`  Last error:       ${pc.red(lastErr.provider + '/' + lastErr.model)} — ${lastErr.reason.slice(0, 120)}`);
+      } else {
+        console.log(pc.dim(`  Last error:       none`));
+      }
+      if (lastFb) {
+        console.log(pc.dim(`  Last fallback:    ${lastFb}`));
+      } else {
+        console.log(pc.dim(`  Last fallback:    none`));
+      }
+      console.log();
+      console.log(pc.yellow('  Note: Provider rate limits may depend on RPM/TPM/daily quota'));
+      console.log(pc.yellow('  and are not the same as your local context token estimate.\n'));
       continue;
     }
 
@@ -1360,11 +1480,11 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
 
             if (isTimeout) {
               spinner.fail(`Timed out (${elapsed}s)`);
-              console.log(pc.yellow(`  ⚠ Provider timed out after ${elapsed}s. Try /model to switch provider.`));
+              console.log(pc.yellow(`  ⚠ Provider timed out after ${elapsed}s. Automatically falling back...`));
             } else if (isRateLimit) {
               spinner.fail('Provider rate limited');
               console.log(pc.yellow(`  ⚠ ${errorMsg}`));
-              console.log(pc.dim('  Tip: Use /model to switch to a different Free API provider or wait before retrying.'));
+              console.log(pc.dim('  The system will automatically try another provider.'));
             } else {
               spinner.fail('Error');
               console.log(pc.red(`  ${errorMsg}`));
@@ -1508,7 +1628,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     if (lastResponse && steps > 0) {
       const finalTokens = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
       if (wasTruncated || finalTokens > 3000) {
-        console.log(pc.dim(`  Context: ~${finalTokens.toLocaleString()} tokens${wasTruncated ? ' (trimmed for safety)' : ''}\n`));
+        console.log(pc.dim(`  Context estimate: ~${finalTokens.toLocaleString()} tokens${wasTruncated ? ' (trimmed for safety)' : ''}\n`));
       }
     }
   }

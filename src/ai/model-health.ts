@@ -1,31 +1,153 @@
-const WEAK_FOR_TOOLS = new Set<string>();
-const UNHEALTHY = new Set<string>();
+export type ErrorCategory = 'rate_limit' | 'quota' | 'timeout' | 'network' | 'invalid_key' | 'model_unavailable' | 'unknown';
 
-export function markWeakForTools(provider: string, model: string): void {
-  WEAK_FOR_TOOLS.add(`${provider}:${model}`);
+export interface ProviderHealthRecord {
+  status: 'healthy' | 'unhealthy';
+  reason: string;
+  category: ErrorCategory;
+  timestamp: number;
+  failedCount: number;
 }
 
-export function isWeakForTools(provider: string, model: string): boolean {
-  return WEAK_FOR_TOOLS.has(`${provider}:${model}`);
+interface LastErrorInfo {
+  provider: string;
+  model: string;
+  category: ErrorCategory;
+  reason: string;
+  timestamp: number;
 }
 
-export function markUnhealthy(provider: string, model: string): void {
-  UNHEALTHY.add(`${provider}:${model}`);
+import { saveProviderHealth } from '../utils/session.js';
+import type { ProviderHealthEntry } from '../utils/session.js';
+
+const healthStore = new Map<string, ProviderHealthRecord>();
+const requestSkipped = new Set<string>();
+
+let lastError: LastErrorInfo | null = null;
+let lastFallbackUsed: string | null = null;
+
+function key(provider: string, model: string): string {
+  return `${provider}:${model}`;
+}
+
+export function markHealth(
+  provider: string,
+  model: string,
+  status: 'healthy' | 'unhealthy',
+  reason: string,
+  category: ErrorCategory = 'unknown',
+): void {
+  const k = key(provider, model);
+  const existing = healthStore.get(k);
+
+  if (status === 'unhealthy') {
+    const failedCount = (existing?.failedCount ?? 0) + 1;
+    healthStore.set(k, {
+      status: 'unhealthy',
+      reason: category === 'rate_limit' ? `${reason} (Rate limit may be RPM/TPM/daily-quota based, not context tokens)` : reason,
+      category,
+      timestamp: Date.now(),
+      failedCount,
+    });
+    requestSkipped.add(k);
+
+    lastError = { provider, model, category, reason, timestamp: Date.now() };
+
+    if (failedCount >= 2) {
+      healthStore.set(k, {
+        status: 'unhealthy',
+        reason: `${reason} (failed ${failedCount} times, auto-skipped for rest of session)`,
+        category,
+        timestamp: Date.now(),
+        failedCount,
+      });
+    }
+  } else {
+    healthStore.set(k, { status: 'healthy', reason: '', category: 'unknown', timestamp: Date.now(), failedCount: 0 });
+  }
+
+  // Persist to session
+  try {
+    saveProviderHealth(toHealthEntries());
+  } catch { /* session save is best-effort */ }
 }
 
 export function isUnhealthy(provider: string, model: string): boolean {
-  return UNHEALTHY.has(`${provider}:${model}`);
+  const rec = healthStore.get(key(provider, model));
+  return rec?.status === 'unhealthy';
 }
 
-export function getPreferredModel(provider: string, models: string[]): string {
-  for (const m of models) {
-    const key = `${provider}:${m}`;
-    if (!UNHEALTHY.has(key) && !WEAK_FOR_TOOLS.has(key)) return m;
-  }
-  return models[0] || '';
+export function isSkippedForRequest(provider: string, model: string): boolean {
+  return requestSkipped.has(key(provider, model));
+}
+
+export function getHealthRecord(provider: string, model: string): ProviderHealthRecord | null {
+  return healthStore.get(key(provider, model)) ?? null;
+}
+
+export function getAllHealth(): Map<string, ProviderHealthRecord> {
+  return new Map(healthStore);
+}
+
+export function getLastError(): LastErrorInfo | null {
+  return lastError;
+}
+
+export function getLastFallbackUsed(): string | null {
+  return lastFallbackUsed;
+}
+
+export function setLastFallbackUsed(fb: string | null): void {
+  lastFallbackUsed = fb;
+}
+
+export function clearRequestSkips(): void {
+  requestSkipped.clear();
 }
 
 export function resetHealth(): void {
-  WEAK_FOR_TOOLS.clear();
-  UNHEALTHY.clear();
+  healthStore.clear();
+  requestSkipped.clear();
+  lastError = null;
+  lastFallbackUsed = null;
+  try {
+    saveProviderHealth([]);
+  } catch { /* best-effort */ }
 }
+
+export function toHealthSummary(): string[] {
+  const lines: string[] = [];
+  for (const [k, rec] of healthStore) {
+    if (rec.status === 'unhealthy') {
+      lines.push(`  ${k} — ${rec.reason} (${rec.failedCount}x, ${new Date(rec.timestamp).toLocaleTimeString()})`);
+    }
+  }
+  return lines;
+}
+
+export function toHealthEntries(): ProviderHealthEntry[] {
+  const entries: ProviderHealthEntry[] = [];
+  for (const [k, rec] of healthStore) {
+    if (rec.status === 'unhealthy') {
+      const sep = k.lastIndexOf(':');
+      const provider = k.substring(0, sep);
+      const model = k.substring(sep + 1);
+      entries.push({ provider, model, reason: rec.reason, category: rec.category, timestamp: rec.timestamp, failedCount: rec.failedCount });
+    }
+  }
+  return entries;
+}
+
+export function loadHealthFromEntries(entries: ProviderHealthEntry[]): void {
+  for (const e of entries) {
+    const k = key(e.provider, e.model);
+    healthStore.set(k, {
+      status: 'unhealthy',
+      reason: e.reason,
+      category: e.category as ErrorCategory,
+      timestamp: e.timestamp,
+      failedCount: e.failedCount,
+    });
+  }
+}
+
+export { key as healthKey };
