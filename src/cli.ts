@@ -10,7 +10,7 @@ import { runDoctor } from './utils/doctor.js';
 import { fetchOpenRouterModels, filterFreeModels, formatModelsTable } from './ai/openrouter-models.js';
 import type { OpenRouterModel } from './ai/openrouter-models.js';
 import { getSettings, updateSettings, updateAgentMode } from './config/settings.js';
-import { createClient } from './ai/client.js';
+import { createClient, isOnlyGreeting } from './ai/client.js';
 import type { AIClient, Message, ToolCall, AIResponse, ToolType } from './ai/types.js';
 import { buildProjectTree, getProjectInfo, invalidateCache } from './context/builder.js';
 import type { ProjectInfo } from './context/builder.js';
@@ -299,6 +299,7 @@ const PROVIDER_CHOICES: { name: string; value: string; category: ProviderCategor
   { name: 'Google Gemini (Free API)', value: 'gemini', category: 'cloud_free', tier: 'free_api' },
   { name: 'Ollama (Local Free)', value: 'ollama', category: 'local_free', tier: 'local_free' },
   { name: 'LM Studio / Local OpenAI (Local Free)', value: 'local_openai', category: 'local_free', tier: 'local_free' },
+  { name: 'HYSA AI (Local Free)', value: 'hysa_ai', category: 'local_free', tier: 'local_free' },
   { name: 'Anthropic Claude (Premium)', value: 'anthropic', category: 'premium_api', tier: 'premium_api' },
   { name: 'OpenAI GPT (Premium)', value: 'openai', category: 'premium_api', tier: 'premium_api' },
   { name: 'Pollinations AI (Experimental)', value: 'pollinations', category: 'experimental_free', tier: 'experimental_free' },
@@ -329,6 +330,12 @@ async function switchModel(config: HysaConfig): Promise<{ config: HysaConfig; ch
   if (provider === 'openrouter' && model === 'openrouter/free') {
     console.log(pc.yellow('  ⚠ openrouter/free may choose a general model and can be weaker for coding.\n'));
     console.log(pc.dim('  Recommended: qwen/qwen3-coder:free or deepseek/deepseek-chat:free\n'));
+  }
+
+  if (provider === 'hysa_ai' && model === 'hysa-coder-lite') {
+    console.log(pc.yellow('  ⚡ hysa-coder-lite uses a small local model (qwen2.5-coder:1.5b).\n'));
+    console.log(pc.dim('  It is free and private, but may be weaker at tool use.\n'));
+    console.log(pc.dim('  For better coding, try hysa-coder if your machine can run it.\n'));
   }
 
   if (PROVIDER_TIERS[provider] === 'experimental_free') {
@@ -756,8 +763,14 @@ async function chatLoop(initialConfig: HysaConfig): Promise<void> {
     }
     retryContent = null;
 
-    // ── Built-in commands ────────────────────────────
+    // ── Greeting guard (no AI call) ──────────────────
     const trimmed = userInput.trim();
+    if (!trimmed.startsWith('/') && isOnlyGreeting(trimmed)) {
+      console.log(pc.cyan('  Hi! How can I help with this project?\n'));
+      continue;
+    }
+
+    // ── Built-in commands ────────────────────────────
 
     if (trimmed.toLowerCase() === '/exit') {
       console.log(pc.yellow('\nGoodbye!\n'));
@@ -1484,7 +1497,7 @@ export async function start(): Promise<void> {
 
         const updated = { ...config, currentProvider: provider, currentModel: model, experimentalConfirmed: config.experimentalConfirmed || PROVIDER_TIERS[provider] === 'experimental_free' };
 
-        if (provider !== 'ollama' && provider !== 'local_openai') {
+  if (provider !== 'ollama' && provider !== 'local_openai' && provider !== 'hysa_ai') {
           if (!config.apiKeys[provider as keyof typeof config.apiKeys]) {
             if (providerNeedsApiKey(provider)) {
               const rawKey = await password({ message: `Enter ${PROVIDER_DEFAULTS[provider].label} API key\n  Get one: ${PROVIDER_SIGNUP_URLS[provider]}`, mask: true });
@@ -1571,9 +1584,10 @@ export async function start(): Promise<void> {
     .command('doctor')
     .description('Run diagnostics to check your setup')
     .option('--debug', 'Show raw provider error details')
-    .option('--provider <name>', 'Test a specific provider (e.g. openrouter)')
+    .option('--provider <name>', 'Test a specific provider (e.g. openrouter, hysa-ai)')
     .action(async (opts: { debug?: boolean; provider?: string }) => {
-      await runDoctor(opts.debug ?? false, opts.provider as ProviderType | undefined);
+      const normalized = opts.provider?.replace(/-/g, '_') as ProviderType | undefined;
+      await runDoctor(opts.debug ?? false, normalized);
     });
 
   program

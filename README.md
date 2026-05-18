@@ -64,6 +64,7 @@ hysa experimental on
 | ☁️ FREE API KEY | [Google Gemini](https://aistudio.google.com/apikey) | Free, no CC | Required | Free tier (60 req/min) | Large context, quotas apply |
 | 🖥️  LOCAL FREE | [Ollama](https://ollama.com) | Download only | None | Free | Offline, privacy |
 | 🖥️  LOCAL FREE | [LM Studio](https://lmstudio.ai) | Download only | None | Free | GUI, easy model download |
+| 🖥️  LOCAL FREE | HYSA AI Provider | Download + npm start | Dev key | Free | Uses Ollama via HYSA Provider |
 | 🖥️  LOCAL FREE | Custom local endpoint | Any OpenAI-compatible server | None | Free | Flexible, any local server |
 | 🧪 EXPERIMENTAL FREE | [Pollinations AI](https://pollinations.ai) | No key* | Free | No | Toy projects, testing |
 | 🧪 EXPERIMENTAL FREE | [LLM7](https://github.com/llm7) | Optional | Free | No | Toy projects, testing |
@@ -158,6 +159,42 @@ Also compatible with:
 - **Jan.ai** — default at `http://localhost:1337/v1`
 - **llama.cpp** server — default at `http://localhost:8080/v1`
 - **Any OpenAI-compatible endpoint** — choose "Custom endpoint" during setup
+
+### 🖥️  HYSA AI Provider (Local Free)
+
+This is your own local/free provider. It uses the HYSA Provider server, which in turn uses Ollama. No external paid API is required.
+
+1. First, set up the HYSA Provider:
+   ```bash
+   git clone <hysa-provider-repo>
+   cd hysa-provider
+   npm install
+   npm run build
+   npm start
+   ```
+2. Ensure Ollama is running with the required models:
+   ```bash
+   ollama pull qwen2.5-coder:1.5b
+   ollama pull qwen2.5-coder:3b
+   ```
+3. Run `hysa`, select **Local Free**, choose **HYSA AI**
+
+**Available models:**
+| Model | Ollama Model | Quality | Resource Usage |
+|---|---|---|---|
+| `hysa-coder-lite` | `qwen2.5-coder:1.5b` | Lighter but weaker at tool use | ~1GB RAM |
+| `hysa-coder` | `qwen2.5-coder:3b` | Better for coding/tool calls | ~2GB RAM |
+| `hysa-fast` | `qwen2.5-coder:1.5b` | Same as lite, fast responses | ~1GB RAM |
+
+**Default API key:** `hysa_dev_key` (pre-configured, no signup needed)
+
+**Architecture:** `HYSA Code → HYSA Provider → Ollama local model`
+
+**Recommended:** For the best coding experience, run the 3b model:
+```bash
+ollama run qwen2.5-coder:3b
+```
+Then select `hysa-coder` in HYSA Code's model menu.
 
 ### 🔑 Claude / GPT (Premium)
 

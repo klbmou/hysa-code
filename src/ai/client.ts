@@ -10,6 +10,7 @@ import { createGroqClient } from './groq.js';
 import { createDeepSeekClient } from './deepseek.js';
 import { createOpenAICompatibleClient } from './openai-compatible.js';
 import { createOpenCodeZenClient } from './opencode-zen.js';
+import { createHysaAIClient } from './hysa-ai.js';
 import { markWeakForTools, markUnhealthy, isUnhealthy, getPreferredModel } from './model-health.js';
 
 const CHAT_TIMEOUT_MS = 45000;
@@ -188,6 +189,9 @@ function createSingleClient(
     case 'puter': {
       const baseUrl = EXPERIMENTAL_BASE_URLS.puter || 'https://api.puter.com/v1';
       return createOpenAICompatibleClient(baseUrl, apiKeys.puter, model);
+    }
+    case 'hysa_ai': {
+      return createHysaAIClient(apiKeys.hysa_ai, model, 'http://localhost:3002/v1');
     }
     default:
       throw new Error(`Unsupported provider: ${provider}`);
@@ -385,12 +389,34 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
   };
 }
 
+export function isOnlyGreeting(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  const greetings = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'السلام', 'صباح', 'مساء', 'مرحبا', 'اهلا'];
+  return greetings.some(g => trimmed === g || trimmed === `${g}!` || trimmed === `${g},` || trimmed.startsWith(g + ' ') && trimmed.split(/\s+/).length <= 3);
+}
+
+function applyGreetingGuard(client: AIClient): AIClient {
+  return {
+    async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
+      const result = await client.sendMessage(messages, systemPrompt, signal);
+      const lastUser = [...messages].reverse().find(m => m.role === 'user');
+      if (lastUser && isOnlyGreeting(lastUser.content)) {
+        const hasReadFile = result.toolCalls?.some(tc => tc.type === 'read_file');
+        if (hasReadFile) {
+          return { message: 'Hi! How can I help with this project?', toolCalls: [] };
+        }
+      }
+      return result;
+    },
+  };
+}
+
 export function createClient(config: HysaConfig, signal?: AbortSignal): AIClient {
   const { currentProvider: provider } = config;
   const tier = PROVIDER_TIERS[provider];
 
   if (tier === 'free_api' || tier === 'premium_api') {
-    return createFallbackClient(provider, config);
+    return applyGreetingGuard(createFallbackClient(provider, config));
   }
 
   const client = createSingleClient(provider, config.currentModel, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
@@ -399,7 +425,8 @@ export function createClient(config: HysaConfig, signal?: AbortSignal): AIClient
       return client.sendMessage(messages, systemPrompt, signal);
     },
   };
-  return tier === 'experimental_free' ? wrapClient(wrapped, provider) : wrapped;
+  const finalClient = tier === 'experimental_free' ? wrapClient(wrapped, provider) : wrapped;
+  return applyGreetingGuard(finalClient);
 }
 
 export type { AIClient } from './types.js';

@@ -396,6 +396,66 @@ async function checkChatCompletionForLabel(label: string, baseURL: string, apiKe
   }
 }
 
+async function checkHysaAIDetailed(debug: boolean): Promise<DoctorResult[]> {
+  const results: DoctorResult[] = [];
+  const baseURL = 'http://localhost:3002/v1';
+  const apiKey = 'hysa_dev_key';
+
+  const modelsResult = await checkOpenAICompatibleEndpoint('HYSA AI GET /models', baseURL, apiKey, debug);
+  results.push(modelsResult);
+
+  if (modelsResult.status === 'error') {
+    results.push({ name: 'HYSA AI POST /chat', status: 'error', message: 'Skipped - server not reachable' });
+    return results;
+  }
+
+  const chatResult = await checkChatCompletionForModel('hysa-ai', baseURL, apiKey, 'hysa-coder-lite', debug);
+  results.push(chatResult);
+
+  return results;
+}
+
+async function checkChatCompletionForModel(provider: string, baseURL: string, apiKey: string | undefined, model: string, debug: boolean): Promise<DoctorResult> {
+  const label = `${provider} POST /chat`;
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+
+    const body = JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: 'Say "ok" and nothing else.' }],
+      max_tokens: 10,
+    });
+
+    const res = await withTimeout(
+      fetch(`${baseURL}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body,
+        signal: AbortSignal.timeout(DOCTOR_TIMEOUT_MS),
+      }),
+      DOCTOR_TIMEOUT_MS,
+    );
+    if (res.ok) {
+      return { name: label, status: 'ok', message: 'Chat completion works' };
+    }
+    let detail = `HTTP ${res.status}`;
+    if (res.status === 400) detail = 'Bad request - model may not exist';
+    else if (res.status === 401) detail = 'Invalid API key (401)';
+    else if (res.status === 404) detail = 'Endpoint not found (404)';
+    if (debug) {
+      try {
+        const respBody = await res.text();
+        detail += `\n  Response: ${respBody.slice(0, 300)}`;
+      } catch { /* ignore */ }
+    }
+    return { name: label, status: 'error', message: detail };
+  } catch (err: unknown) {
+    const e = err as Error;
+    return { name: label, status: 'error', message: `Request failed: ${debug ? e.message : 'check internet or try again'}` };
+  }
+}
+
 export async function runDoctor(debug = false, provider?: ProviderType): Promise<void> {
   if (provider) {
     const config = loadConfig();
@@ -439,11 +499,13 @@ export async function runDoctor(debug = false, provider?: ProviderType): Promise
         return;
       }
       results = await checkGroqDetailed(config.apiKeys.groq, debug);
+    } else if (provider === 'hysa_ai') {
+      results = await checkHysaAIDetailed(debug);
     } else if (provider === 'anthropic' || provider === 'openai' || provider === 'opencode_zen') {
-      console.log(pc.yellow(`  Diagnostics for "${provider}" not yet supported in detailed mode. Try:\n  hysa doctor\n`));
+      console.log(pc.yellow(`  Diagnostics for "${provider}" not yet supported in detailed mode. Try:\n  hysa doctor\n  hysa doctor --provider hysa-ai\n`));
       return;
     } else {
-      console.log(pc.yellow(`  Diagnostics for "${provider}" not yet supported. Try:\n  hysa doctor --provider openrouter\n`));
+      console.log(pc.yellow(`  Diagnostics for "${provider}" not yet supported. Try:\n  hysa doctor --provider openrouter\n  hysa doctor --provider hysa-ai\n`));
       return;
     }
 
@@ -479,6 +541,10 @@ export async function runDoctor(debug = false, provider?: ProviderType): Promise
     if (config.currentProvider === 'local_openai') {
       results.push(await checkLocalOpenAI(localOpenAiUrl));
     }
+    const hysaAiUrl = config.hysaAiBaseUrl || 'http://localhost:3002/v1';
+    if (config.currentProvider === 'hysa_ai') {
+      results.push(await checkLocalOpenAI(hysaAiUrl));
+    }
 
     for (const [prov, key] of Object.entries(config.apiKeys)) {
       const label = PROVIDER_DEFAULTS[prov as ProviderType]?.label || prov;
@@ -507,7 +573,7 @@ export async function runDoctor(debug = false, provider?: ProviderType): Promise
     const currentLabel = PROVIDER_DEFAULTS[current]?.label || current;
     const currentTier = PROVIDER_TIERS[current];
     const currentTierLabel = currentTier ? TIER_LABELS[currentTier]?.label || '' : '';
-    const hasKey = current === 'ollama' || current === 'local_openai' || !!config.apiKeys[current as keyof typeof config.apiKeys];
+    const hasKey = current === 'ollama' || current === 'local_openai' || current === 'hysa_ai' || !!config.apiKeys[current as keyof typeof config.apiKeys];
     results.push({
       name: 'Current Provider',
       status: hasKey ? 'ok' : 'error',

@@ -77,6 +77,60 @@ function parseFunctionStyleFormat(content: string): ToolCall[] {
   return calls;
 }
 
+function parseToolNameFormat(content: string): ToolCall[] {
+  const calls: ToolCall[] = [];
+
+  // Strip markdown code fences first, then match
+  const cleaned = content
+    .replace(/```[\s\S]*?```/g, (match) => {
+      // Parse inside fence as if it were raw
+      const inner = match.replace(/```\w*\n?/, '').replace(/```$/, '');
+      return inner;
+    });
+
+  // Try on original content first
+  const tryMatch = (text: string): void => {
+    const regex = /<tool_name>\s*(\w+)\s*<\/tool_name>\s*(\{[\s\S]*?\})/g;
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(text)) !== null) {
+      const type = match[1].trim();
+      if (!VALID_TOOL_TYPES.has(type)) continue;
+      try {
+        const params = JSON.parse(match[2]);
+        calls.push({ type: type as ToolType, params });
+      } catch {
+        // malformed JSON
+      }
+    }
+  };
+
+  tryMatch(content);
+  if (calls.length === 0) {
+    tryMatch(cleaned);
+  }
+
+  return calls;
+}
+
+function parseArgumentFormat(content: string): ToolCall[] {
+  const calls: ToolCall[] = [];
+  // Matches <tool_call>...<tool_name>type</tool_name><arguments>{json}</arguments>...</tool_call>
+  // Also supports <arguments> directly after <tool_name>
+  const regex = /<tool_call>[\s\S]*?<tool_name>\s*(\w+)\s*<\/tool_name>[\s\S]*?<arguments>\s*(\{[\s\S]*?\})\s*<\/arguments>[\s\S]*?<\/tool_call>/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(content)) !== null) {
+    const type = match[1].trim();
+    if (!VALID_TOOL_TYPES.has(type)) continue;
+    try {
+      const params = JSON.parse(match[2]);
+      calls.push({ type: type as ToolType, params });
+    } catch {
+      // malformed
+    }
+  }
+  return calls;
+}
+
 function parseJsonFormat(content: string): ToolCall[] {
   const calls: ToolCall[] = [];
   const jsonRegex = /({[\s\S]*?"type"\s*:\s*"(\w+)"[\s\S]*?})/g;
@@ -99,8 +153,10 @@ export function parseToolCalls(content: string): ToolCall[] {
   const allCalls: ToolCall[] = [];
 
   // Try each format in order
+  allCalls.push(...parseArgumentFormat(content));
   allCalls.push(...parseXmlFormat(content));
   allCalls.push(...parseAngleBracketFormat(content));
+  allCalls.push(...parseToolNameFormat(content));
   allCalls.push(...parseFunctionStyleFormat(content));
   allCalls.push(...parseJsonFormat(content));
 
@@ -109,14 +165,28 @@ export function parseToolCalls(content: string): ToolCall[] {
 
 export function stripToolCallBlocks(content: string): string {
   let result = content;
-  // Remove XML blocks
+
+  // Remove <tool_call> blocks (with <arguments> or raw JSON)
   result = result.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '');
+
+  // Remove bare <tool_name> + JSON blocks
+  result = result.replace(/<tool_name>\s*\w+\s*<\/tool_name>\s*\{[\s\S]*?\}/g, '');
+
+  // Remove bare <tool_name> + <arguments> blocks
+  result = result.replace(/<tool_name>\s*\w+\s*<\/tool_name>\s*<arguments>\s*\{[\s\S]*?\}\s*<\/arguments>/g, '');
+
   // Remove angle-bracket blocks
   result = result.replace(/<\|tool_call_start\|>[\s\S]*?<\|tool_call_end\|>/g, '');
+
   // Remove function-style tool calls with known tool names
   result = result.replace(/\b(?:read_file|edit_file|execute_command|list_symbols|find_references|search_imports|summarize_file|explain_function)\s*\([\s\S]*?\)\s*/g, '');
+
   // Remove JSON tool call objects
   result = result.replace(/{[\s\S]*?"type"\s*:\s*"(?:read_file|edit_file|execute_command|list_symbols|find_references|search_imports|summarize_file|explain_function)"[\s\S]*?}/g, '');
+
+  // Remove markdown code fences wrapping tool calls
+  result = result.replace(/```[\s\S]*?<\/tool_call>[\s\S]*?```/g, '');
+
   return result.trim();
 }
 
@@ -124,6 +194,8 @@ export function hasToolSyntax(content: string): boolean {
   return (
     /<tool_call>/.test(content) ||
     /<\|tool_call_start\|>/.test(content) ||
+    /<tool_name>\s*\w+\s*<\/tool_name>/.test(content) ||
+    /<arguments>/.test(content) ||
     /\b(read_file|edit_file|execute_command|list_symbols|find_references|search_imports|summarize_file|explain_function)\s*\(/.test(content) ||
     /"type"\s*:\s*"(?:read_file|edit_file|execute_command|list_symbols|find_references|search_imports|summarize_file|explain_function)"/.test(content)
   );

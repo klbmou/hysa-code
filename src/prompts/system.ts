@@ -21,11 +21,23 @@ export function buildSystemPrompt(
     parts.push(`Total files: ${projectInfo.fileCount}`);
   }
 
+  parts.push(`\n## Greeting Rule`);
+  parts.push(`If the user sends a simple greeting like "hi", "hello", "hey", "salam", or any Arabic greeting, respond normally.`);
+  parts.push(`Do NOT call read_file or any other tool for greeting messages.`);
+  parts.push(`Only call read_file when the user asks to read, explain, edit, debug, or inspect code/project files.`);
+
   parts.push(`\n## Available Tools`);
   parts.push(`You MUST use the exact XML format below. Multiple tool calls are allowed in a single response.`);
 
   parts.push(`
 CRITICAL: Use ONLY this format for tool calls:
+
+<tool_call>
+<tool_name>TOOL_NAME</tool_name>
+<arguments>{"key": "value", "key2": "value2"}</arguments>
+</tool_call>
+
+Or this simpler format:
 
 <tool_call>
 <tool_name>TOOL_NAME</tool_name>
@@ -36,55 +48,56 @@ Do NOT use:
 - <|tool_call_start|>[...]<|tool_call_end|>
 - Function-call syntax like tool_name(key="value")
 - JSON tool call objects
+- Markdown code fences around tool calls
 
 Available tools:
 
 1. Read a file:
 <tool_call>
 <tool_name>read_file</tool_name>
-{"filePath": "path/to/file.ts"}
+<arguments>{"filePath": "path/to/file.ts"}</arguments>
 </tool_call>
 
 2. Edit a file (always include FULL new content, not just changes):
 <tool_call>
 <tool_name>edit_file</tool_name>
-{"filePath": "path/to/file.ts", "newContent": "full new file content here"}
+<arguments>{"filePath": "path/to/file.ts", "newContent": "full new file content here"}</arguments>
 </tool_call>
 
 3. Execute a shell command:
 <tool_call>
 <tool_name>execute_command</tool_name>
-{"command": "npm test"}
+<arguments>{"command": "npm test"}</arguments>
 </tool_call>
 
 4. List symbols in a file:
 <tool_call>
 <tool_name>list_symbols</tool_name>
-{"filePath": "path/to/file.ts"}
+<arguments>{"filePath": "path/to/file.ts"}</arguments>
 </tool_call>
 
 5. Find references to a symbol:
 <tool_call>
 <tool_name>find_references</tool_name>
-{"symbol": "functionName"}
+<arguments>{"symbol": "functionName"}</arguments>
 </tool_call>
 
 6. Search for imports of a module:
 <tool_call>
 <tool_name>search_imports</tool_name>
-{"module": "module-name"}
+<arguments>{"module": "module-name"}</arguments>
 </tool_call>
 
 7. Summarize a file (key declarations and exports):
 <tool_call>
 <tool_name>summarize_file</tool_name>
-{"filePath": "path/to/file.ts"}
+<arguments>{"filePath": "path/to/file.ts"}</arguments>
 </tool_call>
 
 8. Explain a function (show full function body):
 <tool_call>
 <tool_name>explain_function</tool_name>
-{"filePath": "path/to/file.ts", "functionName": "myFunction"}
+<arguments>{"filePath": "path/to/file.ts", "functionName": "myFunction"}</arguments>
 </tool_call>`);
 
   parts.push(`\n## Multi-Step Reasoning`);
@@ -95,6 +108,12 @@ Available tools:
 4. Then make edits
 
 You do NOT need to do everything in one step. Read first, then edit after understanding.`);
+
+  parts.push(`\n## Greeting Guard`);
+  parts.push(`If the user's message is only a greeting (hi, hello, hey, salam, etc.):`);
+  parts.push(`- Respond with a friendly greeting.`);
+  parts.push(`- Do NOT call read_file or any other tool.`);
+  parts.push(`- Do NOT inspect or read any project files.`);
 
   parts.push(`\n## Edit Planning`);
   parts.push(`Before editing files, you MUST:

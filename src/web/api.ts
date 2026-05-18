@@ -5,7 +5,7 @@ import { getProjectInfo } from '../context/builder.js';
 import { readFile, shouldIgnore } from '../files/reader.js';
 import { writeFileWithBackup, previewEdit } from '../files/writer.js';
 import { getGitInfo } from '../utils/git.js';
-import { createClient } from '../ai/client.js';
+import { createClient, isOnlyGreeting } from '../ai/client.js';
 import type { Message } from '../ai/types.js';
 import { buildSystemPrompt } from '../prompts/system.js';
 import { detectSecrets } from '../utils/secrets.js';
@@ -101,6 +101,11 @@ export function saveFile(path: string, content: string): { success: boolean; err
 }
 
 export async function handleChat(req: ChatRequest): Promise<{ message: string; toolCalls: { type: string; params: Record<string, string> }[] }> {
+  const lastMessage = req.messages[req.messages.length - 1];
+  if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastMessage.content)) {
+    return { message: 'Hi! How can I help with this project?', toolCalls: [] };
+  }
+
   const config = loadConfig();
   if (!config) {
     throw new Error('No configuration found. Run: hysa chat');
