@@ -3,6 +3,7 @@ import { buildSystemPrompt, resolvePromptMode } from './dist/prompts/system.js';
 import { createClient, isOnlyGreeting, getCasualResponse } from './dist/ai/client.js';
 import { getFallbackEvents, clearFallbackEvents, resetHealth, getAllHealth, toHealthSummary } from './dist/ai/model-health.js';
 import { getProjectInfo } from './dist/context/builder.js';
+import { resolveFileReadPath, isGeneratedOutput } from './dist/files/reader.js';
 import { resolve } from 'node:path';
 
 const workingDir = resolve('.');
@@ -242,6 +243,59 @@ process.on('exit', () => {
     console.log(`  ✗ Error: ${err.message}`);
   }
 
+  // ===== TEST 4a: App Title File Discovery =====
+  section('TEST 4a: App Title File Discovery — resolveFileReadPath');
+  try {
+    console.log('  Testing resolveFileReadPath for index.html:');
+    const htmlPaths = resolveFileReadPath('index.html');
+    const htmlIdx = htmlPaths.indexOf('index.html');
+    const webIdx = htmlPaths.indexOf('web/index.html');
+    const distIdx = htmlPaths.indexOf('web/dist/index.html');
+    console.log(`  Candidate order: ${htmlPaths.join(', ')}`);
+    console.log(`  web/index.html in list: ${webIdx >= 0 ? '✓' : '✗'} (index ${webIdx})`);
+    console.log(`  web/dist/index.html in list: ${distIdx >= 0 ? '✗ (should be excluded)' : '✓ (excluded as generated)'}`);
+    console.log(`  root index.html before web/src/index.html: ${htmlIdx < htmlPaths.indexOf('web/src/index.html') ? '✓' : '✗'}`);
+    console.log(`  Total candidates: ${htmlPaths.length} (expected ~8-9)`);
+
+    console.log('');
+    console.log('  Testing resolveFileReadPath for App.tsx:');
+    const appPaths = resolveFileReadPath('App.tsx');
+    const webSrcApp = appPaths.indexOf('web/src/App.tsx');
+    const srcApp = appPaths.indexOf('src/App.tsx');
+    const rootApp = appPaths.indexOf('App.tsx');
+    console.log(`  Candidate order: ${appPaths.join(', ')}`);
+    console.log(`  web/src/App.tsx before src/App.tsx: ${webSrcApp >= 0 && srcApp >= 0 && webSrcApp < srcApp ? '✓' : '✗'}`);
+    console.log(`  App.jsx alternatives included: ${appPaths.some(p => p.includes('App.jsx')) ? '✓' : '✗'}`);
+
+    console.log('');
+    console.log('  Testing isGeneratedOutput:');
+    console.log(`  web/dist/index.html: ${isGeneratedOutput('web/dist/index.html') ? '✓ generated' : '✗ not detected'}`);
+    console.log(`  dist/index.html: ${isGeneratedOutput('dist/index.html') ? '✓ generated' : '✗ not detected'}`);
+    console.log(`  web/index.html: ${isGeneratedOutput('web/index.html') ? '✗ false positive' : '✓ not generated'}`);
+    console.log(`  index.html: ${isGeneratedOutput('index.html') ? '✗ false positive' : '✓ not generated'}`);
+    console.log(`  build/output.js: ${isGeneratedOutput('build/output.js') ? '✓ generated' : '✗ not detected'}`);
+    console.log(`  .next/bundle.js: ${isGeneratedOutput('.next/bundle.js') ? '✓ generated' : '✗ not detected'}`);
+    console.log(`  coverage/lcov.info: ${isGeneratedOutput('coverage/lcov.info') ? '✓ generated' : '✗ not detected'}`);
+    console.log(`  out/index.html: ${isGeneratedOutput('out/index.html') ? '✓ generated' : '✗ not detected'}`);
+    console.log(`  src/index.html: ${isGeneratedOutput('src/index.html') ? '✗ false positive' : '✓ not generated'}`);
+
+    // Verify web/index.html is actually the file that will be used for this project
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const webIndexExists = existsSync(join(resolve('.'), 'web/index.html'));
+    console.log('');
+    console.log(`  Project check: web/index.html exists: ${webIndexExists ? '✓' : '✗ (project may differ)'}`);
+
+    hr();
+    let allDiscoveryPass = true;
+    if (distIdx >= 0) { console.log('  ✗ FAIL: web/dist/index.html should be excluded from read_file candidates'); allDiscoveryPass = false; }
+    if (webIdx < 0) { console.log('  ✗ FAIL: web/index.html should be in candidate list'); allDiscoveryPass = false; }
+    if (htmlIdx < 0 || webSrcApp < 0) { console.log('  ✗ FAIL: expected candidates missing'); allDiscoveryPass = false; }
+    console.log(`  ${allDiscoveryPass ? '✓ ALL DISCOVERY CHECKS PASSED' : '✗ Some checks failed'}`);
+  } catch (err) {
+    console.log(`  ✗ Error in discovery test: ${err.message}`);
+  }
+
   // ===== TEST 5: Free Provider Fallback =====
   section('TEST 5: Free Provider Fallback — force bad key');
   console.log('  Simulating fallback: set DeepSeek with invalid key, expect fallback chain');
@@ -477,6 +531,7 @@ process.on('exit', () => {
   console.log(`  Test 2 (Coding Q):        openrouter/qwen3-coder:free`);
   console.log(`  Test 3 (Project scan):    openrouter/qwen3-coder:free`);
   console.log(`  Test 4 (Edit request):    openrouter/qwen3-coder:free`);
+  console.log(`  Test 4a (File discovery): pure logic, no API call`);
   console.log(`  Test 5 (Fallback):        deepseek → fallback chain`);
   console.log(`  Test 6 (Experimental):    pollinations/openai (compact prompt)`);
   console.log(`  Test 7 (Web UI):          http://localhost:8787`);

@@ -189,11 +189,19 @@ Risk: The calculateTotal function is used in 3 other files, verify they still wo
     parts.push(`- Do NOT ask the user for the file path unless all alternatives above have failed.`);
     parts.push(`\n## App Title Tasks`);
     parts.push(`When the user asks to change the app title (e.g. "change the app title", "update title", "rename app"):`);
-    parts.push(`- Prioritize reading index.html from the project root FIRST.`);
-    parts.push(`- In Vite/React projects, the title is in index.html, NOT in src/App.tsx.`);
-    parts.push(`- Try files in this order: index.html, public/index.html, app/index.html, src/index.html, src/App.tsx`);
-    parts.push(`- Use read_file on the first file that exists (check the project tree above).`);
-    parts.push(`- Do NOT ask the user which file to edit — the system will auto-resolve.`);
+    parts.push(`- Look for index.html in the project root, web/, public/, or src/ directories.`);
+    parts.push(`- In Vite/React projects, the title is typically in index.html at root or web/index.html.`);
+    parts.push(`- Try files in this order: web/index.html, index.html, public/index.html, src/App.tsx`);
+    parts.push(`- Use read_file on the first file that exists (the system auto-resolves missing paths).`);
+    parts.push(`- NEVER read or edit files inside dist/, web/dist/, build/, or out/ directories — they are generated output.`);
+    parts.push(`- Do NOT ask the user which file to edit — read and propose the edit directly.`);
+    parts.push(`- If the user did not specify a new title, ask: "I found the title in <file>. What should the new title be?"`);
+    parts.push(`- If the user specified a new title, apply the edit immediately.`);
+    parts.push(`\n## Generated Output`);
+    parts.push(`The following directories contain generated/build output and must NOT be edited:`);
+    parts.push(`- dist/, web/dist/, build/, out/, .next/, coverage/, __pycache__`);
+    parts.push(`- Editing generated files is blocked unless YOLO mode is enabled.`);
+    parts.push(`- When auto-resolving file paths, generated output files are skipped.`);
     if (agentMode) {
         parts.push(getModePromptAddendum(agentMode));
     }

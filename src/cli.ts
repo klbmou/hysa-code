@@ -19,7 +19,7 @@ import { estimateTokens, truncateMessages } from './context/tokens.js';
 import { buildSystemPrompt, resolvePromptMode } from './prompts/system.js';
 import type { PromptMode } from './prompts/system.js';
 import { isProtectedFilePath, PROTECTED_FILE_MESSAGE, normalizeToolParams, containsOnlyToolSyntax, hasToolSyntax, stripToolCallBlocks } from './ai/tools.js';
-import { readFile, resolveFileReadPath } from './files/reader.js';
+import { readFile, resolveFileReadPath, isGeneratedOutput } from './files/reader.js';
 import { writeFileWithBackup, previewEdit } from './files/writer.js';
 import { Spinner } from './utils/spinner.js';
 import { detectSecrets } from './utils/secrets.js';
@@ -439,8 +439,8 @@ async function handleToolCall(
       if (!filePath) return 'Error: missing filePath parameter';
 
       const spinner = new Spinner();
+      spinner.start('Searching...');
       const pathsToTry = resolveFileReadPath(filePath);
-      spinner.start(`READ  ${pathsToTry[0]}`);
 
       let foundPath = '';
       let content: string | null = null;
@@ -465,7 +465,7 @@ async function handleToolCall(
       }
 
       if (foundPath !== filePath) {
-        spinner.succeed(`OK   Read ${foundPath} (auto-resolved from ${filePath})`);
+        spinner.succeed(`OK   Read ${foundPath} (auto-resolved)`);
       } else {
         spinner.succeed(`OK   Read ${filePath} (${content.split('\n').length} lines)`);
       }
@@ -482,6 +482,11 @@ async function handleToolCall(
       if (isProtectedFilePath(filePath)) {
         if (debug) console.log(pc.dim(`  [debug] blocked protected file edit: ${filePath}`));
         return PROTECTED_FILE_MESSAGE;
+      }
+
+      // Block edits to generated output (dist, build, etc.) unless YOLO
+      if (isGeneratedOutput(filePath) && !yolo) {
+        return `Edit blocked: ${filePath} is in a generated output directory (dist, build, etc.). To edit generated files enable YOLO mode.`;
       }
 
       const spinner = new Spinner();
@@ -664,6 +669,22 @@ interface PendingEdit {
   userRequest: string;
 }
 
+interface PendingAppTitle {
+  filePath: string;
+}
+
+// Regex patterns for app title tasks
+const APP_TITLE_RE = /change\s+(the\s+)?app\s+(title|name)|update\s+(the\s+)?title|rename\s+(the\s+)?app/i;
+const NEW_TITLE_RE = /\b(?:to|as)\s+["']?(.+?)["']?\s*$/i;
+
+function extractReadFilePath(results: string[]): string | null {
+  for (const r of results) {
+    const m = r.match(/^(?:OK\s+)?Read\s+(.+?)(?:\s+\(|\s*$)/im) || r.match(/^Content of\s+(.+?):/);
+    if (m) return m[1].trim();
+  }
+  return null;
+}
+
 process.on('SIGINT', () => {
   if (cancelThinking) {
     thinkingCancelled = true;
@@ -776,6 +797,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
   let currentAgentMode: AgentMode = config.agentMode || 'chat';
   let currentTask = getActiveTask();
   let pendingEdit: PendingEdit | null = null;
+  let pendingAppTitle: PendingAppTitle | null = null;
 
   showHeader(config, gitInfo, tokenEstimate, currentAgentMode, yoloMode);
 
@@ -1547,6 +1569,47 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       continue;
     }
 
+    // ── Pending app title handler ────────────────────
+    if (pendingAppTitle && !trimmed.startsWith('/')) {
+      const filePath = pendingAppTitle.filePath;
+      const content = readFile(filePath);
+      if (!content) {
+        console.log(`ERR   Could not read ${filePath}\n`);
+        pendingAppTitle = null;
+        continue;
+      }
+      const newTitle = trimmed;
+      const updated = content.replace(/(<title>)(.*?)(<\/title>)/is, `$1${newTitle}$3`);
+      if (updated === content) {
+        console.log(`ERR   Could not find <title> tag in ${filePath}\n`);
+        pendingAppTitle = null;
+        continue;
+      }
+      pendingEdit = {
+        filePath,
+        content: updated,
+        originalContent: content,
+        plan: `Change app title to "${newTitle}"`,
+        userRequest: `change app title to ${newTitle}`,
+      };
+      pendingAppTitle = null;
+      const relPath = relative(workingDir, filePath);
+      console.log(`\nPreview: ${relPath}\n`);
+      const diff = previewEdit(filePath, updated);
+      if (diff) console.log(formatDiff(diff));
+      console.log();
+      if (yoloMode) {
+        writeFileWithBackup(filePath, updated);
+        invalidateCache();
+        console.log(`OK   Applied edit to ${relPath}\n`);
+        addEdit({ file: filePath, timestamp: new Date().toISOString(), summary: `Edited ${filePath}` });
+        pendingEdit = null;
+      } else {
+        console.log(`  Type "apply" or "do it" to confirm.\n`);
+      }
+      continue;
+    }
+
     // ── AI message ──────────────────────────────────
     if (!trimmed) continue;
 
@@ -1919,12 +1982,33 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
         const editedFiles = toolResults
           .filter(r => r.startsWith('Edit applied successfully'))
           .map(r => r.replace('Edit applied successfully to ', ''));
-        console.log(pc.green(`Done. Applied edit to ${editedFiles.join(', ')}.\n`));
+        console.log(`Done. Applied edit to ${editedFiles.join(', ')}.\n`);
         // Still push results to messages for history
         let assistantContent = response.message || '';
         assistantContent += '\n\nTool results:\n' + toolResults.join('\n');
         allMessages.push({ role: 'assistant', content: assistantContent });
         break;
+      }
+
+      // App title task: if model only read files (no edit) and asks for new title, stop loop
+      if (APP_TITLE_RE.test(trimmed) && !editApplied) {
+        const allReads = response.toolCalls.every(tc => tc.type === 'read_file');
+        const htmlRead = response.toolCalls.some(tc => /index\.html/.test(tc.params.filePath || ''));
+        const asksForTitle = /what\s+(should|do you want)\s+(the\s+)?(new\s+)?title/i.test(response.message || '');
+        const hasNewTitle = NEW_TITLE_RE.test(trimmed);
+
+        if (allReads && htmlRead && (asksForTitle || !hasNewTitle)) {
+          const foundPath = extractReadFilePath(toolResults);
+          if (foundPath) {
+            pendingAppTitle = { filePath: foundPath };
+            const relPath = relative(workingDir, foundPath);
+            console.log(`  I found the app title in ${relPath}. What should the new title be?\n`);
+            let assistantContent = response.message || '';
+            assistantContent += '\n\nTool results:\n' + toolResults.join('\n');
+            allMessages.push({ role: 'assistant', content: assistantContent });
+            break;
+          }
+        }
       }
 
       // Show intermediate thinking (strip raw tool syntax)
