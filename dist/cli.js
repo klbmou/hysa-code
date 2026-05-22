@@ -149,43 +149,26 @@ async function setupFirstRun() {
     return config;
 }
 // ── Helpers ──────────────────────────────────────────────
-function getCategoryTag(category, provider) {
-    const tier = PROVIDER_TIERS[provider];
-    const tierLabel = TIER_LABELS[tier];
-    const color = category === 'local_free' ? pc.cyan : category === 'cloud_free' ? pc.green : category === 'experimental_free' ? pc.magenta : pc.yellow;
-    return color(`${tierLabel.icon}  ${tierLabel.label}`);
-}
 function showHeader(config, gitInfo, contextTokens, agentMode, yolo) {
     const providerLabel = PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider;
-    const category = PROVIDER_CATEGORIES[config.currentProvider];
-    const categoryTag = getCategoryTag(category, config.currentProvider);
-    const lines = [];
-    lines.push(pc.bold(pc.magenta('┌──────────────────────────────────────────────────┐')));
-    lines.push(pc.bold(pc.magenta(`│  ${pc.bold('💜 HYSA Code')}     ${pc.white(providerLabel).padEnd(32)}│`)));
-    lines.push(pc.bold(pc.magenta(`│  ${pc.dim('Model:')} ${pc.white(config.currentModel).padEnd(42)}│`)));
-    lines.push(pc.bold(pc.magenta(`│  ${categoryTag.padEnd(47)}│`)));
-    if (agentMode) {
-        const modeTag = MODE_LABELS[agentMode] || agentMode;
-        lines.push(pc.bold(pc.magenta(`│  ${pc.dim('Mode:')} ${modeTag.padEnd(43)}│`)));
+    const tier = TIER_LABELS[PROVIDER_TIERS[config.currentProvider]];
+    const parts = [];
+    parts.push(`${pc.bold('HYSA Code')}  ${pc.dim('·')}  ${providerLabel} ${pc.dim('·')} ${config.currentModel} ${pc.dim('·')} ${tier?.label || ''}`);
+    if (agentMode || yolo || gitInfo?.branch) {
+        const modeParts = [];
+        if (agentMode)
+            modeParts.push(`${MODE_LABELS[agentMode] || agentMode}`);
+        if (yolo)
+            modeParts.push('YOLO');
+        const modeStr = modeParts.length > 0 ? ` ${modeParts.join(' · ')}  ${pc.dim('|')}` : '';
+        const gitStr = gitInfo?.branch ? `  Git: ${gitInfo.branch} ${gitInfo.hasChanges ? pc.yellow('●') : pc.green('○')}` : '';
+        parts.push(` Mode:${modeStr}${gitStr}${contextTokens !== undefined ? `  ${pc.dim('·')}  ~${contextTokens.toLocaleString()} tokens` : ''}`);
     }
-    if (yolo) {
-        lines.push(pc.bold(pc.magenta(`│  ${pc.yellow('Mode: ⚡ YOLO').padEnd(47)}│`)));
+    else if (contextTokens !== undefined) {
+        parts.push(` Context: ~${contextTokens.toLocaleString()} tokens`);
     }
-    if (config.lightMode !== false && LOCAL_FREE_PROVIDERS.includes(config.currentProvider)) {
-        lines.push(pc.bold(pc.magenta(`│  ${pc.cyan('Light: 💡 ON').padEnd(47)}│`)));
-    }
-    if (gitInfo?.branch) {
-        const status = gitInfo.hasChanges ? pc.yellow('●') : pc.green('○');
-        const branchText = `${pc.dim('Git:')} ${gitInfo.branch} ${status}`;
-        lines.push(pc.bold(pc.magenta(`│  ${branchText.padEnd(47)}│`)));
-    }
-    if (contextTokens !== undefined) {
-        const tokenText = `${pc.dim('Context estimate:')} ~${contextTokens.toLocaleString()} tokens`;
-        lines.push(pc.bold(pc.magenta(`│  ${tokenText.padEnd(47)}│`)));
-    }
-    lines.push(pc.bold(pc.magenta('└──────────────────────────────────────────────────┘')));
-    lines.push('');
-    console.log(lines.join('\n'));
+    console.log(pc.dim(parts.join('\n')));
+    console.log();
 }
 function formatDiff(diff) {
     return diff
@@ -402,7 +385,7 @@ async function handleToolCall(toolCall, yolo = false, debug = false) {
                 return 'Error: missing filePath parameter';
             const spinner = new Spinner();
             const pathsToTry = resolveFileReadPath(filePath);
-            spinner.start(`📖 Reading: ${pathsToTry.length > 1 ? `${pathsToTry[0]} (trying ${pathsToTry.length} paths)` : filePath}`);
+            spinner.start(`READ  ${pathsToTry[0]}`);
             let foundPath = '';
             let content = null;
             for (const tryPath of pathsToTry) {
@@ -413,20 +396,20 @@ async function handleToolCall(toolCall, yolo = false, debug = false) {
                 }
             }
             if (content === null) {
-                spinner.fail(`File not found: ${filePath}`);
+                spinner.fail(`ERR  File not found: ${filePath}`);
                 return `Error: file not found: ${filePath}`;
             }
             const secrets = detectSecrets(content);
             if (secrets.length > 0) {
-                spinner.fail(`⚠ Secrets detected in ${foundPath}! Not sending to AI.`);
-                console.log(pc.red(`  Found: ${secrets.join(', ')}`));
+                spinner.fail(`ERR  Secrets detected in ${foundPath}!`);
+                console.log(`  Found: ${secrets.join(', ')}`);
                 return `Blocked: ${foundPath} contains potential secrets.`;
             }
             if (foundPath !== filePath) {
-                spinner.succeed(`Read ${foundPath} (auto-resolved from ${filePath})`);
+                spinner.succeed(`OK   Read ${foundPath} (auto-resolved from ${filePath})`);
             }
             else {
-                spinner.succeed(`Read ${filePath} (${content.split('\n').length} lines)`);
+                spinner.succeed(`OK   Read ${filePath} (${content.split('\n').length} lines)`);
             }
             addRecentFile(foundPath);
             return `Content of ${foundPath}:\n\`\`\`\n${content}\n\`\`\``;
@@ -443,30 +426,30 @@ async function handleToolCall(toolCall, yolo = false, debug = false) {
                 return PROTECTED_FILE_MESSAGE;
             }
             const spinner = new Spinner();
-            spinner.start(`✏️  Preparing edit: ${filePath}`);
+            spinner.start(`EDIT ${filePath}`);
             const diff = previewEdit(filePath, newContent);
             if (diff === null) {
-                spinner.succeed('No changes needed');
+                spinner.succeed('OK   No changes needed');
                 return `No changes needed for ${filePath}`;
             }
             spinner.stop();
-            console.log(`\n${pc.yellow('✏️  Proposed edit:')} ${pc.bold(filePath)}`);
+            console.log(`\nProposed edit: ${filePath}`);
             console.log(formatDiff(diff));
             if (yolo) {
                 writeFileWithBackup(filePath, newContent);
                 invalidateCache();
-                console.log(pc.green(`YOLO: Applied edit to ${filePath}\n`));
+                console.log(`OK   Applied edit to ${filePath}\n`);
                 addEdit({ file: filePath, timestamp: new Date().toISOString(), summary: `Edited ${filePath}` });
                 return `Edit applied successfully to ${filePath}`;
             }
             const approved = await confirm({ message: 'Apply this edit?', default: true });
             if (!approved) {
-                console.log(pc.red('✗ Edit rejected'));
+                console.log(`ERR  Edit rejected`);
                 return `Edit rejected by user for ${filePath}`;
             }
             writeFileWithBackup(filePath, newContent);
             invalidateCache();
-            console.log(pc.green(`✓ Applied edit to ${filePath}\n`));
+            console.log(`OK   Applied edit to ${filePath}\n`);
             addEdit({ file: filePath, timestamp: new Date().toISOString(), summary: `Edited ${filePath}` });
             return `Edit applied successfully to ${filePath}`;
         }
@@ -475,52 +458,49 @@ async function handleToolCall(toolCall, yolo = false, debug = false) {
             if (!command)
                 return 'Error: missing command parameter';
             const safety = classifyCommand(command);
-            console.log(`\n${pc.yellow('⚡ Command:')} ${pc.bold(command)}`);
+            console.log(`\nRUN   ${command}`);
             if (safety === 'dangerous') {
-                console.log(pc.red('  ⚠ DANGEROUS COMMAND DETECTED'));
-                console.log(pc.red('  This command may cause data loss or system damage.'));
-                const approved = await confirm({ message: pc.red('Are you SURE you want to run this?'), default: false });
+                console.log('  WARN: Dangerous command detected');
+                const approved = await confirm({ message: 'Are you SURE you want to run this?', default: false });
                 if (!approved) {
-                    console.log(pc.red('✗ Command rejected (dangerous)\n'));
+                    console.log('ERR  Command rejected (dangerous)\n');
                     return `Blocked: dangerous command rejected by user: ${command}`;
                 }
-                console.log(pc.yellow('  Running dangerous command...\n'));
+                console.log('  Running dangerous command...\n');
             }
             else if (yolo && safety === 'safe') {
-                // YOLO: auto-run safe commands
-                console.log(pc.green('  YOLO: Running safe command...\n'));
+                console.log('  YOLO: Running safe command...\n');
             }
             else if (yolo && safety === 'caution') {
-                // YOLO: still ask for caution commands
-                console.log(pc.yellow('  ⚡ Caution command detected.'));
+                console.log('  Caution command detected.');
                 const approved = await confirm({ message: 'Run this command?', default: true });
                 if (!approved) {
-                    console.log(pc.red('✗ Command rejected\n'));
+                    console.log('ERR  Command rejected\n');
                     return `Command execution rejected by user: ${command}`;
                 }
             }
             else {
                 const approved = await confirm({ message: 'Run this command?', default: safety === 'safe' });
                 if (!approved) {
-                    console.log(pc.red('✗ Command rejected'));
+                    console.log('ERR  Command rejected');
                     return `Command execution rejected by user: ${command}`;
                 }
             }
             const spinner = new Spinner();
-            spinner.start('⚙ Running command...');
+            spinner.start('RUN   (running...)');
             try {
                 const result = runCommandSync(command);
-                spinner.succeed('Command completed');
+                spinner.succeed('OK    Command completed');
                 if (result.stdout.trim()) {
-                    console.log(pc.dim(result.stdout));
+                    console.log(result.stdout);
                 }
                 return `Command executed successfully:\n${result.stdout}`;
             }
             catch (error) {
                 const err = error;
-                spinner.fail('Command failed');
+                spinner.fail('ERR   Command failed');
                 const msg = err.message || 'Unknown error';
-                console.log(pc.red(msg));
+                console.log(msg);
                 return `Command failed:\n${msg}`;
             }
         }
@@ -529,13 +509,13 @@ async function handleToolCall(toolCall, yolo = false, debug = false) {
             if (!filePath)
                 return 'Error: missing filePath parameter';
             const spinner = new Spinner();
-            spinner.start(`🔍 Listing symbols: ${filePath}`);
+            spinner.start(`SYMS ${filePath}`);
             const symbols = listSymbols(filePath);
             if (symbols.length === 0) {
-                spinner.fail('No symbols found');
+                spinner.fail('ERR  No symbols found');
                 return `No symbols found in ${filePath}`;
             }
-            spinner.succeed(`Found ${symbols.length} symbols`);
+            spinner.succeed(`OK   Found ${symbols.length} symbols`);
             const result = symbols.map(s => `  ${s.type} ${s.name} (line ${s.line})`).join('\n');
             return `Symbols in ${filePath}:\n${result}`;
         }
@@ -544,13 +524,13 @@ async function handleToolCall(toolCall, yolo = false, debug = false) {
             if (!symbol)
                 return 'Error: missing symbol parameter';
             const spinner = new Spinner();
-            spinner.start(`🔎 Finding references: ${symbol}`);
+            spinner.start(`REFS ${symbol}`);
             const refs = findReferences(resolve('.'), symbol);
             if (refs.length === 0) {
-                spinner.fail('No references found');
+                spinner.fail('ERR  No references found');
                 return `No references found for "${symbol}"`;
             }
-            spinner.succeed(`Found ${refs.length} references`);
+            spinner.succeed(`OK   Found ${refs.length} references`);
             const result = refs.slice(0, 20).map(r => `  ${r.file}:${r.line}  ${r.content}`).join('\n');
             const extra = refs.length > 20 ? `\n  ... and ${refs.length - 20} more` : '';
             return `References to "${symbol}":\n${result}${extra}`;
@@ -1122,7 +1102,7 @@ async function chatLoop(initialConfig, initialYolo = false) {
             else {
                 const lines = content.split('\n');
                 const maxLines = Math.min(lines.length, 80);
-                console.log(pc.cyan(`\n📄 ${filePath} (${lines.length} lines):\n`));
+                console.log(pc.cyan(`\n${filePath} (${lines.length} lines):\n`));
                 for (let i = 0; i < maxLines; i++) {
                     const lineNum = `${i + 1}`.padStart(4, ' ');
                     console.log(`${pc.dim(lineNum)} ${lines[i]}`);
@@ -1140,25 +1120,25 @@ async function chatLoop(initialConfig, initialYolo = false) {
                 console.log(pc.red('Usage: /run <command>\n'));
                 continue;
             }
-            console.log(`\n${pc.yellow('⚡ Command:')} ${pc.bold(command)}`);
+            console.log(`\n$ ${command}`);
             const approved = await confirm({ message: 'Run this command?', default: false });
             if (!approved) {
-                console.log(pc.red('✗ Rejected\n'));
+                console.log('ERR  Rejected\n');
                 continue;
             }
             const spinner = new Spinner();
-            spinner.start('⚙ Running...');
+            spinner.start('RUN   (running...)');
             try {
                 const result = runCommandSync(command);
-                spinner.succeed('Done');
+                spinner.succeed('OK    Done');
                 if (result.stdout.trim()) {
-                    console.log(pc.dim(result.stdout));
+                    console.log(result.stdout);
                 }
             }
             catch (error) {
                 const err = error;
-                spinner.fail('Failed');
-                console.log(pc.red(err.message || 'Unknown error'));
+                spinner.fail('ERR   Failed');
+                console.log(err.message || 'Unknown error');
             }
             console.log();
             continue;
@@ -1369,35 +1349,35 @@ async function chatLoop(initialConfig, initialYolo = false) {
             console.log();
             if (yoloMode) {
                 const sp = new Spinner();
-                sp.start('✎ Applying (YOLO)...');
+                sp.start('EDIT Applying (YOLO)...');
                 try {
                     writeFileWithBackup(pendingEdit.filePath, pendingEdit.content);
-                    sp.succeed('Applied');
-                    console.log(pc.green(`YOLO: Applied edit to ${relPath}\n`));
+                    sp.succeed('OK   Applied');
+                    console.log(`Applied edit to ${relPath}\n`);
                 }
                 catch (err) {
-                    sp.fail('Failed');
-                    console.log(pc.red(`  Error: ${err.message}\n`));
+                    sp.fail('ERR   Failed');
+                    console.log(`  Error: ${err.message}\n`);
                 }
                 pendingEdit = null;
                 continue;
             }
             const approved = await confirm({ message: 'Apply this edit?', default: true });
             if (!approved) {
-                console.log(pc.red('✗ Edit rejected.\n'));
+                console.log('ERR  Edit rejected.\n');
                 pendingEdit = null;
                 continue;
             }
             const sp = new Spinner();
-            sp.start('✎ Applying...');
+            sp.start('EDIT Applying...');
             try {
                 writeFileWithBackup(pendingEdit.filePath, pendingEdit.content);
-                sp.succeed('Applied');
-                console.log(pc.green(`✓ ${relPath} updated with backup created.\n`));
+                sp.succeed('OK   Applied');
+                console.log(`${relPath} updated with backup created.\n`);
             }
             catch (err) {
-                sp.fail('Failed');
-                console.log(pc.red(`  Error: ${err.message}\n`));
+                sp.fail('ERR   Failed');
+                console.log(`  Error: ${err.message}\n`);
             }
             pendingEdit = null;
             continue;
@@ -1408,7 +1388,7 @@ async function chatLoop(initialConfig, initialYolo = false) {
             if (checkPendingEditProtected())
                 continue;
             const relPath = relative(workingDir, pendingEdit.filePath);
-            console.log(pc.cyan(`\n📝 Preview: ${relPath}\n`));
+            console.log(`\nPreview: ${relPath}\n`);
             const diff = previewEdit(pendingEdit.filePath, pendingEdit.content);
             if (diff) {
                 console.log(formatDiff(diff));
@@ -1416,35 +1396,35 @@ async function chatLoop(initialConfig, initialYolo = false) {
             console.log();
             if (yoloMode) {
                 const sp = new Spinner();
-                sp.start('✎ Applying (YOLO)...');
+                sp.start('EDIT Applying (YOLO)...');
                 try {
                     writeFileWithBackup(pendingEdit.filePath, pendingEdit.content);
-                    sp.succeed('Applied');
-                    console.log(pc.green(`YOLO: Applied edit to ${relPath}\n`));
+                    sp.succeed('OK   Applied');
+                    console.log(`Applied edit to ${relPath}\n`);
                 }
                 catch (err) {
-                    sp.fail('Failed');
-                    console.log(pc.red(`  Error: ${err.message}\n`));
+                    sp.fail('ERR   Failed');
+                    console.log(`  Error: ${err.message}\n`);
                 }
                 pendingEdit = null;
                 continue;
             }
             const approved = await confirm({ message: 'Apply this edit?', default: true });
             if (!approved) {
-                console.log(pc.red('✗ Edit rejected.\n'));
+                console.log('ERR  Edit rejected.\n');
                 pendingEdit = null;
                 continue;
             }
             const sp = new Spinner();
-            sp.start('✎ Applying...');
+            sp.start('EDIT Applying...');
             try {
                 writeFileWithBackup(pendingEdit.filePath, pendingEdit.content);
-                sp.succeed('Applied');
-                console.log(pc.green(`✓ ${relPath} updated with backup created.\n`));
+                sp.succeed('OK   Applied');
+                console.log(`${relPath} updated with backup created.\n`);
             }
             catch (err) {
-                sp.fail('Failed');
-                console.log(pc.red(`  Error: ${err.message}\n`));
+                sp.fail('ERR   Failed');
+                console.log(`  Error: ${err.message}\n`);
             }
             pendingEdit = null;
             continue;
@@ -1544,6 +1524,8 @@ async function chatLoop(initialConfig, initialYolo = false) {
         const requestStart = Date.now();
         thinkingCancelled = false;
         const provLabel = PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider;
+        // Print user message clearly
+        console.log(`\n${pc.bold('You:')} ${trimmed}\n`);
         // Setup cancellation for this user request
         const requestAbortController = new AbortController();
         cancelThinking = () => { if (!requestAbortController.signal.aborted)
@@ -1552,7 +1534,7 @@ async function chatLoop(initialConfig, initialYolo = false) {
         const canStream = isSimpleQ && typeof client.sendMessageStream === 'function';
         if (canStream) {
             const spinnerStream = new Spinner();
-            spinnerStream.start(`🤔 ${provLabel} / ${config.currentModel}...`);
+            spinnerStream.start(`Working...`);
             let streamedContent = '';
             let streamError = null;
             let lastResponse = null;
@@ -1578,7 +1560,11 @@ async function chatLoop(initialConfig, initialYolo = false) {
                 const cleanMessage = stripToolCallBlocks(result.message);
                 const displayMsg = cleanMessage;
                 if (streamedContent.length === 0 && displayMsg) {
-                    console.log(`${pc.bold(pc.magenta('HYSA:'))} ${displayMsg}\n`);
+                    const lines = displayMsg.split('\n').filter(Boolean);
+                    for (const line of lines) {
+                        console.log(`  ${line}`);
+                    }
+                    console.log();
                 }
                 const safeUserMsg = wasTruncated ? `${trimmed}\n\n[Note: Some older context was trimmed for token safety]` : trimmed;
                 allMessages.push({ role: 'assistant', content: result.message });
@@ -1619,7 +1605,7 @@ async function chatLoop(initialConfig, initialYolo = false) {
         // ── Non-streaming path (existing behavior) ─────
         const spinner = new Spinner();
         thinkingCancelled = false;
-        spinner.start(`🤔 ${provLabel} / ${config.currentModel}...`);
+        spinner.start(`Working...`);
         // Multi-step auto-continue loop
         const MAX_STEPS = lightActive ? 2 : (isSimpleQ ? 1 : 5);
         let steps = 0;
@@ -1756,7 +1742,11 @@ async function chatLoop(initialConfig, initialYolo = false) {
                 }
                 const displayMsg = stripToolCallBlocks(aiMsg);
                 if (displayMsg && !containsOnlyToolSyntax(aiMsg)) {
-                    console.log(`${pc.bold(pc.magenta('HYSA:'))} ${displayMsg}\n`);
+                    const lines = displayMsg.split('\n').filter(Boolean);
+                    for (const line of lines) {
+                        console.log(`  ${line}`);
+                    }
+                    console.log();
                 }
                 const unparseable = /<\|?tool_call/.test(aiMsg) || /\b(edit_file|read_file|execute_command)\s*\(/.test(aiMsg);
                 if (unparseable) {
@@ -1790,7 +1780,11 @@ async function chatLoop(initialConfig, initialYolo = false) {
             // Show intermediate thinking (strip raw tool syntax)
             const intermediateMsg = stripToolCallBlocks(response.message || '');
             if (intermediateMsg && !containsOnlyToolSyntax(response.message || '')) {
-                console.log(`${pc.bold(pc.magenta('HYSA:'))} ${intermediateMsg}\n`);
+                const lines = intermediateMsg.split('\n').filter(Boolean);
+                for (const line of lines) {
+                    console.log(`  ${line}`);
+                }
+                console.log();
             }
             // Build assistant content with results
             let assistantContent = response.message || '';
@@ -1799,7 +1793,7 @@ async function chatLoop(initialConfig, initialYolo = false) {
             allMessages.push({ role: 'assistant', content: assistantContent });
             // If we have more steps, continue
             if (steps < MAX_STEPS) {
-                spinner.start(`🤔 ${provLabel} / ${config.currentModel} (step ${steps}/${MAX_STEPS})...`);
+                spinner.start(`Working... (step ${steps}/${MAX_STEPS})`);
             }
         }
         // Handle final state after loop

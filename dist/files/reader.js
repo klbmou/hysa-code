@@ -27,11 +27,15 @@ export function readFile(filePath) {
 }
 const COMMON_PARENT_DIRS = ['', 'public', 'app', 'src', 'client/src', 'client'];
 const WELL_KNOWN_FILES = new Set([
-    'index.html',
-    'App.tsx', 'App.jsx',
-    'main.tsx', 'main.jsx',
+    'index.html', 'App.tsx', 'App.jsx', 'main.tsx', 'main.jsx',
     'vite.config.ts', 'vite.config.js',
 ]);
+const EXTENSION_ALTERNATIVES = {
+    'App.tsx': ['App.jsx'],
+    'App.jsx': ['App.tsx'],
+    'main.tsx': ['main.jsx'],
+    'main.jsx': ['main.tsx'],
+};
 export function resolveFileReadPath(filePath) {
     const paths = [filePath];
     const basename = filePath.split(/[\/\\]/).pop() || '';
@@ -40,6 +44,18 @@ export function resolveFileReadPath(filePath) {
             const candidate = dir ? `${dir}/${basename}` : basename;
             if (!paths.includes(candidate)) {
                 paths.push(candidate);
+            }
+        }
+        // Also try extension alternatives
+        const altExts = EXTENSION_ALTERNATIVES[basename];
+        if (altExts) {
+            for (const alt of altExts) {
+                for (const dir of COMMON_PARENT_DIRS) {
+                    const candidate = dir ? `${dir}/${alt}` : alt;
+                    if (!paths.includes(candidate)) {
+                        paths.push(candidate);
+                    }
+                }
             }
         }
     }

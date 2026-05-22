@@ -368,7 +368,7 @@ function createFallbackClient(primary, config) {
             const provLabel = PROVIDER_DEFAULTS[provider]?.label || provider;
             addFallbackEvent(provider, model, `Trying ${provLabel} / ${model}...`);
             if (!debug)
-                console.log(`  ~ ${provLabel} / ${model}...`);
+                console.log(`  Trying ${provLabel} / ${model}...`);
             const ac = new AbortController();
             const timer = setTimeout(() => ac.abort(), timeoutMs);
             if (signal) {
@@ -408,10 +408,16 @@ function createFallbackClient(primary, config) {
                     const errMsg = lastError.message || '';
                     const cat = categorizeError(errMsg);
                     const attemptDuration = Date.now() - attemptStart;
-                    if (cat === 'timeout')
+                    if (cat === 'timeout') {
                         addFallbackEvent(provider, model, `${provLabel} timed out (${timeoutMs / 1000}s)`);
-                    else if (cat === 'rate_limit')
+                        if (!debug)
+                            console.log('  Timed out. Trying next...');
+                    }
+                    else if (cat === 'rate_limit') {
                         addFallbackEvent(provider, model, `${provLabel} rate-limited`);
+                        if (!debug)
+                            console.log('  Rate limited. Trying next...');
+                    }
                     markHealth(provider, model, 'unhealthy', friendlyError(errMsg, provider), cat, attemptDuration);
                     recordError(errMsg, provider, model);
                     if (debug) {
@@ -465,14 +471,7 @@ function createFallbackClient(primary, config) {
                     console.log(`  [debug] Model fallback to ${altModel}`);
                 result = await tryProvider(primary, altModel, getProviderTimeout(primary, false), 'Model fallback');
                 if (result) {
-                    const errMsg = lastError ? friendlyError(lastError.message, primary) : null;
-                    if (errMsg) {
-                        console.log(`  ⚡ ${errMsg}`);
-                        console.log(`  ⚡ Switched to ${altModel} on ${PROVIDER_DEFAULTS[primary]?.label || primary}.`);
-                    }
-                    else {
-                        console.log(`  ⚡ Switched temporarily to ${altModel}.`);
-                    }
+                    console.log(`  OK Switched to ${altModel} on ${PROVIDER_DEFAULTS[primary]?.label || primary}.`);
                     setLastFallbackUsed(`${PROVIDER_DEFAULTS[primary]?.label || primary} / ${altModel}`);
                     addFallbackEvent(primary, altModel, `Switched to ${PROVIDER_DEFAULTS[primary]?.label || primary} / ${altModel}`);
                     return result;
@@ -516,7 +515,7 @@ function createFallbackClient(primary, config) {
             }
             addFallbackEvent(group.provider, '', `Trying ${provLabel}...`);
             if (!debug)
-                console.log(`  ~ ${provLabel}...`);
+                console.log(`  Trying ${provLabel}...`);
             if (debug) {
                 console.log(`  [debug] Provider fallback ${providerFallbackCount + 1}/${MAX_FALLBACK_PROVIDERS}: ${provLabel} (${group.models.length} models)`);
             }
@@ -533,14 +532,7 @@ function createFallbackClient(primary, config) {
                 const modelResult = await tryProvider(group.provider, model, fbTimeout, `Fallback ${providerFallbackCount + 1}`);
                 if (modelResult) {
                     const label = PROVIDER_DEFAULTS[group.provider]?.label || group.provider;
-                    const errMsgFromPrimary = lastError ? friendlyError(lastError.message, primary) : null;
-                    if (errMsgFromPrimary) {
-                        console.log(`  ⚡ ${errMsgFromPrimary}`);
-                        console.log(`  ⚡ Switched to ${label} / ${model}.`);
-                    }
-                    else {
-                        console.log(`  ⚡ Switched to ${label} / ${model}.`);
-                    }
+                    console.log(`  OK Switched to ${label} / ${model}.`);
                     setLastFallbackUsed(`${label} / ${model}`);
                     addFallbackEvent(group.provider, model, `Switched to ${label} / ${model}`);
                     if (debug) {

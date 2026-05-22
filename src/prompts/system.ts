@@ -221,6 +221,14 @@ Risk: The calculateTotal function is used in 3 other files, verify they still wo
   parts.push(`- The system will automatically retry common alternatives if the first path fails.`);
   parts.push(`- Do NOT ask the user for the file path unless all alternatives above have failed.`);
 
+  parts.push(`\n## App Title Tasks`);
+  parts.push(`When the user asks to change the app title (e.g. "change the app title", "update title", "rename app"):`);
+  parts.push(`- Prioritize reading index.html from the project root FIRST.`);
+  parts.push(`- In Vite/React projects, the title is in index.html, NOT in src/App.tsx.`);
+  parts.push(`- Try files in this order: index.html, public/index.html, app/index.html, src/index.html, src/App.tsx`);
+  parts.push(`- Use read_file on the first file that exists (check the project tree above).`);
+  parts.push(`- Do NOT ask the user which file to edit — the system will auto-resolve.`);
+
   if (agentMode) {
     parts.push(getModePromptAddendum(agentMode));
   }
