@@ -7,14 +7,16 @@ export function createOpenAIClient(apiKey: string, model: string): AIClient {
 
   return {
     async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
+      const openaiMessages: any[] = [
+        { role: 'system', content: systemPrompt },
+        ...messages.map(m => ({ role: m.role as string, content: m.content })),
+      ];
+
       const response = await client.chat.completions.create(
         {
           model,
           max_tokens: 4096,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            ...messages.map(m => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content })),
-          ],
+          messages: openaiMessages,
         },
         { signal },
       );
@@ -28,15 +30,17 @@ export function createOpenAIClient(apiKey: string, model: string): AIClient {
     },
 
     async sendMessageStream(messages: Message[], systemPrompt: string, onEvent: (event: StreamEvent) => void, signal?: AbortSignal): Promise<AIResponse> {
+      const openaiMessages: any[] = [
+        { role: 'system', content: systemPrompt },
+        ...messages.map(m => ({ role: m.role as string, content: m.content })),
+      ];
+
       const stream = await client.chat.completions.create(
         {
           model,
           max_tokens: 4096,
           stream: true,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            ...messages.map(m => ({ role: m.role as 'user' | 'assistant' | 'system', content: m.content })),
-          ],
+          messages: openaiMessages,
         },
         { signal },
       );

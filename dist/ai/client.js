@@ -603,18 +603,27 @@ export function getCasualResponse(text) {
     const trimmed = text.trim().toLowerCase();
     return CASUAL_RESPONSES[trimmed] || null;
 }
+function getMessageText(content) {
+    if (typeof content === 'string')
+        return content;
+    if (Array.isArray(content)) {
+        const textPart = content.find(p => p.type === 'text');
+        return textPart?.text ?? String(content);
+    }
+    return String(content);
+}
 function applyGreetingGuard(client) {
     const guarded = {
         async sendMessage(messages, systemPrompt, signal) {
             const lastUser = [...messages].reverse().find(m => m.role === 'user');
             if (lastUser) {
-                const casual = getCasualResponse(lastUser.content);
+                const casual = getCasualResponse(getMessageText(lastUser.content));
                 if (casual)
                     return { message: casual, toolCalls: [] };
             }
             const result = await client.sendMessage(messages, systemPrompt, signal);
             const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
-            if (lastUserMsg && isOnlyGreeting(lastUserMsg.content)) {
+            if (lastUserMsg && isOnlyGreeting(getMessageText(lastUserMsg.content))) {
                 const hasReadFile = result.toolCalls?.some(tc => tc.type === 'read_file');
                 if (hasReadFile) {
                     return { message: 'Hi! How can I help with this project?', toolCalls: [] };

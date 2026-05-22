@@ -625,17 +625,26 @@ export function getCasualResponse(text: string): string | null {
   return CASUAL_RESPONSES[trimmed] || null;
 }
 
+function getMessageText(content: string | any[]): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const textPart = content.find(p => p.type === 'text');
+    return textPart?.text ?? String(content);
+  }
+  return String(content);
+}
+
 function applyGreetingGuard(client: AIClient): AIClient {
   const guarded: AIClient = {
     async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
       const lastUser = [...messages].reverse().find(m => m.role === 'user');
       if (lastUser) {
-        const casual = getCasualResponse(lastUser.content);
+        const casual = getCasualResponse(getMessageText(lastUser.content));
         if (casual) return { message: casual, toolCalls: [] };
       }
       const result = await client.sendMessage(messages, systemPrompt, signal);
       const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
-      if (lastUserMsg && isOnlyGreeting(lastUserMsg.content)) {
+      if (lastUserMsg && isOnlyGreeting(getMessageText(lastUserMsg.content))) {
         const hasReadFile = result.toolCalls?.some(tc => tc.type === 'read_file');
         if (hasReadFile) {
           return { message: 'Hi! How can I help with this project?', toolCalls: [] };

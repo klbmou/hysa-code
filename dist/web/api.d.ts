@@ -5,6 +5,7 @@ interface AttachmentPayload {
     size: number;
     kind: 'text' | 'image' | 'pdf' | 'docx';
     textContent?: string;
+    dataUrl?: string;
 }
 interface ChatRequest {
     messages: {

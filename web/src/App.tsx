@@ -261,6 +261,7 @@ export default function App() {
         payload.attachments = attachments.map(a => ({
           name: a.name, ext: a.ext, size: a.size, kind: a.kind,
           textContent: (a.kind === 'text' || a.kind === 'pdf') ? a.textContent : undefined,
+          dataUrl: a.kind === 'image' ? a.previewUrl : undefined,
         }));
       }
       const lastUserContent = finalInput;
@@ -582,13 +583,15 @@ export default function App() {
                     if (item.kind === 'user_msg') {
                       return (
                         <div key={item.id} className="message-row user">
-                          <div className="bubble user">
-                            {item.content && <div dir="auto">{item.content}</div>}
+                          <div className="user-msg-container">
+                            <div className="bubble user">
+                              {item.content && <div dir="auto">{item.content}</div>}
+                            </div>
                             {item.attachments && item.attachments.length > 0 && (
                               <div className="msg-attachments">
                                 {item.attachments.map(a => {
                                   let note = '';
-                                  if (a.kind === 'image') note = 'Preview only';
+                                  if (a.kind === 'image') note = 'Image · ready for analysis';
                                   else if (a.kind === 'pdf' && a.pdfStatus === 'ready') note = 'PDF · ready for analysis';
                                   else if (a.kind === 'pdf' && (a.pdfStatus === 'scanned_pdf' || a.pdfStatus === 'failed')) note = 'This PDF may be scanned or image-based. OCR is not enabled yet.';
                                   else if (a.kind === 'pdf' && a.pdfStatus === 'too_large') note = 'PDF too large for text extraction';
@@ -597,7 +600,13 @@ export default function App() {
                                   return (
                                     <div key={a.id} className={`msg-attachment msg-attachment-${a.kind}`}>
                                       {a.kind === 'image' && a.previewUrl ? (
-                                        <img src={a.previewUrl} alt={a.name} className="msg-attach-img" />
+                                        <>
+                                          <img src={a.previewUrl} alt={a.name} className="msg-attach-img" />
+                                          <div className="msg-attach-image-content">
+                                            <span className="msg-attach-name">{a.name}</span>
+                                            <span className="msg-attach-size">{formatBytes(a.size)}</span>
+                                          </div>
+                                        </>
                                       ) : a.kind === 'text' ? (
                                         <span className="msg-attach-badge" style={{ color: ATTACH_EXT_COLOR[a.ext] || 'var(--text-dim)' }}>
                                           {ATTACH_EXT_LABEL[a.ext] || a.ext.slice(1).toUpperCase()}
@@ -605,13 +614,15 @@ export default function App() {
                                       ) : (
                                         <span className="msg-attach-badge">{a.kind === 'pdf' ? 'PDF' : 'DOCX'}</span>
                                       )}
-                                      <div className="msg-attach-info">
-                                        <span className="msg-attach-name">{a.name}</span>
-                                        <span className="msg-attach-size">
-                                          {formatBytes(a.size)}
-                                          {a.kind === 'pdf' && a.pdfCharCount ? ` · ${a.pdfCharCount.toLocaleString()} chars` : ''}
-                                        </span>
-                                      </div>
+                                      {a.kind !== 'image' && (
+                                        <div className="msg-attach-info">
+                                          <span className="msg-attach-name">{a.name}</span>
+                                          <span className="msg-attach-size">
+                                            {formatBytes(a.size)}
+                                            {a.kind === 'pdf' && a.pdfCharCount ? ` · ${a.pdfCharCount.toLocaleString()} chars` : ''}
+                                          </span>
+                                        </div>
+                                      )}
                                       {note && <span className="msg-attach-note">{note}</span>}
                                       {a.kind === 'pdf' && a.pdfTruncated && (
                                         <span className="msg-attach-truncated">PDF text was truncated for analysis.</span>

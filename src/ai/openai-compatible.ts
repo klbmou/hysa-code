@@ -34,14 +34,16 @@ export function createOpenAICompatibleClient(
 
   return {
     async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
+      const openaiMessages: any[] = [
+        { role: 'system', content: systemPrompt },
+        ...messages.map(m => ({ role: m.role as string, content: m.content })),
+      ];
+
       const response = await client.chat.completions.create(
         {
           model,
           max_tokens: 4096,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            ...messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-          ],
+          messages: openaiMessages,
         },
         { signal },
       );
@@ -55,15 +57,17 @@ export function createOpenAICompatibleClient(
     },
 
     async sendMessageStream(messages: Message[], systemPrompt: string, onEvent: (event: StreamEvent) => void, signal?: AbortSignal): Promise<AIResponse> {
+      const openaiMessages: any[] = [
+        { role: 'system', content: systemPrompt },
+        ...messages.map(m => ({ role: m.role as string, content: m.content })),
+      ];
+
       const stream = await client.chat.completions.create(
         {
           model,
           max_tokens: 4096,
           stream: true,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            ...messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-          ],
+          messages: openaiMessages,
         },
         { signal },
       );
@@ -98,8 +102,6 @@ export async function checkOpenAICompatibleAPI(baseURL: string, apiKey?: string)
       signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT),
     });
     if (res.ok || res.status === 401) {
-      // 401 means the endpoint is reachable but key might be invalid
-      // We treat reachable as healthy for the purpose of connectivity check
       return { ok: true, message: '' };
     }
     return { ok: false, message: `API returned status ${res.status}` };

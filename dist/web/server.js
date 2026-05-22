@@ -16,7 +16,7 @@ let _serverRef = null;
 export function getServerRef() { return _serverRef; }
 export async function startWebServer(port = 8787) {
     const app = express();
-    app.use(express.json({ limit: '10mb' }));
+    app.use(express.json({ limit: '50mb' }));
     app.get('/api/status', (_req, res) => {
         res.json(getStatus());
     });

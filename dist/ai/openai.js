@@ -4,13 +4,14 @@ export function createOpenAIClient(apiKey, model) {
     const client = new OpenAI({ apiKey, timeout: 30000, maxRetries: 0 });
     return {
         async sendMessage(messages, systemPrompt, signal) {
+            const openaiMessages = [
+                { role: 'system', content: systemPrompt },
+                ...messages.map(m => ({ role: m.role, content: m.content })),
+            ];
             const response = await client.chat.completions.create({
                 model,
                 max_tokens: 4096,
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    ...messages.map(m => ({ role: m.role, content: m.content })),
-                ],
+                messages: openaiMessages,
             }, { signal });
             const content = response.choices[0]?.message?.content || '';
             return {
@@ -19,14 +20,15 @@ export function createOpenAIClient(apiKey, model) {
             };
         },
         async sendMessageStream(messages, systemPrompt, onEvent, signal) {
+            const openaiMessages = [
+                { role: 'system', content: systemPrompt },
+                ...messages.map(m => ({ role: m.role, content: m.content })),
+            ];
             const stream = await client.chat.completions.create({
                 model,
                 max_tokens: 4096,
                 stream: true,
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    ...messages.map(m => ({ role: m.role, content: m.content })),
-                ],
+                messages: openaiMessages,
             }, { signal });
             let fullContent = '';
             for await (const chunk of stream) {

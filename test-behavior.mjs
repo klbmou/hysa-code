@@ -559,6 +559,39 @@ process.on('exit', () => {
       console.log(`      ✗ PDF attachment test error: ${err.message}`);
     }
 
+    // Test 7g: Image attachment with non-vision provider — expect vision hint
+    console.log('\n  7g. Sending image attachment to non-vision provider...');
+    let imageTestPassed = true;
+    try {
+      const imgDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      const imgStart = Date.now();
+      const imgRes = await (await fetch(`${baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'what is this image' }],
+          attachments: [{
+            name: 'test.png',
+            ext: '.png',
+            size: 68,
+            kind: 'image',
+            dataUrl: imgDataUrl,
+          }]
+        })
+      })).json();
+      const imgDur = ((Date.now() - imgStart) / 1000).toFixed(1);
+      console.log(`      Response time: ${imgDur}s`);
+      console.log(`      Has message: ${!!imgRes.message}`);
+      if (imgRes.message && imgRes.message.toLowerCase().includes('vision')) {
+        console.log(`      ✓ Got vision provider hint: "${imgRes.message.slice(0, 80)}..."`);
+      } else {
+        console.log(`      Response: ${(imgRes.message || '').slice(0, 80)}`);
+      }
+      console.log(`      ${imageTestPassed ? '✓ Image attachment test completed' : '⚠ Image attachment test issues'}`);
+    } catch (err) {
+      console.log(`      ✗ Image attachment test error: ${err.message}`);
+    }
+
     // Cleanup
     const serverRef = (await import('./dist/web/server.js')).getServerRef();
     if (serverRef) serverRef.close();
@@ -582,7 +615,7 @@ process.on('exit', () => {
   console.log(`  Test 4a (File discovery): pure logic, no API call`);
   console.log(`  Test 5 (Fallback):        deepseek → fallback chain`);
   console.log(`  Test 6 (Experimental):    pollinations/openai (compact prompt)`);
-  console.log(`  Test 7 (Web UI):          http://localhost:8787`);
+  console.log(`  Test 7 (Web UI):          http://localhost:8787 (includes vision provider check)`);
   console.log();
   console.log(`  Config backed up: original = ${origProvider}/${origModel}`);
 

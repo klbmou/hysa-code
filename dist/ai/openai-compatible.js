@@ -31,13 +31,14 @@ export function createOpenAICompatibleClient(baseURL, apiKey, model, defaultHead
     });
     return {
         async sendMessage(messages, systemPrompt, signal) {
+            const openaiMessages = [
+                { role: 'system', content: systemPrompt },
+                ...messages.map(m => ({ role: m.role, content: m.content })),
+            ];
             const response = await client.chat.completions.create({
                 model,
                 max_tokens: 4096,
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    ...messages.map(m => ({ role: m.role, content: m.content })),
-                ],
+                messages: openaiMessages,
             }, { signal });
             const content = extractContentFromResponse(response);
             return {
@@ -46,14 +47,15 @@ export function createOpenAICompatibleClient(baseURL, apiKey, model, defaultHead
             };
         },
         async sendMessageStream(messages, systemPrompt, onEvent, signal) {
+            const openaiMessages = [
+                { role: 'system', content: systemPrompt },
+                ...messages.map(m => ({ role: m.role, content: m.content })),
+            ];
             const stream = await client.chat.completions.create({
                 model,
                 max_tokens: 4096,
                 stream: true,
-                messages: [
-                    { role: 'system', content: systemPrompt },
-                    ...messages.map(m => ({ role: m.role, content: m.content })),
-                ],
+                messages: openaiMessages,
             }, { signal });
             let fullContent = '';
             for await (const chunk of stream) {
@@ -82,8 +84,6 @@ export async function checkOpenAICompatibleAPI(baseURL, apiKey) {
             signal: AbortSignal.timeout(HEALTH_CHECK_TIMEOUT),
         });
         if (res.ok || res.status === 401) {
-            // 401 means the endpoint is reachable but key might be invalid
-            // We treat reachable as healthy for the purpose of connectivity check
             return { ok: true, message: '' };
         }
         return { ok: false, message: `API returned status ${res.status}` };

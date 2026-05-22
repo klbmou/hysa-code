@@ -32,6 +32,67 @@ interface AttachmentPayload {
   size: number;
   kind: 'text' | 'image' | 'pdf' | 'docx';
   textContent?: string;
+  dataUrl?: string;
+}
+
+const VISION_CAPABLE_PROVIDERS: Record<string, string[]> = {
+  gemini: ['gemini-2.5-flash', 'gemini-1.5-flash'],
+  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'],
+  anthropic: ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022'],
+  openrouter: [
+    'google/gemini-2.5-flash',
+    'google/gemini-2.5-flash:free',
+    'google/gemini-1.5-flash',
+    'google/gemini-1.5-flash:free',
+    'qwen/qwen-vl-plus:free',
+    'meta-llama/llama-3.2-11b-vision-instruct:free',
+  ],
+};
+
+function supportsVision(provider: string, model: string): boolean {
+  const models = VISION_CAPABLE_PROVIDERS[provider];
+  if (!models) return false;
+  return models.some(m => model.includes(m.replace('google/', '').replace(':free', '')) || model === m);
+}
+
+function hasImageAttachments(attachments?: AttachmentPayload[]): boolean {
+  if (!attachments || attachments.length === 0) return false;
+  return attachments.some(a => a.kind === 'image' && a.dataUrl);
+}
+
+function buildVisionMessages(
+  messages: { role: string; content: string }[],
+  attachments: AttachmentPayload[],
+): any[] {
+  const result: any[] = [];
+  
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    
+    if (msg.role === 'user' && i === messages.length - 1) {
+      const parts: any[] = [];
+      
+      if (msg.content) {
+        parts.push({ type: 'text', text: msg.content });
+      }
+      
+      for (const att of attachments) {
+        if (att.kind === 'image' && att.dataUrl) {
+          parts.push({ type: 'image_url', image_url: { url: att.dataUrl } });
+        }
+      }
+      
+      if (parts.length > 0) {
+        result.push({ role: 'user', content: parts });
+      } else {
+        result.push(msg);
+      }
+    } else {
+      result.push(msg);
+    }
+  }
+  
+  return result;
 }
 
 interface ChatRequest {
@@ -166,13 +227,22 @@ export async function handleChatStream(
 
   console.log(LOG, `handleChatStream called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
   try {
+    const hasImages = hasImageAttachments(req.attachments);
+    const visionAvailable = supportsVision(prov, config.currentModel);
+
+    if (hasImages && !visionAvailable) {
+      writeEvent(`data: ${JSON.stringify({ type: 'token', text: 'Image understanding needs a vision-capable provider. Try Gemini (gemini-2.5-flash) or OpenRouter with a vision model like google/gemini-2.5-flash:free.' })}\n\n`);
+      writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: 'Image understanding needs a vision-capable provider. Try Gemini (gemini-2.5-flash) or OpenRouter with a vision model like google/gemini-2.5-flash:free.', toolCalls: [] })}\n\n`);
+      return;
+    }
+
     // Inject attachment text content as context before the user's question
     if (req.attachments && req.attachments.length > 0) {
       console.log(LOG, `Attachments: ${req.attachments.length} file(s)`);
       for (const att of req.attachments) {
         const hasText = !!att.textContent && att.textContent.length > 0;
         console.log(LOG, `  ${att.name} (${att.kind}, ${att.size}B, hasText: ${hasText})`);
-        if (hasText) {
+        if (hasText && att.kind !== 'image') {
           const contextMsg = {
             role: 'user' as const,
             content: `Attached document content:\nFilename: ${att.name}\nType: ${att.kind.toUpperCase()}\nExtracted text:\n\`\`\`\n${att.textContent}\n\`\`\`\nUse this extracted text to answer the user's question. Do not say you cannot read the ${att.kind.toUpperCase()}.`,
@@ -188,6 +258,12 @@ export async function handleChatStream(
     if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastMessage.content)) {
       writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: 'Hi! How can I help with this project?', toolCalls: [] })}\n\n`);
       return;
+    }
+
+    // Format messages for vision if image attachments exist
+    let visionMessages = req.messages;
+    if (hasImages && visionAvailable) {
+      visionMessages = buildVisionMessages(req.messages, req.attachments!);
     }
 
     const client = createClient(config);
@@ -208,15 +284,14 @@ export async function handleChatStream(
     const isLocal = LOCAL_FREE_PROVIDERS.includes(config.currentProvider);
     const lightActive = config.lightMode !== false && isLocal;
 
-    const messages: Message[] = req.messages.map(m => ({
+    const messages: any[] = visionMessages.map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }));
-    const maxTokens = lightActive ? 2000 : 8000;
-    const { messages: safeMessages } = truncateMessages(messages, maxTokens);
 
-    const lastUserMsg = safeMessages.filter(m => m.role === 'user').pop()?.content || '';
-    const isSimpleQ = isSimpleQuestion(lastUserMsg);
+    const lastUserMsgRaw = visionMessages.filter(m => m.role === 'user').pop()?.content || '';
+    const lastUserMsgStr = typeof lastUserMsgRaw === 'string' ? lastUserMsgRaw : '';
+    const isSimpleQ = isSimpleQuestion(lastUserMsgStr);
     const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, isSimpleQ);
 
     const perQueryPrompt = buildSystemPrompt({
@@ -227,7 +302,7 @@ export async function handleChatStream(
       tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
     }, config.agentMode || 'chat', lightActive, config.currentProvider, resolvedMode);
 
-    const response = await client.sendMessageStream(safeMessages, perQueryPrompt, (event) => {
+    const response = await client.sendMessageStream(messages as any, perQueryPrompt, (event) => {
       if (event.type === 'token') {
         writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
       }
@@ -258,13 +333,21 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
 
   console.log(LOG, `handleChat called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
   try {
+    const hasImages = hasImageAttachments(req.attachments);
+    const visionAvailable = supportsVision(prov, config.currentModel);
+
+    if (hasImages && !visionAvailable) {
+      const msg = 'Image understanding needs a vision-capable provider. Try Gemini (gemini-2.5-flash) or OpenRouter with a vision model like google/gemini-2.5-flash:free.';
+      return { message: msg, toolCalls: [], hint: 'Switch to a vision-capable provider to analyze images.' };
+    }
+
     // Inject attachment text content as context before the user's question
     if (req.attachments && req.attachments.length > 0) {
       console.log(LOG, `Attachments: ${req.attachments.length} file(s)`);
       for (const att of req.attachments) {
         const hasText = !!att.textContent && att.textContent.length > 0;
         console.log(LOG, `  ${att.name} (${att.kind}, ${att.size}B, hasText: ${hasText})`);
-        if (hasText) {
+        if (hasText && att.kind !== 'image') {
           const contextMsg = {
             role: 'user' as const,
             content: `Attached document content:\nFilename: ${att.name}\nType: ${att.kind.toUpperCase()}\nExtracted text:\n\`\`\`\n${att.textContent}\n\`\`\`\nUse this extracted text to answer the user's question. Do not say you cannot read the ${att.kind.toUpperCase()}.`,
@@ -276,8 +359,15 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       }
     }
 
-    const lastMessage = req.messages[req.messages.length - 1];
-    if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastMessage.content)) {
+    // Format messages for vision if image attachments exist
+    let visionMessages = req.messages;
+    if (hasImages && visionAvailable) {
+      visionMessages = buildVisionMessages(req.messages, req.attachments!);
+    }
+
+    const lastMessage = visionMessages[visionMessages.length - 1];
+    const lastContent = typeof lastMessage?.content === 'string' ? lastMessage.content : '';
+    if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastContent)) {
       console.log(LOG, 'Greeting detected, returning casual response');
       return { message: 'Hi! How can I help with this project?', toolCalls: [] };
     }
@@ -298,16 +388,14 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
     }, config.agentMode || 'chat', lightActive, config.currentProvider, config.promptMode || 'auto');
 
-    const messages: Message[] = req.messages.map(m => ({
+    const messages: any[] = visionMessages.map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }));
 
-    const maxTokens = lightActive ? 2000 : 8000;
-    const { messages: safeMessages, truncated: wasTruncated } = truncateMessages(messages, maxTokens);
-
     // ── Per-query prompt mode resolution ────────────────
-    const lastUserMsg = safeMessages.filter(m => m.role === 'user').pop()?.content || '';
+    const lastUserMsgRaw = visionMessages.filter(m => m.role === 'user').pop()?.content || '';
+    const lastUserMsg = typeof lastUserMsgRaw === 'string' ? lastUserMsgRaw : '';
     const isSimpleQ = isSimpleQuestion(lastUserMsg);
     const resolvedMode = resolvePromptMode(
       config.promptMode || 'auto',
@@ -324,7 +412,14 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
 
     if (config.debug) {
       const systemTokens = estimateTokens(perQueryPrompt);
-      const historyTokens = safeMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+      let historyTokens = 0;
+      for (const m of messages) {
+        if (typeof m.content === 'string') {
+          historyTokens += estimateTokens(m.content);
+        } else {
+          historyTokens += 100; // rough estimate for image
+        }
+      }
       const totalTokens = systemTokens + historyTokens;
       console.log(LOG, `[debug] Prompt mode: ${resolvedMode}`);
       console.log(LOG, `[debug] System prompt: ~${systemTokens} tokens`);
@@ -335,8 +430,8 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       }
     }
 
-    console.log(LOG, `Sending ${safeMessages.length} messages to provider ${wasTruncated ? '(trimmed)' : ''}`);
-    const response = await client.sendMessage(safeMessages, perQueryPrompt);
+    console.log(LOG, `Sending ${messages.length} messages to provider`);
+    const response = await client.sendMessage(messages as any, perQueryPrompt);
     console.log(LOG, 'Provider response received successfully');
 
     const fbEvents = getFallbackEvents();

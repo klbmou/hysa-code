@@ -43,6 +43,14 @@ const QUICK_ACTIONS = [
   { label: 'Run check', action: 'Run the project check command and report results' },
 ];
 
+const DOC_ACTIONS = [
+  { label: 'Summarize', action: 'Summarize this document' },
+  { label: 'Explain', action: 'Explain this document in simple terms' },
+  { label: 'Extract key points', action: 'Extract key points from this document' },
+  { label: 'Translate', action: 'Translate this document to English' },
+  { label: 'Describe image', action: 'Describe what you see in this image' },
+];
+
 let idCounter = 0;
 function nextId(): string { return `att_${++idCounter}`; }
 
@@ -200,8 +208,8 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
       />
 
       {!loading && (
-        <div className="composer-actions">
-          {QUICK_ACTIONS.map(qa => (
+        <div className={`composer-actions${attachments.length > 0 ? ' has-attachments' : ''}`}>
+          {(attachments.length > 0 ? DOC_ACTIONS : QUICK_ACTIONS).map(qa => (
             <button key={qa.label} className="composer-action-btn" onClick={() => handleQuickAction(qa.action)}>
               {qa.label}
             </button>
@@ -231,12 +239,13 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
               <div className="attach-chip-body">
                 <span className="attach-chip-name">{a.name}</span>
                 <span className="attach-chip-size">
+                  {a.kind === 'image' && (a.previewUrl ? 'Image · ready' : 'Image')}
                   {a.pdfStatus === 'extracting' && 'extracting...'}
                   {a.pdfStatus === 'ready' && `PDF text extracted · ${a.pdfCharCount?.toLocaleString()} chars`}
                   {a.pdfStatus === 'too_large' && 'too large'}
                   {a.pdfStatus === 'failed' && 'extraction failed'}
                   {a.pdfStatus === 'scanned_pdf' && 'scanned/image-based PDF'}
-                  {!a.pdfStatus && formatSize(a.size)}
+                  {!a.pdfStatus && a.kind !== 'image' && formatSize(a.size)}
                 </span>
               </div>
               <button className="attach-chip-remove" onClick={() => removeAttachment(a.id)} title="Remove">×</button>
@@ -252,7 +261,7 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask HYSA to edit, explain, debug, or run code..."
+          placeholder="Ask HYSA about code, files, PDFs, images, or anything..."
           dir="auto"
           disabled={loading}
         />

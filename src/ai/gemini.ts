@@ -6,6 +6,25 @@ function toGeminiRole(role: 'user' | 'assistant'): string {
   return role === 'assistant' ? 'model' : 'user';
 }
 
+function contentToGeminiParts(content: string | any[]): any[] {
+  if (typeof content === 'string') {
+    return [{ text: content }];
+  }
+  const parts: any[] = [];
+  for (const part of content) {
+    if (part.type === 'text') {
+      parts.push({ text: part.text });
+    } else if (part.type === 'image_url') {
+      const dataUrl = part.image_url?.url || '';
+      const match = dataUrl.match(/^data:(image\/\w+);base64,(.+)$/);
+      if (match) {
+        parts.push({ inlineData: { mimeType: match[1], data: match[2] } });
+      }
+    }
+  }
+  return parts.length > 0 ? parts : [{ text: String(content) }];
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, signal?: AbortSignal): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const timeoutPromise = new Promise<never>((_, reject) => {
@@ -31,7 +50,7 @@ export function createGeminiClient(apiKey: string, model: string): AIClient {
   const buildContents = (messages: Message[], systemPrompt: string) => {
     const history = messages.slice(0, -1).map(m => ({
       role: toGeminiRole(m.role),
-      parts: [{ text: m.content }],
+      parts: contentToGeminiParts(m.content),
     }));
     const lastMessage = messages[messages.length - 1];
     return { history, lastMessage };
@@ -44,27 +63,32 @@ export function createGeminiClient(apiKey: string, model: string): AIClient {
 
       let content: string;
 
-      if (messages.length === 1) {
-        const result = await withTimeout(
-          geminiModel.generateContent({
-            contents: [{ role: 'user', parts: [{ text: lastMessage.content }] }],
+      try {
+        if (messages.length === 1) {
+          const result = await withTimeout(
+            geminiModel.generateContent({
+              contents: [{ role: 'user', parts: contentToGeminiParts(lastMessage.content) }],
+              systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+            }),
+            30000,
+            signal,
+          );
+          content = result.response.text();
+        } else {
+          const chat = geminiModel.startChat({
+            history,
             systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-          }),
-          30000,
-          signal,
-        );
-        content = result.response.text();
-      } else {
-        const chat = geminiModel.startChat({
-          history,
-          systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-        });
-        const result = await withTimeout(
-          chat.sendMessage(lastMessage.content),
-          30000,
-          signal,
-        );
-        content = result.response.text();
+          });
+          const result = await withTimeout(
+            chat.sendMessage(contentToGeminiParts(lastMessage.content)),
+            30000,
+            signal,
+          );
+          content = result.response.text();
+        }
+      } catch (err) {
+        console.log('[Gemini] Error details:', err instanceof Error ? err.stack : String(err));
+        throw err;
       }
 
       return handleContent(content);
@@ -76,39 +100,44 @@ export function createGeminiClient(apiKey: string, model: string): AIClient {
 
       let fullContent = '';
 
-      if (messages.length === 1) {
-        const result = await withTimeout(
-          geminiModel.generateContentStream({
-            contents: [{ role: 'user', parts: [{ text: lastMessage.content }] }],
+      try {
+        if (messages.length === 1) {
+          const result = await withTimeout(
+            geminiModel.generateContentStream({
+              contents: [{ role: 'user', parts: contentToGeminiParts(lastMessage.content) }],
+              systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+            }),
+            30000,
+            signal,
+          );
+          for await (const chunk of result.stream) {
+            const delta = chunk.text();
+            if (delta) {
+              fullContent += delta;
+              onEvent({ type: 'token', text: delta });
+            }
+          }
+        } else {
+          const chat = geminiModel.startChat({
+            history,
             systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-          }),
-          30000,
-          signal,
-        );
-        for await (const chunk of result.stream) {
-          const delta = chunk.text();
-          if (delta) {
-            fullContent += delta;
-            onEvent({ type: 'token', text: delta });
+          });
+          const result = await withTimeout(
+            chat.sendMessageStream(contentToGeminiParts(lastMessage.content)),
+            30000,
+            signal,
+          );
+          for await (const chunk of result.stream) {
+            const delta = chunk.text();
+            if (delta) {
+              fullContent += delta;
+              onEvent({ type: 'token', text: delta });
+            }
           }
         }
-      } else {
-        const chat = geminiModel.startChat({
-          history,
-          systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-        });
-        const result = await withTimeout(
-          chat.sendMessageStream(lastMessage.content),
-          30000,
-          signal,
-        );
-        for await (const chunk of result.stream) {
-          const delta = chunk.text();
-          if (delta) {
-            fullContent += delta;
-            onEvent({ type: 'token', text: delta });
-          }
-        }
+      } catch (err) {
+        console.log('[Gemini] Error details:', err instanceof Error ? err.stack : String(err));
+        throw err;
       }
 
       onEvent({ type: 'done', fullText: stripToolCallBlocks(fullContent), toolCalls: parseToolCalls(fullContent) });
