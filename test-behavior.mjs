@@ -511,6 +511,54 @@ process.on('exit', () => {
     console.log(`      Files: ${treeRes.fileCount}`);
     console.log(`      Important files: ${treeRes.files?.length || 0}`);
 
+    // Test 7f: PDF attachment with extracted text
+    console.log('\n  7f. Sending attachment with PDF extracted text via /api/chat...');
+    let pdfTestPassed = true;
+    const samplePdfText = 'This PDF is about Spanish grammar. The present tense in Spanish is used for current actions, habitual actions, and general truths. For regular -ar verbs, remove the -ar ending and add -o, -as, -a, -amos, -áis, -an. For regular -er verbs, remove the -er ending and add -o, -es, -e, -emos, -éis, -en. For regular -ir verbs, remove the -ir ending and add -o, -es, -e, -imos, -ís, -en. Key irregular verbs include ser (to be), ir (to go), and tener (to have).';
+    chatStart = Date.now();
+    try {
+      chatRes = await (await fetch(`${baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'summarize this pdf' }],
+          attachments: [{
+            name: 'spanish-grammar.pdf',
+            ext: '.pdf',
+            size: 24576,
+            kind: 'pdf',
+            textContent: samplePdfText,
+          }]
+        })
+      })).json();
+      const pdfDur = elapsed(chatStart);
+      console.log(`      Response time: ${pdfDur}s`);
+      console.log(`      Provider: ${chatRes.provider || 'N/A'}`);
+      console.log(`      Model: ${chatRes.model || 'N/A'}`);
+      console.log(`      Has message: ${!!chatRes.message}`);
+      if (chatRes.message) {
+        const snippet = chatRes.message.slice(0, 200);
+        console.log(`      Response preview: ${snippet}...`);
+        const forbidden = ["can't read PDF", "cannot read PDF", "upload the PDF", "paste the content", "unable to read PDF", "don't have access to the PDF"];
+        for (const phrase of forbidden) {
+          if (chatRes.message.toLowerCase().includes(phrase.toLowerCase())) {
+            console.log(`      ⚠ Found forbidden phrase: "${phrase}"`);
+            pdfTestPassed = false;
+          }
+        }
+        // Verify the response actually discusses Spanish grammar
+        if (chatRes.message.toLowerCase().includes('spanish') || chatRes.message.toLowerCase().includes('grammar') || chatRes.message.toLowerCase().includes('present tense') || chatRes.message.toLowerCase().includes('verbs')) {
+          console.log(`      ✓ Response references PDF content (Spanish grammar)`);
+        } else {
+          console.log(`      ⚠ Response does not mention Spanish grammar content`);
+          pdfTestPassed = false;
+        }
+      }
+      console.log(`      ${pdfTestPassed && pdfDur < 30 ? '✓ PDF attachment test passed' : '⚠ PDF attachment test issues'}`);
+    } catch (err) {
+      console.log(`      ✗ PDF attachment test error: ${err.message}`);
+    }
+
     // Cleanup
     const serverRef = (await import('./dist/web/server.js')).getServerRef();
     if (serverRef) serverRef.close();

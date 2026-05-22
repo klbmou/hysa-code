@@ -218,7 +218,6 @@ export default function LandingPage() {
 
   const handleLaunchChat = () => {
     window.location.hash = '#/chat';
-    window.location.reload();
   };
 
   const installCmd = 'npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.2.0/hysa-code-0.2.0.tgz';
@@ -249,6 +248,7 @@ export default function LandingPage() {
         <div className="lp-nav-inner">
           <span className="lp-logo">HYSA Code</span>
           <div className="lp-nav-links">
+            <button className="lp-nav-text-btn" onClick={() => { window.location.hash = '#/files'; }}>Files</button>
             <a href="https://github.com/klbmou/hysa-code" target="_blank" rel="noopener noreferrer">GitHub</a>
             <button className="lp-btn lp-btn-primary lp-btn-sm" onClick={handleLaunchChat}>Launch Chat</button>
           </div>

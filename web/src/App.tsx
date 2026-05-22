@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import TopBar from './components/TopBar.js';
 import FileTree from './components/FileTree.js';
 import RightPanel from './components/RightPanel.js';
-import Composer from './components/Composer.js';
+import Composer, { Attachment } from './components/Composer.js';
 import WelcomeScreen from './components/WelcomeScreen.js';
 import ToolEvent from './components/ToolEvent.js';
 import DiffCard from './components/DiffCard.js';
@@ -34,7 +34,7 @@ interface ToolCall {
 type ChatItem = {
   id: string;
 } & (
-  | { kind: 'user_msg'; content: string }
+  | { kind: 'user_msg'; content: string; attachments?: Attachment[] }
   | { kind: 'ai_msg'; content: string }
   | { kind: 'tool_event'; eventType: 'read' | 'edit' | 'done' | 'run' | 'error' | 'fallback'; message: string }
   | { kind: 'diff_card'; filePath: string; content: string; diff: string }
@@ -197,9 +197,10 @@ export default function App() {
     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: msg }]);
   }, []);
 
-  const sendMessage = useCallback(async (input: string) => {
+  const sendMessage = useCallback(async (input: string, attachments?: Attachment[]) => {
     console.debug(LOG, '=== sendMessage start ===');
     console.debug(LOG, 'Input:', JSON.stringify(input));
+    console.debug(LOG, 'Attachments:', attachments?.length || 0);
     console.debug(LOG, 'loading:', loading, 'debug:', debug);
     console.debug(LOG, 'chatItems count:', chatItems.length);
 
@@ -224,7 +225,7 @@ export default function App() {
       }
     }
 
-    const userItem: ChatItem = { id: nextId(), kind: 'user_msg', content: finalInput };
+    const userItem: ChatItem = { id: nextId(), kind: 'user_msg', content: finalInput, attachments };
     setChatItems(prev => [...prev, userItem]);
     setLoading(true);
     setElapsedSecs(0);
@@ -255,7 +256,13 @@ export default function App() {
 
     try {
       const chatMessages = buildMessages([...chatItems, userItem]);
-      const payload = { messages: chatMessages };
+      const payload: any = { messages: chatMessages };
+      if (attachments && attachments.length > 0) {
+        payload.attachments = attachments.map(a => ({
+          name: a.name, ext: a.ext, size: a.size, kind: a.kind,
+          textContent: (a.kind === 'text' || a.kind === 'pdf') ? a.textContent : undefined,
+        }));
+      }
       const lastUserContent = finalInput;
       const useStream = isSimpleQuestion(lastUserContent);
       const apiEndpoint = useStream ? '/api/chat/stream' : '/api/chat';
@@ -558,7 +565,8 @@ export default function App() {
                 {yolo ? 'YOLO' : 'Safe'}
               </button>
               <button className="session-btn" onClick={clearChat} disabled={!hasItems}>Clear chat</button>
-              <button className="session-btn" onClick={() => { window.location.hash = '#/code'; window.location.reload(); }}>Open landing</button>
+              <button className="session-btn" onClick={() => { window.location.hash = '#/'; }}>Landing</button>
+              <button className="session-btn" onClick={() => { window.location.hash = '#/files'; }}>Files page</button>
               <button className={`session-btn ${debug ? 'active' : ''}`} onClick={() => setDebug(!debug)} title="Toggle debug mode">
                 {debug ? 'Debug ON' : 'Debug'}
               </button>
@@ -574,7 +582,46 @@ export default function App() {
                     if (item.kind === 'user_msg') {
                       return (
                         <div key={item.id} className="message-row user">
-                          <div className="bubble user" dir="auto">{item.content}</div>
+                          <div className="bubble user">
+                            {item.content && <div dir="auto">{item.content}</div>}
+                            {item.attachments && item.attachments.length > 0 && (
+                              <div className="msg-attachments">
+                                {item.attachments.map(a => {
+                                  let note = '';
+                                  if (a.kind === 'image') note = 'Preview only';
+                                  else if (a.kind === 'pdf' && a.pdfStatus === 'ready') note = 'PDF · ready for analysis';
+                                  else if (a.kind === 'pdf' && (a.pdfStatus === 'scanned_pdf' || a.pdfStatus === 'failed')) note = 'This PDF may be scanned or image-based. OCR is not enabled yet.';
+                                  else if (a.kind === 'pdf' && a.pdfStatus === 'too_large') note = 'PDF too large for text extraction';
+                                  else if (a.kind === 'pdf') note = 'PDF · ready for analysis';
+                                  else if (a.kind === 'docx') note = 'Reading not enabled';
+                                  return (
+                                    <div key={a.id} className={`msg-attachment msg-attachment-${a.kind}`}>
+                                      {a.kind === 'image' && a.previewUrl ? (
+                                        <img src={a.previewUrl} alt={a.name} className="msg-attach-img" />
+                                      ) : a.kind === 'text' ? (
+                                        <span className="msg-attach-badge" style={{ color: ATTACH_EXT_COLOR[a.ext] || 'var(--text-dim)' }}>
+                                          {ATTACH_EXT_LABEL[a.ext] || a.ext.slice(1).toUpperCase()}
+                                        </span>
+                                      ) : (
+                                        <span className="msg-attach-badge">{a.kind === 'pdf' ? 'PDF' : 'DOCX'}</span>
+                                      )}
+                                      <div className="msg-attach-info">
+                                        <span className="msg-attach-name">{a.name}</span>
+                                        <span className="msg-attach-size">
+                                          {formatBytes(a.size)}
+                                          {a.kind === 'pdf' && a.pdfCharCount ? ` · ${a.pdfCharCount.toLocaleString()} chars` : ''}
+                                        </span>
+                                      </div>
+                                      {note && <span className="msg-attach-note">{note}</span>}
+                                      {a.kind === 'pdf' && a.pdfTruncated && (
+                                        <span className="msg-attach-truncated">PDF text was truncated for analysis.</span>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
                         </div>
                       );
                     }
@@ -625,6 +672,12 @@ export default function App() {
               </div>
             )}
 
+            {selectedFile && (
+              <div className="composer-using-file">
+                <span className="composer-using-file-icon">📄</span>
+                <span>Using <strong>{selectedFile.split('/').pop()}</strong></span>
+              </div>
+            )}
             <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
           </div>
         </div>
@@ -641,3 +694,23 @@ function isRateLimited(text: string): boolean {
   const lower = text.toLowerCase();
   return lower.includes('rate') || lower.includes('limit') || lower.includes('quota') || lower.includes('429') || lower.includes('overloaded');
 }
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const ATTACH_EXT_LABEL: Record<string, string> = {
+  '.txt': 'TXT', '.md': 'MD', '.json': 'JSON', '.js': 'JS', '.ts': 'TS',
+  '.tsx': 'TSX', '.jsx': 'JSX', '.css': 'CSS', '.html': 'HTML',
+  '.png': 'IMG', '.jpg': 'IMG', '.jpeg': 'IMG', '.webp': 'IMG',
+  '.pdf': 'PDF', '.docx': 'DOCX',
+};
+
+const ATTACH_EXT_COLOR: Record<string, string> = {
+  '.txt': '#8888a0', '.md': '#a855f7', '.json': '#f59e0b', '.js': '#f7df1e',
+  '.ts': '#3178c6', '.tsx': '#3178c6', '.jsx': '#61dafb', '.css': '#3b82f6',
+  '.html': '#ef4444', '.png': '#22c55e', '.jpg': '#22c55e', '.jpeg': '#22c55e',
+  '.webp': '#22c55e', '.pdf': '#ef4444', '.docx': '#3b82f6',
+};

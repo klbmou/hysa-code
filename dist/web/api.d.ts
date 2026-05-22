@@ -1,9 +1,17 @@
 import type { HysaConfig } from '../config/keys.js';
+interface AttachmentPayload {
+    name: string;
+    ext: string;
+    size: number;
+    kind: 'text' | 'image' | 'pdf' | 'docx';
+    textContent?: string;
+}
 interface ChatRequest {
     messages: {
         role: string;
         content: string;
     }[];
+    attachments?: AttachmentPayload[];
 }
 interface ChatResult {
     message: string;

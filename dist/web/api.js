@@ -114,7 +114,25 @@ export async function handleChatStream(req, writeEvent) {
         writeEvent(`data: ${JSON.stringify({ type: 'error', message: 'Missing or empty messages array in request body' })}\n\n`);
         return;
     }
+    console.log(LOG, `handleChatStream called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
     try {
+        // Inject attachment text content as context before the user's question
+        if (req.attachments && req.attachments.length > 0) {
+            console.log(LOG, `Attachments: ${req.attachments.length} file(s)`);
+            for (const att of req.attachments) {
+                const hasText = !!att.textContent && att.textContent.length > 0;
+                console.log(LOG, `  ${att.name} (${att.kind}, ${att.size}B, hasText: ${hasText})`);
+                if (hasText) {
+                    const contextMsg = {
+                        role: 'user',
+                        content: `Attached document content:\nFilename: ${att.name}\nType: ${att.kind.toUpperCase()}\nExtracted text:\n\`\`\`\n${att.textContent}\n\`\`\`\nUse this extracted text to answer the user's question. Do not say you cannot read the ${att.kind.toUpperCase()}.`,
+                    };
+                    const insertAt = Math.max(0, req.messages.length - 1);
+                    req.messages.splice(insertAt, 0, contextMsg);
+                    console.log(LOG, `  Injected context before user's message`);
+                }
+            }
+        }
         const lastMessage = req.messages[req.messages.length - 1];
         if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastMessage.content)) {
             writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: 'Hi! How can I help with this project?', toolCalls: [] })}\n\n`);
@@ -178,7 +196,25 @@ export async function handleChat(req) {
         console.log(LOG, 'Missing or empty messages array in request body');
         return { message: '', toolCalls: [], error: 'Missing or empty messages array in request body' };
     }
+    console.log(LOG, `handleChat called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
     try {
+        // Inject attachment text content as context before the user's question
+        if (req.attachments && req.attachments.length > 0) {
+            console.log(LOG, `Attachments: ${req.attachments.length} file(s)`);
+            for (const att of req.attachments) {
+                const hasText = !!att.textContent && att.textContent.length > 0;
+                console.log(LOG, `  ${att.name} (${att.kind}, ${att.size}B, hasText: ${hasText})`);
+                if (hasText) {
+                    const contextMsg = {
+                        role: 'user',
+                        content: `Attached document content:\nFilename: ${att.name}\nType: ${att.kind.toUpperCase()}\nExtracted text:\n\`\`\`\n${att.textContent}\n\`\`\`\nUse this extracted text to answer the user's question. Do not say you cannot read the ${att.kind.toUpperCase()}.`,
+                    };
+                    const insertAt = Math.max(0, req.messages.length - 1);
+                    req.messages.splice(insertAt, 0, contextMsg);
+                    console.log(LOG, `  Injected context before user's message`);
+                }
+            }
+        }
         const lastMessage = req.messages[req.messages.length - 1];
         if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastMessage.content)) {
             console.log(LOG, 'Greeting detected, returning casual response');
