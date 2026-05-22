@@ -150,6 +150,11 @@ export async function handleChatStream(
 
   const prov = config.currentProvider;
 
+  if (!req.messages || !Array.isArray(req.messages) || req.messages.length === 0) {
+    writeEvent(`data: ${JSON.stringify({ type: 'error', message: 'Missing or empty messages array in request body' })}\n\n`);
+    return;
+  }
+
   try {
     const lastMessage = req.messages[req.messages.length - 1];
     if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastMessage.content)) {
@@ -217,6 +222,11 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
   }
 
   const prov = config.currentProvider;
+
+  if (!req.messages || !Array.isArray(req.messages) || req.messages.length === 0) {
+    console.log(LOG, 'Missing or empty messages array in request body');
+    return { message: '', toolCalls: [], error: 'Missing or empty messages array in request body' };
+  }
 
   try {
     const lastMessage = req.messages[req.messages.length - 1];
