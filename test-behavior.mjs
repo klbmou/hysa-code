@@ -1,5 +1,5 @@
 import { loadConfig, saveConfig, PROVIDER_DEFAULTS, PROVIDER_TIERS, COMPACT_PROMPT_PROVIDERS, PROVIDER_MODELS } from './dist/config/keys.js';
-import { buildSystemPrompt } from './dist/prompts/system.js';
+import { buildSystemPrompt, resolvePromptMode } from './dist/prompts/system.js';
 import { createClient, isOnlyGreeting, getCasualResponse } from './dist/ai/client.js';
 import { getFallbackEvents, clearFallbackEvents, resetHealth, getAllHealth, toHealthSummary } from './dist/ai/model-health.js';
 import { getProjectInfo } from './dist/context/builder.js';
@@ -83,17 +83,23 @@ process.on('exit', () => {
     config.currentModel = 'qwen/qwen3-coder:free';
     saveConfig(config);
 
+    // Simulate per-query prompt resolution (simple question → minimal prompt)
+    const queryText = 'explain what package.json is in 2-3 sentences';
+    const isSimpleQ = queryText.trim().length <= 60 && !/\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe|apply|remove|delete|rename|move|copy|refactor)\b/i.test(queryText);
+    const promptMode = resolvePromptMode('auto', 'openrouter', isSimpleQ);
+
     const sysPrompt = buildSystemPrompt({
       type: projectInfo.type,
       entryPoints: projectInfo.entryPoints,
       configFiles: projectInfo.configFiles,
       fileCount: projectInfo.fileCount,
       tree: projectInfo.tree,
-    }, undefined, false, 'openrouter', 'auto');
+    }, undefined, false, 'openrouter', promptMode);
 
     const sysTokens = Math.round(sysPrompt.length / 4);
     console.log(`  Provider: OpenRouter`);
     console.log(`  Model: qwen/qwen3-coder:free`);
+    console.log(`  Prompt mode: ${promptMode}`);
     console.log(`  System prompt: ~${sysTokens} tokens`);
 
     clearFallbackEvents();
@@ -102,9 +108,9 @@ process.on('exit', () => {
     const client = createClient(config);
     const start = Date.now();
 
-    console.log(`  Sending: "explain what package.json is in 2-3 sentences"`);
+    console.log(`  Sending: "${queryText}"`);
     const result = await client.sendMessage(
-      [{ role: 'user', content: 'explain what package.json is in 2-3 sentences' }],
+      [{ role: 'user', content: queryText }],
       sysPrompt
     );
 
@@ -127,6 +133,7 @@ process.on('exit', () => {
     if (result.message) {
       console.log(`  Response preview: ${result.message.slice(0, 150)}...`);
     }
+    console.log(`  ${promptMode === 'minimal' ? '✓ Minimal prompt used' : '⚠ Expected minimal prompt'}`);
     console.log(`  ${dur < 20 ? '✓ OK' : '⚠ SLOW (>20s)'} — ${dur}s`);
   } catch (err) {
     console.log(`  ✗ Error: ${err.message}`);

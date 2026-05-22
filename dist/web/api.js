@@ -5,12 +5,22 @@ import { readFile, shouldIgnore } from '../files/reader.js';
 import { writeFileWithBackup, previewEdit } from '../files/writer.js';
 import { getGitInfo } from '../utils/git.js';
 import { createClient, isOnlyGreeting } from '../ai/client.js';
-import { buildSystemPrompt } from '../prompts/system.js';
+import { buildSystemPrompt, resolvePromptMode } from '../prompts/system.js';
 import { getYolo, setYolo } from '../utils/session.js';
 import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents } from '../ai/model-health.js';
 import { detectSecrets } from '../utils/secrets.js';
 import { estimateTokens, truncateMessages } from '../context/tokens.js';
 const LOG = '[HYSA Chat]';
+// ── Simple question detection ──────────────────────────
+function isSimpleQuestion(text) {
+    const trimmed = text.trim().toLowerCase();
+    if (trimmed.length > 60)
+        return false;
+    const actionWords = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe|apply|remove|delete|rename|move|copy|refactor)\b/i;
+    if (actionWords.test(trimmed))
+        return false;
+    return true;
+}
 const workingDir = resolve('.');
 export function getStatus() {
     const config = loadConfig();
@@ -108,10 +118,22 @@ export async function handleChat(req) {
         }));
         const maxTokens = lightActive ? 2000 : 8000;
         const { messages: safeMessages, truncated: wasTruncated } = truncateMessages(messages, maxTokens);
+        // ── Per-query prompt mode resolution ────────────────
+        const lastUserMsg = safeMessages.filter(m => m.role === 'user').pop()?.content || '';
+        const isSimpleQ = isSimpleQuestion(lastUserMsg);
+        const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, isSimpleQ);
+        const perQueryPrompt = buildSystemPrompt({
+            type: projectInfo.type,
+            entryPoints: projectInfo.entryPoints,
+            configFiles: projectInfo.configFiles,
+            fileCount: projectInfo.fileCount,
+            tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
+        }, config.agentMode || 'chat', lightActive, config.currentProvider, resolvedMode);
         if (config.debug) {
-            const systemTokens = estimateTokens(systemPrompt);
+            const systemTokens = estimateTokens(perQueryPrompt);
             const historyTokens = safeMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
             const totalTokens = systemTokens + historyTokens;
+            console.log(LOG, `[debug] Prompt mode: ${resolvedMode}`);
             console.log(LOG, `[debug] System prompt: ~${systemTokens} tokens`);
             console.log(LOG, `[debug] History/messages: ~${historyTokens} tokens`);
             console.log(LOG, `[debug] Total estimated: ~${totalTokens} tokens`);
@@ -120,7 +142,7 @@ export async function handleChat(req) {
             }
         }
         console.log(LOG, `Sending ${safeMessages.length} messages to provider ${wasTruncated ? '(trimmed)' : ''}`);
-        const response = await client.sendMessage(safeMessages, systemPrompt);
+        const response = await client.sendMessage(safeMessages, perQueryPrompt);
         console.log(LOG, 'Provider response received successfully');
         const fbEvents = getFallbackEvents();
         const fallbackEvents = fbEvents.map(e => e.reason);

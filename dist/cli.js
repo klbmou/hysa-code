@@ -648,7 +648,7 @@ function isSimpleQuestion(text) {
     const trimmed = text.trim().toLowerCase();
     if (trimmed.length > 60)
         return false;
-    const actionWords = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe|apply|remove|delete|rename|move|copy)\b/i;
+    const actionWords = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe|apply|remove|delete|rename|move|copy|refactor)\b/i;
     if (actionWords.test(trimmed))
         return false;
     return true;
