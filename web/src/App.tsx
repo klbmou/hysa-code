@@ -322,6 +322,10 @@ export default function App() {
         }
       }
 
+      if (data.hint) {
+        newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'fallback', message: `⚠ ${data.hint}` });
+      }
+
       if (assistantText) {
         console.debug(LOG, 'Adding assistant message:', JSON.stringify(assistantText));
         newItems.push({ id: nextId(), kind: 'ai_msg', content: assistantText });

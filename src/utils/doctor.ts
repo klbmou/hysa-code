@@ -1,6 +1,6 @@
 import pc from 'picocolors';
 import { loadConfig, PROVIDER_SIGNUP_URLS, PROVIDER_DEFAULTS, PROVIDER_TIERS, TIER_LABELS, FREE_API_PROVIDERS, LOCAL_FREE_PROVIDERS, EXPERIMENTAL_FREE_PROVIDERS, EXPERIMENTAL_BASE_URLS, validateApiKey, normalizeApiKey, providerNeedsApiKey, providerHasOptionalApiKey } from '../config/keys.js';
-import type { ProviderType } from '../config/keys.js';
+import type { ProviderType, HysaConfig } from '../config/keys.js';
 import { checkOpenCodeZenAPI } from '../ai/opencode-zen.js';
 
 const DOCTOR_TIMEOUT_MS = 15000;
@@ -456,7 +456,113 @@ async function checkChatCompletionForModel(provider: string, baseURL: string, ap
   }
 }
 
-export async function runDoctor(debug = false, provider?: ProviderType): Promise<void> {
+async function checkOllamaDetailed(config: HysaConfig, debug: boolean): Promise<DoctorResult[]> {
+  const results: DoctorResult[] = [];
+  const baseUrl = config.ollamaBaseUrl || 'http://localhost:11434';
+
+  // Server reachable?
+  try {
+    const res = await withTimeout(
+      fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(DOCTOR_TIMEOUT_MS) }),
+      DOCTOR_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      results.push({ name: 'Ollama Server', status: 'error', message: `HTTP ${res.status} — is Ollama running?` });
+      return results;
+    }
+    results.push({ name: 'Ollama Server', status: 'ok', message: `Reachable at ${baseUrl}` });
+  } catch {
+    results.push({ name: 'Ollama Server', status: 'error', message: 'Not running. Start it: ollama serve' });
+    return results;
+  }
+
+  // Models available?
+  try {
+    const data = await (await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(DOCTOR_TIMEOUT_MS) })).json() as { models?: unknown[] };
+    const count = data.models?.length ?? 0;
+    if (count === 0) {
+      results.push({ name: 'Ollama Models', status: 'warn', message: 'No models found. Pull one: ollama pull qwen2.5-coder:1.5b' });
+    } else {
+      results.push({ name: 'Ollama Models', status: 'ok', message: `${count} model${count !== 1 ? 's' : ''} available` });
+    }
+  } catch {
+    results.push({ name: 'Ollama Models', status: 'warn', message: 'Could not list models' });
+  }
+
+  return results;
+}
+
+async function checkLocalOpenAIDetailed(config: HysaConfig, debug: boolean): Promise<DoctorResult[]> {
+  const results: DoctorResult[] = [];
+  const baseUrl = config.localOpenAiBaseUrl || 'http://localhost:1234/v1';
+
+  try {
+    const res = await withTimeout(
+      fetch(`${baseUrl}/models`, { signal: AbortSignal.timeout(DOCTOR_TIMEOUT_MS) }),
+      DOCTOR_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      results.push({ name: 'LM Studio Server', status: 'error', message: `HTTP ${res.status} — is LM Studio / local server running?` });
+      return results;
+    }
+    results.push({ name: 'LM Studio Server', status: 'ok', message: `Reachable at ${baseUrl}` });
+  } catch {
+    results.push({ name: 'LM Studio Server', status: 'error', message: 'Not running. Start LM Studio → Local Inference Server → Start' });
+    return results;
+  }
+
+  // Models loaded?
+  try {
+    const data = await (await fetch(`${baseUrl}/models`, { signal: AbortSignal.timeout(DOCTOR_TIMEOUT_MS) })).json() as { data?: { id: string }[] };
+    const models = data.data?.map(m => m.id) || [];
+    if (models.length === 0) {
+      results.push({ name: 'LM Studio Models', status: 'warn', message: 'No models loaded. Load a model in LM Studio first.' });
+    } else {
+      results.push({ name: 'LM Studio Models', status: 'ok', message: `${models.slice(0, 3).join(', ')}${models.length > 3 ? '...' : ''}` });
+    }
+  } catch {
+    results.push({ name: 'LM Studio Models', status: 'warn', message: 'Could not list models' });
+  }
+
+  return results;
+}
+
+async function checkLlamaCppDetailed(config: HysaConfig, debug: boolean): Promise<DoctorResult[]> {
+  const results: DoctorResult[] = [];
+  const baseUrl = 'http://localhost:8080/v1';
+
+  try {
+    const res = await withTimeout(
+      fetch(`${baseUrl}/models`, { signal: AbortSignal.timeout(DOCTOR_TIMEOUT_MS) }),
+      DOCTOR_TIMEOUT_MS,
+    );
+    if (!res.ok) {
+      results.push({ name: 'llama.cpp Server', status: 'error', message: `HTTP ${res.status} — is llama.cpp running?` });
+      return results;
+    }
+    results.push({ name: 'llama.cpp Server', status: 'ok', message: `Reachable at ${baseUrl}` });
+  } catch {
+    results.push({ name: 'llama.cpp Server', status: 'error', message: 'Not running. Start: ./server -m model.gguf --port 8080' });
+    return results;
+  }
+
+  // Models available?
+  try {
+    const data = await (await fetch(`${baseUrl}/models`, { signal: AbortSignal.timeout(DOCTOR_TIMEOUT_MS) })).json() as { data?: { id: string }[] };
+    const models = data.data?.map(m => m.id) || [];
+    if (models.length === 0) {
+      results.push({ name: 'llama.cpp Models', status: 'warn', message: 'No models loaded. Specify a model with -m flag.' });
+    } else {
+      results.push({ name: 'llama.cpp Models', status: 'ok', message: `${models.slice(0, 3).join(', ')}${models.length > 3 ? '...' : ''}` });
+    }
+  } catch {
+    results.push({ name: 'llama.cpp Models', status: 'warn', message: 'Could not list models' });
+  }
+
+  return results;
+}
+
+export async function runDoctor(debug = false, provider?: string): Promise<void> {
   if (provider) {
     const config = loadConfig();
     if (!config) {
@@ -464,7 +570,7 @@ export async function runDoctor(debug = false, provider?: ProviderType): Promise
       return;
     }
 
-    const label = PROVIDER_DEFAULTS[provider]?.label || provider;
+    const label = (PROVIDER_DEFAULTS as Record<string, { model: string; label: string }>)[provider]?.label || provider;
     console.log(pc.bold(pc.magenta(`\n🔍 Detailed Diagnostics: ${label}\n`)));
 
     let results: DoctorResult[] = [];
@@ -499,6 +605,12 @@ export async function runDoctor(debug = false, provider?: ProviderType): Promise
         return;
       }
       results = await checkGroqDetailed(config.apiKeys.groq, debug);
+    } else if (provider === 'ollama') {
+      results = await checkOllamaDetailed(config, debug);
+    } else if (provider === 'local_openai') {
+      results = await checkLocalOpenAIDetailed(config, debug);
+    } else if (provider === 'llama_cpp') {
+      results = await checkLlamaCppDetailed(config, debug);
     } else if (provider === 'hysa_ai') {
       results = await checkHysaAIDetailed(debug);
     } else if (provider === 'anthropic' || provider === 'openai' || provider === 'opencode_zen') {

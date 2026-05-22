@@ -2,11 +2,11 @@ import { PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_TIERS, PREMIUM_API_PROVIDE
 import { createAnthropicClient } from './anthropic.js';
 import { createOpenAIClient } from './openai.js';
 import { createGeminiClient } from './gemini.js';
-import { createOllamaClient } from './ollama.js';
+import { createOllamaClient, checkOllama } from './ollama.js';
 import { createOpenRouterClient } from './openrouter.js';
 import { createGroqClient } from './groq.js';
 import { createDeepSeekClient } from './deepseek.js';
-import { createOpenAICompatibleClient } from './openai-compatible.js';
+import { createOpenAICompatibleClient, checkOpenAICompatibleAPI } from './openai-compatible.js';
 import { createOpenCodeZenClient } from './opencode-zen.js';
 import { createHysaAIClient } from './hysa-ai.js';
 import { markHealth, isUnhealthy, isSkippedForRequest, setLastFallbackUsed, clearRequestSkips, addFallbackEvent, clearFallbackEvents } from './model-health.js';
@@ -573,6 +573,27 @@ function applyGreetingGuard(client) {
         },
     };
 }
+// ── Local provider pre-flight check ────────────────
+async function checkLocalProviderReachable(provider, config) {
+    if (provider === 'ollama') {
+        const result = await checkOllama(config.ollamaBaseUrl);
+        if (!result.ok)
+            throw new Error(result.message);
+    }
+    else if (provider === 'local_openai') {
+        const baseUrl = config.localOpenAiBaseUrl || 'http://localhost:1234/v1';
+        const result = await checkOpenAICompatibleAPI(baseUrl);
+        if (!result.ok) {
+            throw new Error('LM Studio / local API is not running. Start LM Studio and enable the local server.\nDefault: http://localhost:1234/v1');
+        }
+    }
+    else if (provider === 'hysa_ai') {
+        const result = await checkOpenAICompatibleAPI('http://localhost:3002/v1', 'hysa_dev_key');
+        if (!result.ok) {
+            throw new Error('HYSA AI is not running. Start it with: hysa-ai serve');
+        }
+    }
+}
 // ── Public API ──────────────────────────────────────
 export function createClient(config, signal) {
     const { currentProvider: provider } = config;
@@ -587,6 +608,10 @@ export function createClient(config, signal) {
     const client = createSingleClient(provider, config.currentModel, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
     const wrapped = {
         async sendMessage(messages, systemPrompt) {
+            // Pre-flight: check local server is reachable before sending
+            if (isLocal) {
+                await checkLocalProviderReachable(provider, config);
+            }
             return client.sendMessage(messages, systemPrompt, signal);
         },
     };

@@ -43,6 +43,7 @@ interface ChatResult {
   message: string;
   toolCalls: { type: string; params: Record<string, string> }[];
   error?: string;
+  hint?: string;
   fallbackEvents?: string[];
   provider?: string;
   model?: string;
@@ -117,21 +118,41 @@ export function saveFile(path: string, content: string): { success: boolean; err
   return { success: true, diff: diff || undefined };
 }
 
+const LOCAL_HINTS: Record<string, { name: string; command: string }> = {
+  ollama: { name: 'Ollama', command: 'ollama serve' },
+  local_openai: { name: 'LM Studio', command: 'Start LM Studio and enable the local server (http://localhost:1234/v1)' },
+  hysa_ai: { name: 'HYSA AI', command: 'hysa-ai serve' },
+};
+
+function getLocalProviderHint(msg: string, provider: string): string | undefined {
+  const lower = msg.toLowerCase();
+  if (provider === 'ollama' || lower.includes('ollama')) {
+    return 'Ollama is not running locally. Start it with: ollama serve';
+  }
+  if (provider === 'local_openai' || lower.includes('lm studio') || lower.includes('local_openai')) {
+    return 'LM Studio is not running. Start LM Studio → Local Inference Server → Start';
+  }
+  if (provider === 'hysa_ai' || lower.includes('hysa ai')) {
+    return 'HYSA AI is not running. Start it with: hysa-ai serve';
+  }
+  return undefined;
+}
+
 export async function handleChat(req: ChatRequest): Promise<ChatResult> {
+  const config = loadConfig();
+  if (!config) {
+    console.log(LOG, 'No config found');
+    return { message: '', toolCalls: [], error: 'No configuration found. Run: hysa chat' };
+  }
+
+  const prov = config.currentProvider;
+
   try {
     const lastMessage = req.messages[req.messages.length - 1];
     if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastMessage.content)) {
       console.log(LOG, 'Greeting detected, returning casual response');
       return { message: 'Hi! How can I help with this project?', toolCalls: [] };
     }
-
-    const config = loadConfig();
-    if (!config) {
-      console.log(LOG, 'No config found');
-      return { message: '', toolCalls: [], error: 'No configuration found. Run: hysa chat' };
-    }
-
-    const prov = config.currentProvider;
     const label = PROVIDER_DEFAULTS[prov]?.label || prov;
     console.log(LOG, `Starting chat with provider: ${label}, model: ${config.currentModel}`);
 
@@ -205,14 +226,17 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
     };
   } catch (err: unknown) {
     const e = err as Error;
-    console.log(LOG, `Provider failed: ${e.message}`);
+    const msg = e.message || 'Unknown provider error';
+    console.log(LOG, `Provider failed: ${msg}`);
     const lastErr = getLastError();
     const fbEvents = getFallbackEvents();
     const fallbackEvents = fbEvents.map(e => e.reason);
+    const hint = getLocalProviderHint(msg, prov);
     return {
       message: '',
       toolCalls: [],
-      error: e.message || 'Unknown provider error',
+      error: msg,
+      hint,
       fallbackEvents: fallbackEvents.length > 0 ? fallbackEvents : undefined,
     };
   }

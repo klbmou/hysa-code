@@ -85,19 +85,37 @@ export function saveFile(path, content) {
     writeFileWithBackup(fullPath, content);
     return { success: true, diff: diff || undefined };
 }
+const LOCAL_HINTS = {
+    ollama: { name: 'Ollama', command: 'ollama serve' },
+    local_openai: { name: 'LM Studio', command: 'Start LM Studio and enable the local server (http://localhost:1234/v1)' },
+    hysa_ai: { name: 'HYSA AI', command: 'hysa-ai serve' },
+};
+function getLocalProviderHint(msg, provider) {
+    const lower = msg.toLowerCase();
+    if (provider === 'ollama' || lower.includes('ollama')) {
+        return 'Ollama is not running locally. Start it with: ollama serve';
+    }
+    if (provider === 'local_openai' || lower.includes('lm studio') || lower.includes('local_openai')) {
+        return 'LM Studio is not running. Start LM Studio → Local Inference Server → Start';
+    }
+    if (provider === 'hysa_ai' || lower.includes('hysa ai')) {
+        return 'HYSA AI is not running. Start it with: hysa-ai serve';
+    }
+    return undefined;
+}
 export async function handleChat(req) {
+    const config = loadConfig();
+    if (!config) {
+        console.log(LOG, 'No config found');
+        return { message: '', toolCalls: [], error: 'No configuration found. Run: hysa chat' };
+    }
+    const prov = config.currentProvider;
     try {
         const lastMessage = req.messages[req.messages.length - 1];
         if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastMessage.content)) {
             console.log(LOG, 'Greeting detected, returning casual response');
             return { message: 'Hi! How can I help with this project?', toolCalls: [] };
         }
-        const config = loadConfig();
-        if (!config) {
-            console.log(LOG, 'No config found');
-            return { message: '', toolCalls: [], error: 'No configuration found. Run: hysa chat' };
-        }
-        const prov = config.currentProvider;
         const label = PROVIDER_DEFAULTS[prov]?.label || prov;
         console.log(LOG, `Starting chat with provider: ${label}, model: ${config.currentModel}`);
         const client = createClient(config);
@@ -159,14 +177,17 @@ export async function handleChat(req) {
     }
     catch (err) {
         const e = err;
-        console.log(LOG, `Provider failed: ${e.message}`);
+        const msg = e.message || 'Unknown provider error';
+        console.log(LOG, `Provider failed: ${msg}`);
         const lastErr = getLastError();
         const fbEvents = getFallbackEvents();
         const fallbackEvents = fbEvents.map(e => e.reason);
+        const hint = getLocalProviderHint(msg, prov);
         return {
             message: '',
             toolCalls: [],
-            error: e.message || 'Unknown provider error',
+            error: msg,
+            hint,
             fallbackEvents: fallbackEvents.length > 0 ? fallbackEvents : undefined,
         };
     }

@@ -2086,6 +2086,44 @@ export async function start(): Promise<void> {
       }
     });
 
+  // ── local subcommands ──────────────────────────────
+  const localCmd = program.command('local').description('Local provider commands');
+  localCmd
+    .command('setup')
+    .description('Print setup instructions for local providers')
+    .action(() => {
+      const lines = [
+        pc.bold('\n📦 HYSA Code — Local Provider Setup\n'),
+        '',
+        pc.bold('1. Ollama'),
+        '   Download: https://ollama.com/download',
+        '   Start:    ollama serve',
+        '   Model:    ollama pull qwen2.5-coder:1.5b',
+        '   Test:     hysa doctor --provider ollama',
+        '',
+        pc.bold('2. HYSA AI'),
+        '   Install:  npm install -g hysa-ai',
+        '   Start:    hysa-ai serve',
+        '   Test:     hysa doctor --provider hysa-ai',
+        '',
+        pc.bold('3. LM Studio'),
+        '   Download: https://lmstudio.ai',
+        '   Start:    Open LM Studio → Local Inference Server → Start',
+        '   Default:  http://localhost:1234/v1',
+        '   Test:     hysa doctor --provider local-openai',
+        '',
+        pc.bold('4. llama.cpp'),
+        '   Download: https://github.com/ggerganov/llama.cpp',
+        '   Build:    Follow build instructions for your OS',
+        '   Start:    ./server -m model.gguf --port 8080',
+        '   Test:     hysa doctor --provider llama-cpp',
+        '',
+        pc.dim('After setting up, run: hysa config'),
+        pc.dim('to select your local provider.\n'),
+      ];
+      console.log(lines.join('\n'));
+    });
+
   program
     .command('tree')
     .description('Show project tree')
@@ -2098,9 +2136,9 @@ export async function start(): Promise<void> {
     .command('doctor')
     .description('Run diagnostics to check your setup')
     .option('--debug', 'Show raw provider error details')
-    .option('--provider <name>', 'Test a specific provider (e.g. openrouter, hysa-ai)')
+    .option('--provider <name>', 'Test a specific provider (e.g. openrouter, hysa-ai, ollama)')
     .action(async (opts: { debug?: boolean; provider?: string }) => {
-      const normalized = opts.provider?.replace(/-/g, '_') as ProviderType | undefined;
+      const normalized = opts.provider?.replace(/-/g, '_');
       await runDoctor(opts.debug ?? false, normalized);
     });
 

@@ -12,6 +12,7 @@ interface ChatResult {
         params: Record<string, string>;
     }[];
     error?: string;
+    hint?: string;
     fallbackEvents?: string[];
     provider?: string;
     model?: string;
