@@ -24,5 +24,9 @@ export interface HealthCheckResult {
   message: string;
 }
 
+export function isValidResponse(res: AIResponse): boolean {
+  return !!((res.message && res.message.trim()) || (res.toolCalls && res.toolCalls.length > 0));
+}
+
 // Re-exported for convenience
 export type { ProviderType } from '../config/keys.js';

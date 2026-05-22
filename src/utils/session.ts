@@ -18,6 +18,25 @@ export interface ProviderHealthEntry {
   category: string;
   timestamp: number;
   failedCount: number;
+  lastSuccessTime?: number;
+  lastFailureTime?: number;
+  failureReason?: string;
+  rateLimited?: boolean;
+  timedOut?: boolean;
+  averageResponseTimeMs?: number;
+  requestCount?: number;
+  totalResponseTimeMs?: number;
+}
+
+export interface SessionUsage {
+  lastRequestDuration?: number;
+  lastRequestTimestamp?: number;
+  lastRequestTokens?: number;
+  lastError?: string;
+  lastProvider?: string;
+  lastModel?: string;
+  totalRequests: number;
+  totalErrors: number;
 }
 
 export interface SessionData {
@@ -28,6 +47,7 @@ export interface SessionData {
   sessionCount: number;
   yolo?: boolean;
   providerHealth?: ProviderHealthEntry[];
+  usage?: SessionUsage;
 }
 
 const MAX_HISTORY = 20;
@@ -123,4 +143,34 @@ export function getLastProviderError(): string | null {
   if (entries.length === 0) return null;
   const last = entries[entries.length - 1];
   return `${last.provider}/${last.model}: ${last.reason}`;
+}
+
+// ── Usage Tracking ──────────────────────────────────
+
+export function saveUsage(data: SessionUsage): void {
+  const session = loadSession();
+  session.usage = data;
+  saveSession(session);
+}
+
+export function getUsage(): SessionUsage {
+  return loadSession().usage ?? { totalRequests: 0, totalErrors: 0 };
+}
+
+export function recordRequest(durationMs: number, tokens?: number): void {
+  const usage = getUsage();
+  usage.totalRequests++;
+  usage.lastRequestDuration = durationMs;
+  usage.lastRequestTimestamp = Date.now();
+  if (tokens !== undefined) usage.lastRequestTokens = tokens;
+  saveUsage(usage);
+}
+
+export function recordError(error: string, provider: string, model: string): void {
+  const usage = getUsage();
+  usage.totalErrors++;
+  usage.lastError = error;
+  usage.lastProvider = provider;
+  usage.lastModel = model;
+  saveUsage(usage);
 }

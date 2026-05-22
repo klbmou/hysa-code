@@ -5,6 +5,17 @@ interface ChatRequest {
         content: string;
     }[];
 }
+interface ChatResult {
+    message: string;
+    toolCalls: {
+        type: string;
+        params: Record<string, string>;
+    }[];
+    error?: string;
+    fallbackEvents?: string[];
+    provider?: string;
+    model?: string;
+}
 export declare function getStatus(): {
     provider: string;
     model: string;
@@ -30,13 +41,7 @@ export declare function saveFile(path: string, content: string): {
     error?: string;
     diff?: string;
 };
-export declare function handleChat(req: ChatRequest): Promise<{
-    message: string;
-    toolCalls: {
-        type: string;
-        params: Record<string, string>;
-    }[];
-}>;
+export declare function handleChat(req: ChatRequest): Promise<ChatResult>;
 export declare function runCommand(command: string): Promise<{
     stdout: string;
     stderr: string;

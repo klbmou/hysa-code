@@ -25,6 +25,8 @@ export interface HysaConfig {
     experimentalConfirmed?: boolean;
     agentMode?: AgentMode;
     debug?: boolean;
+    lightMode?: boolean;
+    promptMode?: 'full' | 'compact' | 'auto';
 }
 export declare const PROVIDER_CATEGORIES: Record<ProviderType, ProviderCategory>;
 export declare const PROVIDER_CATEGORY_LABELS: Record<ProviderCategory, string>;
@@ -46,6 +48,7 @@ export declare const PREMIUM_API_PROVIDERS: ProviderType[];
 export declare const LOCAL_FREE_PROVIDERS: ProviderType[];
 export declare const CLOUD_FREE_PROVIDERS: ProviderType[];
 export declare const EXPERIMENTAL_FREE_PROVIDERS: ProviderType[];
+export declare const COMPACT_PROMPT_PROVIDERS: ProviderType[];
 export declare const EXPERIMENTAL_BASE_URLS: Partial<Record<ProviderType, string>>;
 export declare function providerNeedsApiKey(provider: ProviderType): boolean;
 export declare function providerHasOptionalApiKey(provider: ProviderType): boolean;

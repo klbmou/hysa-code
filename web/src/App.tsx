@@ -9,9 +9,15 @@ import DiffCard from './components/DiffCard.js';
 import CommandCard from './components/CommandCard.js';
 import StatusBar from './components/StatusBar.js';
 
-const TIMEOUT_MS = 45000;
+const TIMEOUT_MS = 30000;
 const CONFIRM_PATTERNS = [/^(ok\s*)?do\s*it$/i, /^yes$/i, /^apply$/i, /^go\s*ahead$/i, /^proceed$/i, /^yeah\s*do\s*it$/i];
 const PROPOSAL_PATTERNS = [/should I/i, /would you like/i, /i can start/i, /shall I/i];
+
+const LOG = '[HYSA Web Chat]';
+
+function getAssistantText(data: any): string {
+  return data.message || data.response || data.content || data.text || data.assistantMessage || '';
+}
 
 interface StatusData {
   provider: string;
@@ -67,6 +73,8 @@ export default function App() {
   const [yolo, setYolo] = useState(false);
   const [elapsedSecs, setElapsedSecs] = useState(0);
   const [thinkingWarning, setThinkingWarning] = useState('');
+  const [debug, setDebug] = useState(false);
+  const [lastRawResponse, setLastRawResponse] = useState<string | null>(null);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -157,91 +165,170 @@ export default function App() {
     try { await fetch('/api/yolo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: newVal }) }); } catch {}
   }, [yolo]);
 
-  const cleanupThinking = useCallback(() => {
+  const clearState = useCallback(() => {
     if (abortRef.current) { try { abortRef.current.abort(); } catch {} abortRef.current = null; }
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-    setLoading(false); setElapsedSecs(0); setThinkingWarning('');
+    setLoading(false);
+    setElapsedSecs(0);
+    setThinkingWarning('');
   }, []);
 
   const cancelThinking = useCallback(() => {
-    cleanupThinking();
+    console.debug(LOG, 'Cancel button clicked');
+    clearState();
     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'done', message: 'Request canceled.' }]);
-  }, [cleanupThinking]);
+  }, [clearState]);
 
   const clearChat = useCallback(() => {
+    console.debug(LOG, 'Clear chat');
     setChatItems([]);
+    setLastRawResponse(null);
+  }, []);
+
+  const addError = useCallback((msg: string) => {
+    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: msg }]);
   }, []);
 
   const sendMessage = useCallback(async (input: string) => {
-    let finalInput = input;
+    console.debug(LOG, '=== sendMessage start ===');
+    console.debug(LOG, 'Input:', JSON.stringify(input));
+    console.debug(LOG, 'loading:', loading, 'debug:', debug);
+    console.debug(LOG, 'chatItems count:', chatItems.length);
 
+    if (input.startsWith('/')) {
+      const cmd = input.slice(1).trim().toLowerCase();
+      if (cmd === 'debug') {
+        const newVal = !debug;
+        setDebug(newVal);
+        console.debug(LOG, 'Debug mode toggled:', newVal);
+        setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'done', message: `Debug mode ${newVal ? 'ON' : 'OFF'}` }]);
+        return;
+      }
+    }
+
+    let finalInput = input;
     const lastAiItem = [...chatItems].reverse().find(i => i.kind === 'ai_msg' && i.content);
     if (lastAiItem && lastAiItem.kind === 'ai_msg') {
       const lastText = lastAiItem.content;
       if (isConfirmation(input) && hasProposal(lastText)) {
         finalInput = 'Proceed now. Use tools to inspect files and apply the requested change. Do not ask for confirmation again unless a dangerous command is required.';
+        console.debug(LOG, 'Confirmation detected, replaced with proceed instruction');
       }
     }
 
     const userItem: ChatItem = { id: nextId(), kind: 'user_msg', content: finalInput };
     setChatItems(prev => [...prev, userItem]);
-    setLoading(true); setElapsedSecs(0); setThinkingWarning('');
+    setLoading(true);
+    setElapsedSecs(0);
+    setThinkingWarning('');
+
+    console.debug(LOG, 'User message added, loading=true');
 
     thinkingStartRef.current = Date.now();
     timerRef.current = setInterval(() => {
       const secs = Math.floor((Date.now() - thinkingStartRef.current) / 1000);
       setElapsedSecs(secs);
-      if (secs >= 10 && secs < 25) setThinkingWarning('Still working...');
-      else if (secs >= 25) setThinkingWarning('This provider may be slow or rate-limited. Try another provider.');
+      if (secs >= 8 && secs < 20) setThinkingWarning('Still working... provider may be slow.');
+      else if (secs >= 20) setThinkingWarning('Provider may be slow or rate-limited. Try OpenRouter, Gemini, or HYSA AI.');
     }, 1000);
 
     const controller = new AbortController();
     abortRef.current = controller;
 
     timeoutRef.current = setTimeout(() => {
+      console.debug(LOG, 'Request timed out after 45s');
       if (abortRef.current) {
         abortRef.current.abort();
         abortRef.current = null;
       }
-      cleanupThinking();
-      setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: 'Provider timed out. Try another provider or HYSA AI.' }]);
+      clearState();
+      addError('Provider timed out. Try another provider or HYSA AI.');
     }, TIMEOUT_MS);
 
     try {
       const chatMessages = buildMessages([...chatItems, userItem]);
+      const payload = { messages: chatMessages };
+      console.debug(LOG, 'Sending to /api/chat, payload messages count:', chatMessages.length);
+      console.debug(LOG, 'Payload:', JSON.stringify(payload));
+
       const res = await fetch('/api/chat', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: chatMessages }),
+        body: JSON.stringify(payload),
         signal: controller.signal,
       });
 
+      console.debug(LOG, 'Response status:', res.status, res.statusText);
+
       if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
-      cleanupThinking();
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
-        const friendly = isRateLimited(errText) ? 'Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.' : `Request failed (${res.status})`;
-        setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: friendly }]);
+        console.debug(LOG, 'Non-200 response body:', errText);
+        if (debug) setLastRawResponse(errText || `Status ${res.status}`);
+        const friendly = isRateLimited(errText) ? 'Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.' : `Web API error: ${res.status}`;
+        console.debug(LOG, 'Non-200 error:', friendly);
+        addError(friendly);
         return;
       }
 
-      const data = await res.json();
+      let data: any;
+      let rawText: string;
+      try {
+        rawText = await res.text();
+        console.debug(LOG, 'Raw response text:', rawText);
+        if (debug) setLastRawResponse(rawText);
+        data = JSON.parse(rawText);
+        console.debug(LOG, 'Parsed JSON keys:', Object.keys(data).join(', '));
+        console.debug(LOG, 'Parsed JSON:', JSON.stringify(data));
+      } catch (parseErr: unknown) {
+        console.debug(LOG, 'JSON parse failed:', (parseErr as Error).message);
+        addError('Invalid response from API. Check provider configuration.');
+        return;
+      }
 
       if (data.error) {
         const errMsg = data.error.toLowerCase();
+        console.debug(LOG, 'API returned error:', data.error);
         if (errMsg.includes('rate') || errMsg.includes('limit') || errMsg.includes('quota') || errMsg.includes('429')) {
-          setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: 'Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.' }]);
+          addError('Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.');
+        } else if (errMsg.includes('timeout') || errMsg.includes('timed out')) {
+          addError('Provider timed out. Try OpenRouter, Gemini, or HYSA AI.');
+        } else if (errMsg.includes('fallback') || errMsg.includes('unavailable') || errMsg.includes('all providers')) {
+          addError('All providers failed. Run hysa config to check your setup.');
         } else {
-          setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: data.error }]);
+          addError(data.error);
         }
         return;
       }
 
-      const newItems: ChatItem[] = [];
-      if (data.message) newItems.push({ id: nextId(), kind: 'ai_msg', content: data.message });
+      const assistantText = getAssistantText(data);
+      const hasToolCalls = data.toolCalls && data.toolCalls.length > 0;
+      console.debug(LOG, 'getAssistantText result:', JSON.stringify(assistantText));
+      console.debug(LOG, 'hasToolCalls:', hasToolCalls, data.toolCalls ? data.toolCalls.length : 0);
 
-      if (data.toolCalls && data.toolCalls.length > 0) {
+      if (!assistantText && !hasToolCalls) {
+        console.debug(LOG, 'Response has no assistant text and no toolCalls — showing error');
+        addError('HYSA returned an empty response. Check provider configuration or try another provider.');
+        return;
+      }
+
+      const newItems: ChatItem[] = [];
+
+      if (data.fallbackEvents && data.fallbackEvents.length > 0) {
+        console.debug(LOG, 'Fallback events:', JSON.stringify(data.fallbackEvents));
+        for (const event of data.fallbackEvents) {
+          newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event });
+        }
+      }
+
+      if (assistantText) {
+        console.debug(LOG, 'Adding assistant message:', JSON.stringify(assistantText));
+        newItems.push({ id: nextId(), kind: 'ai_msg', content: assistantText });
+      }
+
+      if (hasToolCalls) {
+        console.debug(LOG, 'Tool calls count:', data.toolCalls.length);
         for (const tc of data.toolCalls as ToolCall[]) {
           if (tc.type === 'read_file') {
             const fp = tc.params.filePath || '';
@@ -266,30 +353,55 @@ export default function App() {
         }
       }
 
+      console.debug(LOG, 'Calling setChatItems with', newItems.length, 'new items');
       setChatItems(prev => [...prev, ...newItems]);
+      console.debug(LOG, 'setChatItems called successfully');
     } catch (err: unknown) {
+      console.debug(LOG, 'Caught error:', err);
       if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
       const alreadyHandled = !abortRef.current;
-      cleanupThinking();
+      if (abortRef.current) { try { abortRef.current.abort(); } catch {} abortRef.current = null; }
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      setLoading(false);
+      setElapsedSecs(0);
+      setThinkingWarning('');
 
-      if (alreadyHandled) return;
+      if (alreadyHandled) {
+        console.debug(LOG, 'Error already handled (abortRef was null), skipping');
+        return;
+      }
 
       const e = err as Error;
       if (e.name === 'AbortError') {
+        console.debug(LOG, 'Request was aborted');
         setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'done', message: 'Request canceled.' }]);
         return;
       }
 
-      const msg = e.message.toLowerCase();
+      const msg = e.message ? e.message.toLowerCase() : '';
+      console.debug(LOG, 'Error message:', msg);
       if (msg.includes('rate') || msg.includes('limit') || msg.includes('quota') || msg.includes('429') || msg.includes('overloaded')) {
-        setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: 'Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.' }]);
-      } else if (msg.includes('timeout') || msg.includes('timed out') || msg.includes('abort')) {
-        setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: 'Provider timed out. Try another provider or HYSA AI.' }]);
+        addError('Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.');
+      } else if (msg.includes('timeout') || msg.includes('timed out')) {
+        addError('Provider timed out. Try another provider or HYSA AI.');
+      } else if (msg.includes('fallback') || msg.includes('unavailable') || msg.includes('all providers')) {
+        addError('All providers failed. Run hysa config to check your setup.');
       } else {
-        setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: e.message }]);
+        const displayMsg = e.message || 'Unknown error';
+        console.debug(LOG, 'Unhandled error:', displayMsg);
+        addError(`HYSA could not get a response: ${displayMsg}`);
       }
+    } finally {
+      console.debug(LOG, '=== sendMessage finally ===');
+      if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      if (abortRef.current) { try { abortRef.current.abort(); } catch {} abortRef.current = null; }
+      setLoading(false);
+      setElapsedSecs(0);
+      setThinkingWarning('');
+      console.debug(LOG, '=== sendMessage end ===');
     }
-  }, [chatItems, openFile, buildMessages, cleanupThinking]);
+  }, [chatItems, openFile, buildMessages, clearState, addError, debug, loading]);
 
   const handleCopyMessage = useCallback((text: string) => {
     navigator.clipboard.writeText(text).catch(() => {});
@@ -312,6 +424,9 @@ export default function App() {
               </button>
               <button className="session-btn" onClick={clearChat} disabled={!hasItems}>Clear chat</button>
               <button className="session-btn" onClick={() => { window.location.hash = '#/code'; window.location.reload(); }}>Open landing</button>
+              <button className={`session-btn ${debug ? 'active' : ''}`} onClick={() => setDebug(!debug)} title="Toggle debug mode">
+                {debug ? 'Debug ON' : 'Debug'}
+              </button>
               <span className="session-provider">{status ? `${status.provider}` : 'Loading...'}</span>
             </div>
 
@@ -358,10 +473,20 @@ export default function App() {
             {loading && (
               <div className="thinking-bar">
                 <span className="tb-dot-pulse"><span></span><span></span><span></span></span>
-                <span className="tb-text">HYSA is working...</span>
+                <span className="tb-text">HYSA is working with {status ? status.provider : '?'} / {status ? status.model : '?'}...</span>
                 <span className="tb-timer">{elapsedSecs}s</span>
                 {thinkingWarning && <span className={`tb-warn ${elapsedSecs >= 25 ? 'tb-slow' : ''}`}>{thinkingWarning}</span>}
                 <button className="tb-cancel" onClick={cancelThinking}>Cancel</button>
+              </div>
+            )}
+
+            {debug && lastRawResponse && (
+              <div className="debug-panel">
+                <div className="debug-panel-header">
+                  <span>Last API Response</span>
+                  <button className="debug-panel-close" onClick={() => setLastRawResponse(null)}>x</button>
+                </div>
+                <pre className="debug-panel-body">{lastRawResponse}</pre>
               </div>
             )}
 

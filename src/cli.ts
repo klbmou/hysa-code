@@ -17,19 +17,20 @@ import type { ProjectInfo } from './context/builder.js';
 import { rankFiles } from './context/ranker.js';
 import { estimateTokens, truncateMessages } from './context/tokens.js';
 import { buildSystemPrompt } from './prompts/system.js';
+import { isProtectedFilePath, PROTECTED_FILE_MESSAGE, normalizeToolParams, containsOnlyToolSyntax, hasToolSyntax, stripToolCallBlocks } from './ai/tools.js';
 import { readFile } from './files/reader.js';
 import { writeFileWithBackup, previewEdit } from './files/writer.js';
 import { Spinner } from './utils/spinner.js';
 import { detectSecrets } from './utils/secrets.js';
 import { getGitInfo, getCommitSuggestion } from './utils/git.js';
-import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo, getProviderHealth, saveProviderHealth, clearProviderHealth, getLastProviderError } from './utils/session.js';
+import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo, getProviderHealth, saveProviderHealth, clearProviderHealth, getLastProviderError, getUsage } from './utils/session.js';
 import { grepSearch, findFiles } from './utils/searcher.js';
 import { classifyCommand } from './utils/commands.js';
 import type { AgentMode } from './agent/types.js';
 import { ALL_MODES, MODE_LABELS, MODE_DESCRIPTIONS } from './agent/modes.js';
 import { createTask, updateTask, loadTasks, getActiveTask } from './agent/tasks.js';
 import { listSymbols, findReferences, searchImports, summarizeFile, explainFunction } from './agent/tools.js';
-import { toHealthSummary, resetHealth, getLastError, getLastFallbackUsed, healthKey, loadHealthFromEntries, toHealthEntries } from './ai/model-health.js';
+import { getAllHealth, toHealthSummary, resetHealth, getLastError, getLastFallbackUsed, healthKey, loadHealthFromEntries, toHealthEntries } from './ai/model-health.js';
 import type { ErrorCategory } from './ai/model-health.js';
 
 // ── Setup ────────────────────────────────────────────────
@@ -202,6 +203,10 @@ function showHeader(config: HysaConfig, gitInfo?: { branch: string | null; hasCh
     lines.push(pc.bold(pc.magenta(`│  ${pc.yellow('Mode: ⚡ YOLO').padEnd(47)}│`)));
   }
 
+  if (config.lightMode !== false && LOCAL_FREE_PROVIDERS.includes(config.currentProvider)) {
+    lines.push(pc.bold(pc.magenta(`│  ${pc.cyan('Light: 💡 ON').padEnd(47)}│`)));
+  }
+
   if (gitInfo?.branch) {
     const status = gitInfo.hasChanges ? pc.yellow('●') : pc.green('○');
     const branchText = `${pc.dim('Git:')} ${gitInfo.branch} ${status}`;
@@ -260,6 +265,8 @@ function showHelp(agentMode?: AgentMode): void {
   console.log(pc.cyan('  /apply             Apply the pending edit'));
   console.log(pc.cyan('  /pending           Show pending edit details'));
   console.log(pc.cyan('  /yolo              Toggle YOLO mode (auto-apply edits)'));
+  console.log(pc.cyan('  /light             Toggle Light mode (short prompts, fast responses)'));
+  console.log(pc.cyan('  /latency           Test provider latency'));
 
   if (agentMode && agentMode !== 'chat') {
     console.log(pc.dim(`\n  Active mode: ${MODE_LABELS[agentMode]}`));
@@ -365,7 +372,7 @@ async function switchModel(config: HysaConfig): Promise<{ config: HysaConfig; ch
 
   const updatedConfig = { ...config, currentProvider: provider, currentModel: model, experimentalConfirmed: config.experimentalConfirmed || PROVIDER_TIERS[provider] === 'experimental_free' };
 
-  if (provider !== 'ollama' && provider !== 'local_openai') {
+  if (provider !== 'ollama' && provider !== 'local_openai' && PROVIDER_TIERS[provider] !== 'experimental_free') {
     if (!config.apiKeys[provider as keyof typeof config.apiKeys]) {
       if (providerNeedsApiKey(provider)) {
         const rawKey = await password({ message: `Enter ${PROVIDER_DEFAULTS[provider].label} API key\n  Get one: ${PROVIDER_SIGNUP_URLS[provider]}`, mask: true });
@@ -447,8 +454,10 @@ function runCommandSync(command: string): { stdout: string; stderr: string } {
 async function handleToolCall(
   toolCall: ToolCall,
   yolo = false,
+  debug = false,
 ): Promise<string> {
-  const { type, params } = toolCall;
+  const { type } = toolCall;
+  const params = normalizeToolParams(toolCall.params);
 
   switch (type) {
     case 'read_file': {
@@ -480,10 +489,10 @@ async function handleToolCall(
       const newContent = params.newContent;
       if (!filePath || !newContent) return 'Error: missing filePath or newContent parameter';
 
-      // YOLO safety: never auto-edit protected files
-      const protectedPatterns = [/(^|\/)\..+/, /package-lock\.json$/, /node_modules\//, /\.git\//, /\/dist\//, /\/build\//];
-      if (yolo && protectedPatterns.some(p => p.test(filePath))) {
-        return `YOLO blocked: ${filePath} is a protected file.`;
+      // Absolute .env and protected file protection (applies in ALL modes, including YOLO)
+      if (isProtectedFilePath(filePath)) {
+        if (debug) console.log(pc.dim(`  [debug] blocked protected file edit: ${filePath}`));
+        return PROTECTED_FILE_MESSAGE;
       }
 
       const spinner = new Spinner();
@@ -783,6 +792,14 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
 
   console.log(pc.cyan('  Type a message or use /help for commands.\n'));
 
+  // Determine if light mode is active
+  const isLocalProvider = LOCAL_FREE_PROVIDERS.includes(config.currentProvider);
+  if (isLocalProvider && config.lightMode === undefined) {
+    config.lightMode = true;
+    updateSettings({ lightMode: true });
+  }
+  const lightActive = config.lightMode !== false && isLocalProvider;
+
   // Build the system prompt with project context and agent mode
   let systemPrompt = buildSystemPrompt({
     type: projectInfo.type,
@@ -790,7 +807,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     configFiles: projectInfo.configFiles,
     fileCount: projectInfo.fileCount,
     tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
-  }, currentAgentMode);
+  }, currentAgentMode, lightActive, config.currentProvider, config.promptMode || 'auto');
 
   let retryContent: string | null = null;
 
@@ -808,10 +825,13 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     }
     retryContent = null;
 
-    // ── Greeting guard (no AI call) ──────────────────
+    // ── Strong pre-request casual guard ──────────────
     const trimmed = userInput.trim();
     if (!trimmed.startsWith('/') && isOnlyGreeting(trimmed)) {
       const casual = getCasualResponse(trimmed);
+      if (config.debug) {
+        console.log(pc.dim(`  [debug] local casual guard: skipped provider request`));
+      }
       if (casual) {
         console.log(pc.cyan(`  ${casual}\n`));
       } else {
@@ -854,12 +874,13 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
 
       currentAgentMode = mode;
       updateAgentMode(mode);
+      const modeLightActive = config.lightMode !== false && LOCAL_FREE_PROVIDERS.includes(config.currentProvider);
       systemPrompt = buildSystemPrompt({
         type: projectInfo.type,
         entryPoints: projectInfo.entryPoints,
         configFiles: projectInfo.configFiles,
         fileCount: projectInfo.fileCount,
-      }, currentAgentMode);
+      }, currentAgentMode, modeLightActive, config.currentProvider, config.promptMode || 'auto');
 
       if (mode !== 'chat') {
         currentTask = createTask(`Session in ${mode} mode`, mode);
@@ -874,12 +895,13 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       const result = await switchModel(config);
       config = result.config;
       client = createClient(config);
+      const modelLightActive = config.lightMode !== false && LOCAL_FREE_PROVIDERS.includes(config.currentProvider);
       systemPrompt = buildSystemPrompt({
         type: projectInfo.type,
         entryPoints: projectInfo.entryPoints,
         configFiles: projectInfo.configFiles,
         fileCount: projectInfo.fileCount,
-      }, currentAgentMode);
+      }, currentAgentMode, modelLightActive, config.currentProvider, config.promptMode || 'auto');
       const newTokenEstimate = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
       showHeader(config, gitInfo, newTokenEstimate, currentAgentMode, yoloMode);
       console.log(pc.green(`✓ Switched to ${PROVIDER_DEFAULTS[config.currentProvider].label} (${config.currentModel})\n`));
@@ -1068,10 +1090,36 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       continue;
     }
 
-    if (trimmed.toLowerCase() === '/debug') {
+    if (trimmed.toLowerCase() === '/debug' || trimmed.toLowerCase() === '/debug toggle') {
       config.debug = !config.debug;
       updateSettings({ debug: config.debug });
       console.log(pc.green(`\n  Debug mode: ${config.debug ? 'ON' : 'OFF'}\n`));
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/debug on') {
+      config.debug = true;
+      updateSettings({ debug: true });
+      console.log(pc.green('\n  Debug mode: ON\n'));
+      console.log(pc.dim('  Prompt size and timing info will be shown for each request.\n'));
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/debug off') {
+      config.debug = false;
+      updateSettings({ debug: false });
+      console.log(pc.green('  Debug mode: OFF\n'));
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/debug status') {
+      const statusTag = config.debug ? pc.yellow('ON') : pc.green('OFF');
+      console.log(pc.cyan(`\n  Debug mode: ${statusTag}`));
+      if (config.debug) {
+        console.log(pc.dim('  Context build time, token estimates, and request duration are shown.'));
+      } else {
+        console.log(pc.dim('  Use /debug on to see prompt size and timing information.\n'));
+      }
       continue;
     }
 
@@ -1271,11 +1319,148 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       continue;
     }
 
+    // ── Light mode commands ────────────────────────
+
+    if (trimmed.toLowerCase() === '/light') {
+      config.lightMode = !config.lightMode;
+      updateSettings({ lightMode: config.lightMode });
+      const statusTag = config.lightMode ? pc.yellow('ON') : pc.green('OFF');
+      console.log(pc.cyan(`\n  Light mode: ${statusTag}`));
+      if (config.lightMode) {
+        console.log(pc.dim('  Short prompts, minimal context, fast responses for local models.'));
+      } else {
+        console.log(pc.dim('  Full context mode with rich system prompts.'));
+      }
+      showHeader(config, gitInfo, estimateTokens(messages.reduce((sum, m) => sum + m.content, '')), currentAgentMode, yoloMode);
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/light on') {
+      config.lightMode = true;
+      updateSettings({ lightMode: true });
+      console.log(pc.yellow('\n  ⚡ Light mode enabled.'));
+      console.log(pc.dim('  Short prompts, minimal context, fast responses for local models.\n'));
+      showHeader(config, gitInfo, estimateTokens(messages.reduce((sum, m) => sum + m.content, '')), currentAgentMode, yoloMode);
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/light off') {
+      config.lightMode = false;
+      updateSettings({ lightMode: false });
+      console.log(pc.green('  Light mode disabled.\n'));
+      showHeader(config, gitInfo, estimateTokens(messages.reduce((sum, m) => sum + m.content, '')), currentAgentMode, yoloMode);
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/light status') {
+      const isLocal = LOCAL_FREE_PROVIDERS.includes(config.currentProvider);
+      const defaultLight = isLocal;
+      const effectiveLight = config.lightMode !== undefined ? config.lightMode : defaultLight;
+      const statusTag = effectiveLight ? pc.yellow('ON') : pc.green('OFF');
+      const source = config.lightMode !== undefined ? '(configured)' : '(default for local provider)';
+      console.log(pc.cyan(`\n  Light mode: ${statusTag} ${pc.dim(source)}`));
+      console.log(pc.dim(`  Provider: ${PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider}`));
+      if (effectiveLight) {
+        console.log(pc.dim('  Short system prompt, minimal history, no full project context.'));
+      }
+      continue;
+    }
+
+    // ── Latency command ──────────────────────────────
+
+    if (trimmed.toLowerCase() === '/latency') {
+      console.log(pc.cyan('\n📊 Latency Test\n'));
+      const provider = config.currentProvider;
+      const model = config.currentModel;
+      const label = PROVIDER_DEFAULTS[provider]?.label || provider;
+      console.log(`  Provider: ${label}`);
+      console.log(`  Model:    ${model}`);
+
+      const usage = (await import('./utils/session.js')).getUsage();
+      if (usage.lastRequestDuration) {
+        console.log(`  Last request duration: ${usage.lastRequestDuration}ms`);
+      }
+      if (usage.lastError) {
+        console.log(`  Last error: ${usage.lastError.slice(0, 100)}`);
+      }
+
+      // Test direct provider latency
+      if (provider === 'hysa_ai' || provider === 'ollama' || provider === 'local_openai') {
+        const baseUrl = provider === 'ollama' ? config.ollamaBaseUrl
+          : provider === 'hysa_ai' ? 'http://localhost:3002/v1'
+          : config.localOpenAiBaseUrl || 'http://localhost:1234/v1';
+
+        // Test GET /models
+        try {
+          const modelStart = Date.now();
+          const modelRes = await fetch(`${baseUrl}/models`, { signal: AbortSignal.timeout(5000) });
+          const modelDur = Date.now() - modelStart;
+          if (modelRes.ok) {
+            console.log(`  GET /models: ${modelDur}ms ${pc.green('✓')}`);
+          } else {
+            console.log(`  GET /models: ${modelDur}ms ${pc.yellow(`(${modelRes.status})`)}`);
+          }
+        } catch {
+          console.log(`  GET /models: ${pc.red('failed')}`);
+        }
+
+        // Test POST /chat/completions with tiny prompt
+        const testStart = Date.now();
+        try {
+          const testBody = {
+            model,
+            max_tokens: 10,
+            messages: [
+              { role: 'system', content: 'You are a helpful assistant.' },
+              { role: 'user', content: 'say hi' },
+            ],
+          };
+          const chatRes = await fetch(`${baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(testBody),
+            signal: AbortSignal.timeout(10000),
+          });
+          const chatDur = Date.now() - testStart;
+          if (chatRes.ok) {
+            const data = await chatRes.json() as { choices?: { message?: { content?: string } }[] };
+            const reply = data.choices?.[0]?.message?.content || '';
+            console.log(`  POST /chat/completions "say hi": ${chatDur}ms ${pc.green('✓')}`);
+            console.log(`  Reply: ${reply.slice(0, 100)}`);
+          } else {
+            const txt = await chatRes.text().catch(() => '');
+            console.log(`  POST /chat/completions: ${chatDur}ms ${pc.yellow(`(${chatRes.status})`)}`);
+            if (txt) console.log(`  ${pc.dim(txt.slice(0, 200))}`);
+          }
+        } catch (err: unknown) {
+          const errMsg = (err as Error).message || 'unknown';
+          console.log(`  POST /chat/completions: ${pc.red('failed')} — ${errMsg.slice(0, 100)}`);
+        }
+      } else {
+        // Cloud provider: just show info (can't easily test without API key logic)
+        console.log(pc.dim('  Direct latency test not available for cloud providers.'));
+        console.log(pc.dim('  Check /health for provider status.'));
+      }
+      console.log();
+      continue;
+    }
+
+    function checkPendingEditProtected(): boolean {
+      if (pendingEdit && isProtectedFilePath(pendingEdit.filePath)) {
+        if (config.debug) console.log(pc.dim(`  [debug] blocked protected file pending edit: ${pendingEdit.filePath}`));
+        console.log(pc.yellow(`  ${PROTECTED_FILE_MESSAGE}\n`));
+        pendingEdit = null;
+        return true;
+      }
+      return false;
+    }
+
     if (['/apply', '/doit', '/do it'].includes(trimmed.toLowerCase()) || trimmed.toLowerCase() === '/go ahead') {
       if (!pendingEdit) {
         console.log(pc.yellow('  No pending edit to apply.\n'));
         continue;
       }
+      if (checkPendingEditProtected()) continue;
       const relPath = relative(workingDir, pendingEdit.filePath);
       console.log(pc.cyan(`\n📝 Preview: ${relPath}\n`));
       const diff = previewEdit(pendingEdit.filePath, pendingEdit.content);
@@ -1322,6 +1507,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     // "do it", "apply", "yes", "ok", "go ahead" when pending edit exists
     const applyTrigger = /^(do\s*it|apply|yes|ok|go\s*ahead|yeah|sure|y[!.]?)$/i.test(trimmed.trim());
     if (applyTrigger && pendingEdit) {
+      if (checkPendingEditProtected()) continue;
       const relPath = relative(workingDir, pendingEdit.filePath);
       console.log(pc.cyan(`\n📝 Preview: ${relPath}\n`));
       const diff = previewEdit(pendingEdit.filePath, pendingEdit.content);
@@ -1371,65 +1557,96 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     // Track the task in session
     addTask(trimmed);
 
-    // Rank relevant files for this query
-    const ranked = rankFiles(projectInfo.importantFiles, trimmed, 5);
-    // Add source files from tree for better ranking
-    const allFiles = projectInfo.tree.split('\n').filter(f => !f.endsWith('/'));
-    const rankedAll = rankFiles(allFiles, trimmed, 8);
-    const topFiles = rankedAll.filter(r => r.score > 5).map(r => r.path).slice(0, 5);
+    const contextStartTime = Date.now();
 
-    // Build context with relevant file contents
-    let fileContext = '';
-    for (const file of topFiles) {
-      const content = readFile(file);
-      if (content) {
-        const lines = content.split('\n').length;
-        fileContext += `\n--- ${file} (${lines} lines) ---\n${content.slice(0, 3000)}\n`;
+    // Light mode: skip file context building, use minimal history
+    let userMessage = trimmed;
+    let allMessages: Message[];
+    let wasTruncated = false;
+
+    if (lightActive) {
+      // Light mode: use aggressive token limit (2000 max)
+      const { messages: safeMessages } = truncateMessages([...messages], 2000);
+      allMessages = [
+        ...safeMessages,
+        { role: 'user', content: userMessage },
+      ];
+      wasTruncated = allMessages.length < messages.length + 1;
+    } else {
+      // Rank relevant files for this query
+      const ranked = rankFiles(projectInfo.importantFiles, trimmed, 5);
+      const allFiles = projectInfo.tree.split('\n').filter(f => !f.endsWith('/'));
+      const rankedAll = rankFiles(allFiles, trimmed, 8);
+      const topFiles = rankedAll.filter(r => r.score > 5).map(r => r.path).slice(0, 5);
+
+      let fileContext = '';
+      for (const file of topFiles) {
+        const content = readFile(file);
+        if (content) {
+          const lines = content.split('\n').length;
+          fileContext += `\n--- ${file} (${lines} lines) ---\n${content.slice(0, 3000)}\n`;
+        }
       }
-    }
 
-    // Auto-include files for small/one-file projects
-    if (projectInfo.fileCount <= 2) {
-      for (const file of projectInfo.entryPoints) {
-        if (!topFiles.includes(file)) {
-          const content = readFile(file);
-          if (content) {
-            fileContext += `\n--- ${file} ---\n${content.slice(0, 3000)}\n`;
+      if (projectInfo.fileCount <= 2) {
+        for (const file of projectInfo.entryPoints) {
+          if (!topFiles.includes(file)) {
+            const content = readFile(file);
+            if (content) {
+              fileContext += `\n--- ${file} ---\n${content.slice(0, 3000)}\n`;
+            }
           }
         }
       }
+
+      if (fileContext) {
+        const est = estimateTokens(fileContext);
+        if (est < 2000) {
+          userMessage = `Relevant project files:\n${fileContext}\n\nUser request: ${trimmed}`;
+        }
+      }
+
+      const { messages: safeMessages, truncated: trunc } = truncateMessages([...messages]);
+      wasTruncated = trunc;
+      allMessages = [
+        ...safeMessages,
+        { role: 'user', content: userMessage },
+      ];
     }
 
-    // Build user message with context
-    let userMessage = trimmed;
-    if (fileContext) {
-      const est = estimateTokens(fileContext);
-      if (est < 2000) {
-        userMessage = `Relevant project files:\n${fileContext}\n\nUser request: ${trimmed}`;
+    const currentTokens = allMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+    const contextBuildTime = Date.now() - contextStartTime;
+
+    // Debug: show prompt size info
+    if (config.debug) {
+      const systemTokens = estimateTokens(systemPrompt);
+      const historyTokens = allMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
+      const totalTokens = systemTokens + historyTokens;
+      console.log(pc.dim(`  [debug] Context build time: ${contextBuildTime}ms`));
+      console.log(pc.dim(`  [debug] System prompt: ~${systemTokens} tokens`));
+      console.log(pc.dim(`  [debug] History/messages: ~${historyTokens} tokens`));
+      console.log(pc.dim(`  [debug] Total estimated: ~${totalTokens} tokens`));
+      if (lightActive && totalTokens > 2000) {
+        console.log(pc.dim(`  [debug] Local prompt trimmed from ~${totalTokens} tokens to ~2000 tokens.`));
       }
     }
 
-    // Token safety: truncate messages if needed
-    const { messages: safeMessages, truncated: wasTruncated } = truncateMessages([...messages]);
-
-    // Add current user message
-    const allMessages: Message[] = [
-      ...safeMessages,
-      { role: 'user', content: userMessage },
-    ];
-
-    const currentTokens = allMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
     const spinner = new Spinner();
     const requestStart = Date.now();
     thinkingCancelled = false;
-    spinner.start('🤔 Thinking...');
+    const provLabel = PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider;
+    spinner.start(`🤔 ${provLabel} / ${config.currentModel}...`);
 
     // Setup cancellation for this user request
     const requestAbortController = new AbortController();
     cancelThinking = () => { if (!requestAbortController.signal.aborted) requestAbortController.abort(); };
 
-    // Multi-step auto-continue loop
-    const MAX_STEPS = 5;
+    // Multi-step auto-continue loop: fewer steps for light mode, 1 for simple chat
+    const isSimpleChat = trimmed.trim().length < 20
+      && !trimmed.includes('/')
+      && !trimmed.includes('.')
+      && !trimmed.match(/\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe)\b/i);
+    const MAX_STEPS = isSimpleChat ? 1 : (lightActive ? 2 : 5);
     let steps = 0;
     let lastResponse: AIResponse | null = null;
     let stepError: Error | null = null;
@@ -1444,7 +1661,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       let response: AIResponse;
       try {
         const timeoutPromise = new Promise<never>((_, reject) => {
-          const timer = setTimeout(() => reject(new Error(`Request timed out after 45s`)), 45000);
+          const timer = setTimeout(() => reject(new Error(`Request timed out after 30s`)), 30000);
           requestAbortController.signal.addEventListener('abort', () => {
             clearTimeout(timer);
             reject(new DOMException('Aborted', 'AbortError'));
@@ -1480,14 +1697,26 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
 
             if (isTimeout) {
               spinner.fail(`Timed out (${elapsed}s)`);
-              console.log(pc.yellow(`  ⚠ Provider timed out after ${elapsed}s. Automatically falling back...`));
+              if (isLocalProvider) {
+                console.log(pc.yellow(`  ⚠ HYSA AI request timed out inside hysa-code. Direct provider is fast, so prompt/context may be too large. Try /light on or /debug on.`));
+              } else {
+                console.log(pc.yellow(`  ⚠ Provider timed out after ${elapsed}s. Automatically falling back...`));
+              }
             } else if (isRateLimit) {
               spinner.fail('Provider rate limited');
-              console.log(pc.yellow(`  ⚠ ${errorMsg}`));
-              console.log(pc.dim('  The system will automatically try another provider.'));
+              if (isLocalProvider) {
+                console.log(pc.yellow(`  ⚠ ${errorMsg}`));
+                console.log(pc.dim('  Local provider rate limited. Try /light on to reduce prompt size.'));
+              } else {
+                console.log(pc.yellow(`  ⚠ ${errorMsg}`));
+                console.log(pc.dim('  The system will automatically try another provider.'));
+              }
             } else {
               spinner.fail('Error');
               console.log(pc.red(`  ${errorMsg}`));
+              if (isLocalProvider) {
+                console.log(pc.dim('  Try /light on to reduce prompt size or /debug on for diagnostics.'));
+              }
               const signupUrl = PROVIDER_SIGNUP_URLS[config.currentProvider];
               if (signupUrl && !config.apiKeys[config.currentProvider as keyof typeof config.apiKeys]) {
                 console.log(pc.dim(`  Get a key: ${signupUrl}`));
@@ -1534,6 +1763,14 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
         if (!pendingEdit && !readingIntent) {
           const detected = detectPendingEdit(aiMsg, projectInfo);
           if (detected) {
+            // Block pending edits to protected files
+            if (isProtectedFilePath(detected.filePath)) {
+              if (config.debug) console.log(pc.dim(`  [debug] blocked protected file pending edit: ${detected.filePath}`));
+              console.log(`  ${pc.yellow(PROTECTED_FILE_MESSAGE)}\n`);
+              allMessages.push({ role: 'assistant', content: aiMsg + '\n\n' + PROTECTED_FILE_MESSAGE });
+              messages.push({ role: 'user', content: trimmed }, { role: 'assistant', content: aiMsg + '\n\n' + PROTECTED_FILE_MESSAGE });
+              break;
+            }
             pendingEdit = {
               filePath: detected.filePath,
               content: detected.content,
@@ -1547,8 +1784,9 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
           }
         }
 
-        if (aiMsg) {
-          console.log(`${pc.bold(pc.magenta('HYSA:'))} ${aiMsg}\n`);
+        const displayMsg = stripToolCallBlocks(aiMsg);
+        if (displayMsg && !containsOnlyToolSyntax(aiMsg)) {
+          console.log(`${pc.bold(pc.magenta('HYSA:'))} ${displayMsg}\n`);
         }
         const unparseable = /<\|?tool_call/.test(aiMsg) || /\b(edit_file|read_file|execute_command)\s*\(/.test(aiMsg);
         if (unparseable) {
@@ -1564,7 +1802,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       spinner.stop();
       const toolResults: string[] = [];
       for (const toolCall of response.toolCalls) {
-        const result = await handleToolCall(toolCall, yoloMode);
+        const result = await handleToolCall(toolCall, yoloMode, !!config.debug);
         toolResults.push(result);
       }
 
@@ -1582,9 +1820,10 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
         break;
       }
 
-      // Show intermediate thinking
-      if (response.message) {
-        console.log(`${pc.bold(pc.magenta('HYSA:'))} ${response.message}\n`);
+      // Show intermediate thinking (strip raw tool syntax)
+      const intermediateMsg = stripToolCallBlocks(response.message || '');
+      if (intermediateMsg && !containsOnlyToolSyntax(response.message || '')) {
+        console.log(`${pc.bold(pc.magenta('HYSA:'))} ${intermediateMsg}\n`);
       }
 
       // Build assistant content with results
@@ -1596,7 +1835,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
 
       // If we have more steps, continue
       if (steps < MAX_STEPS) {
-        spinner.start(`🤔 Analyzing (step ${steps}/${MAX_STEPS})...`);
+        spinner.start(`🤔 ${provLabel} / ${config.currentModel} (step ${steps}/${MAX_STEPS})...`);
       }
     }
 
@@ -1629,6 +1868,15 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       const finalTokens = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
       if (wasTruncated || finalTokens > 3000) {
         console.log(pc.dim(`  Context estimate: ~${finalTokens.toLocaleString()} tokens${wasTruncated ? ' (trimmed for safety)' : ''}\n`));
+      }
+    }
+
+    // Debug: request timing info
+    if (config.debug && lastResponse) {
+      const totalElapsed = ((Date.now() - requestStart) / 1000).toFixed(1);
+      console.log(pc.dim(`  [debug] Provider request duration: ${totalElapsed}s`));
+      if (steps > 1) {
+        console.log(pc.dim(`  [debug] Multi-step tools: ${steps} steps`));
       }
     }
   }
@@ -1731,7 +1979,7 @@ export async function start(): Promise<void> {
 
         const updated = { ...config, currentProvider: provider, currentModel: model, experimentalConfirmed: config.experimentalConfirmed || PROVIDER_TIERS[provider] === 'experimental_free' };
 
-  if (provider !== 'ollama' && provider !== 'local_openai' && provider !== 'hysa_ai') {
+  if (provider !== 'ollama' && provider !== 'local_openai' && provider !== 'hysa_ai' && PROVIDER_TIERS[provider] !== 'experimental_free') {
           if (!config.apiKeys[provider as keyof typeof config.apiKeys]) {
             if (providerNeedsApiKey(provider)) {
               const rawKey = await password({ message: `Enter ${PROVIDER_DEFAULTS[provider].label} API key\n  Get one: ${PROVIDER_SIGNUP_URLS[provider]}`, mask: true });
@@ -1914,10 +2162,64 @@ export async function start(): Promise<void> {
     });
 
   program
+    .command('fallback')
+    .description('Show fallback provider status')
+    .argument('[action]', 'status or reset', 'status')
+    .action((action: string) => {
+      if (action === 'reset') {
+        resetHealth();
+        console.log(pc.green('\n  Provider health has been reset.\n'));
+        return;
+      }
+      const config = loadConfig();
+      const healthData = getAllHealth();
+      const lastErr = getLastError();
+      const lastFb = getLastFallbackUsed();
+
+      console.log(pc.bold(pc.magenta('\n📊 Fallback Status\n')));
+      if (config) {
+        console.log(`  Current provider: ${PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider}`);
+        console.log(`  Current model: ${config.currentModel}`);
+      }
+      console.log(`  Last fallback: ${lastFb || 'None'}`);
+      console.log(`  Last error: ${lastErr ? `${lastErr.provider}/${lastErr.model}: ${lastErr.reason}` : 'None'}`);
+
+      const unhealthy = toHealthSummary();
+      if (unhealthy.length > 0) {
+        console.log(pc.yellow(`\n  Unhealthy providers:`));
+        for (const line of unhealthy) console.log(line);
+      } else {
+        console.log(pc.green(`\n  All providers healthy.`));
+      }
+      console.log();
+    });
+
+  program
+    .command('usage')
+    .description('Show provider usage statistics')
+    .action(() => {
+      const config = loadConfig();
+      const usage = getUsage();
+
+      console.log(pc.bold(pc.magenta('\n📈 Usage Statistics\n')));
+      if (config) {
+        console.log(`  Current provider: ${PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider}`);
+        console.log(`  Current model: ${config.currentModel}`);
+      }
+      console.log(`  Total requests: ${usage.totalRequests}`);
+      console.log(`  Total errors: ${usage.totalErrors}`);
+      if (usage.lastRequestDuration) console.log(`  Last request: ${usage.lastRequestDuration}ms`);
+      if (usage.lastRequestTokens) console.log(`  Last context: ~${usage.lastRequestTokens} tokens`);
+      if (usage.lastError) console.log(`  Last error: ${usage.lastError}`);
+      console.log(pc.dim('\n  Note: Quota/rate limits are provider-side, not related to context tokens.\n'));
+    });
+
+    program
     .command('web')
-    .description('Start the HYSA Web UI')
+    .description('Start the HYSA Web UI and open in browser')
     .option('-p, --port <number>', 'Port to run on', '8787')
-    .action(async (opts: { port?: string }) => {
+    .option('--no-open', 'Do not auto-open browser')
+    .action(async (opts: { port?: string; open?: boolean }) => {
       const port = parseInt(opts.port || '8787', 10);
       if (isNaN(port) || port < 1 || port > 65535) {
         console.log(pc.red('Invalid port number. Use a port between 1 and 65535.\n'));
@@ -1926,14 +2228,40 @@ export async function start(): Promise<void> {
       try {
         const { startWebServer } = await import('./web/server.js');
         await startWebServer(port);
+        const shouldOpen = opts.open !== false;
+        if (shouldOpen) {
+          const url = `http://localhost:${port}/#/chat`;
+          try {
+            execSync(`start "" "${url}"`, { stdio: 'ignore', timeout: 3000 });
+          } catch {}
+          console.log(pc.dim(`  ${url}\n`));
+        }
       } catch (err: unknown) {
         console.log(pc.red(`\n  Error: ${(err as Error).message}\n`));
       }
+      // Keep alive (timer works even without a console in GUI subsystem)
+      setInterval(() => {}, 1 << 30);
     });
 
+  // When no arguments (double-click), start web server and open full chat app
   if (process.argv.length <= 2) {
-    process.argv.push('chat');
+    try {
+      const { startWebServer } = await import('./web/server.js');
+      await startWebServer(8787);
+      const url = 'http://localhost:8787/#/chat';
+      try {
+        execSync(`start "" "${url}"`, { stdio: 'ignore', timeout: 3000 });
+      } catch {}
+      console.log(`  ${url}\n`);
+    } catch (err: unknown) {
+      console.log(`\n  Error: ${(err as Error).message}\n`);
+    }
+    // Keep alive with a timer
+    setInterval(() => {}, 1 << 30);
+    return;
   }
 
   await program.parseAsync(process.argv);
 }
+
+process.on('SIGINT', () => process.exit(0));

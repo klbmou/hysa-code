@@ -86,4 +86,30 @@ export function getLastProviderError() {
     const last = entries[entries.length - 1];
     return `${last.provider}/${last.model}: ${last.reason}`;
 }
+// ── Usage Tracking ──────────────────────────────────
+export function saveUsage(data) {
+    const session = loadSession();
+    session.usage = data;
+    saveSession(session);
+}
+export function getUsage() {
+    return loadSession().usage ?? { totalRequests: 0, totalErrors: 0 };
+}
+export function recordRequest(durationMs, tokens) {
+    const usage = getUsage();
+    usage.totalRequests++;
+    usage.lastRequestDuration = durationMs;
+    usage.lastRequestTimestamp = Date.now();
+    if (tokens !== undefined)
+        usage.lastRequestTokens = tokens;
+    saveUsage(usage);
+}
+export function recordError(error, provider, model) {
+    const usage = getUsage();
+    usage.totalErrors++;
+    usage.lastError = error;
+    usage.lastProvider = provider;
+    usage.lastModel = model;
+    saveUsage(usage);
+}
 //# sourceMappingURL=session.js.map

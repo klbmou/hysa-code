@@ -22,7 +22,7 @@ export function createAnthropicClient(apiKey, model) {
                 max_tokens: 4096,
                 system: systemPrompt,
                 messages: messages.map(m => ({ role: m.role, content: m.content })),
-            }), 45000, signal);
+            }), 30000, signal);
             const content = response.content
                 .filter((block) => block.type === 'text')
                 .map(block => block.text)

@@ -1,10 +1,67 @@
 import type { AgentMode } from '../agent/types.js';
 import { getModePromptAddendum } from '../agent/modes.js';
+import type { ProviderType } from '../config/keys.js';
+import { COMPACT_PROMPT_PROVIDERS } from '../config/keys.js';
+
+export function buildCompactSystemPrompt(
+  projectInfo?: { type: string; entryPoints: string[]; fileCount: number },
+): string {
+  const parts: string[] = [];
+
+  parts.push(`You are HYSA Code, a coding assistant.`);
+
+  if (projectInfo) {
+    parts.push(`\nProject: ${projectInfo.type}`);
+    if (projectInfo.entryPoints.length > 0) {
+      parts.push(`Files: ${projectInfo.entryPoints.join(', ')}`);
+    }
+  }
+
+  parts.push(`
+Tools: read_file, edit_file, execute_command
+
+Format:
+<tool_call>
+<tool_name>TOOL_NAME</tool_name>
+<arguments>{"key":"value"}</arguments>
+</tool_call>
+
+Rules:
+- Use tools only when needed.
+- For greetings, reply normally.
+- Never edit .env or secrets.
+- Always read a file before editing it.`);
+
+  return parts.join('\n');
+}
 
 export function buildSystemPrompt(
   projectInfo?: { type: string; entryPoints: string[]; configFiles: string[]; fileCount: number; tree?: string },
   agentMode?: AgentMode,
+  lightMode?: boolean,
+  provider?: ProviderType,
+  promptMode?: 'full' | 'compact' | 'auto',
 ): string {
+  const envOveride = process.env.HYSA_PROMPT_MODE as 'full' | 'compact' | 'auto' | undefined;
+  if (envOveride && ['full', 'compact', 'auto'].includes(envOveride)) {
+    promptMode = envOveride;
+  }
+  const effectiveMode = promptMode === 'auto' || !promptMode
+    ? (provider && COMPACT_PROMPT_PROVIDERS.includes(provider) ? 'compact' : 'full')
+    : promptMode;
+
+  if (effectiveMode === 'compact') {
+    return buildCompactSystemPrompt(
+      projectInfo ? { type: projectInfo.type, entryPoints: projectInfo.entryPoints, fileCount: projectInfo.fileCount } : undefined,
+    );
+  }
+
+  if (lightMode) {
+    return buildCompactSystemPrompt(
+      projectInfo ? { type: projectInfo.type, entryPoints: projectInfo.entryPoints, fileCount: projectInfo.fileCount } : undefined,
+    );
+  }
+
   const parts: string[] = [];
 
   parts.push(`You are HYSA Code, an AI coding assistant that helps users with their codebase.`);
@@ -15,7 +72,7 @@ export function buildSystemPrompt(
     if (projectInfo.entryPoints.length > 0) {
       parts.push(`Entry points: ${projectInfo.entryPoints.join(', ')}`);
     }
-    if (projectInfo.configFiles.length > 0) {
+    if (projectInfo.configFiles?.length > 0) {
       parts.push(`Config files: ${projectInfo.configFiles.join(', ')}`);
     }
     parts.push(`Total files: ${projectInfo.fileCount}`);

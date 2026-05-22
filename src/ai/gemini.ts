@@ -42,7 +42,7 @@ export function createGeminiClient(apiKey: string, model: string): AIClient {
             contents: [{ role: 'user', parts: [{ text: lastMessage.content }] }],
             systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
           }),
-          45000,
+          30000,
           signal,
         );
         content = result.response.text();
@@ -53,7 +53,7 @@ export function createGeminiClient(apiKey: string, model: string): AIClient {
         });
         const result = await withTimeout(
           chat.sendMessage(lastMessage.content),
-          45000,
+          30000,
           signal,
         );
         content = result.response.text();

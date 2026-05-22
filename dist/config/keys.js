@@ -128,6 +128,7 @@ export const PREMIUM_API_PROVIDERS = ['anthropic', 'openai'];
 export const LOCAL_FREE_PROVIDERS = ['ollama', 'local_openai', 'hysa_ai'];
 export const CLOUD_FREE_PROVIDERS = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini'];
 export const EXPERIMENTAL_FREE_PROVIDERS = ['pollinations', 'llm7', 'puter'];
+export const COMPACT_PROMPT_PROVIDERS = ['ollama', 'local_openai', 'hysa_ai', 'pollinations', 'llm7', 'puter'];
 export const EXPERIMENTAL_BASE_URLS = {
     pollinations: 'https://text.pollinations.ai/v1',
     llm7: '',

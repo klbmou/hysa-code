@@ -31,7 +31,7 @@ export function createGeminiClient(apiKey, model) {
                 const result = await withTimeout(geminiModel.generateContent({
                     contents: [{ role: 'user', parts: [{ text: lastMessage.content }] }],
                     systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-                }), 45000, signal);
+                }), 30000, signal);
                 content = result.response.text();
             }
             else {
@@ -39,7 +39,7 @@ export function createGeminiClient(apiKey, model) {
                     history,
                     systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
                 });
-                const result = await withTimeout(chat.sendMessage(lastMessage.content), 45000, signal);
+                const result = await withTimeout(chat.sendMessage(lastMessage.content), 30000, signal);
                 content = result.response.text();
             }
             return {

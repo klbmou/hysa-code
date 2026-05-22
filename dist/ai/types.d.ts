@@ -18,5 +18,6 @@ export interface HealthCheckResult {
     ok: boolean;
     message: string;
 }
+export declare function isValidResponse(res: AIResponse): boolean;
 export type { ProviderType } from '../config/keys.js';
 //# sourceMappingURL=types.d.ts.map

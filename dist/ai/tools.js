@@ -3,41 +3,160 @@ const VALID_TOOL_TYPES = new Set([
     'list_symbols', 'find_references', 'search_imports',
     'summarize_file', 'explain_function',
 ]);
-const ALL_TOOL_TAGS = [
-    /<tool_call>[\s\S]*?<\/tool_call>/g,
-    /<\|tool_call_start\|>[\s\S]*?<\|tool_call_end\|>/g,
+// ── Protected file detection ─────────────────────────
+const PROTECTED_FILE_PATTERNS = [
+    /(^|[\/\\])\.env($|[\/\\.])/i,
+    /(^|[\/\\])node_modules[\/\\]/,
+    /(^|[\/\\])\.git[\/\\]/,
+    /(^|[\/\\])dist[\/\\]/,
+    /(^|[\/\\])build[\/\\]/,
+    /package-lock\.json$/i,
 ];
+export function isProtectedFilePath(filePath) {
+    if (PROTECTED_FILE_PATTERNS.some(p => p.test(filePath)))
+        return true;
+    const basename = filePath.split(/[\/\\]/).pop() || '';
+    if (/^\.env($|\.)/i.test(basename))
+        return true;
+    if (/\b(secret|key|token)\b/i.test(basename))
+        return true;
+    return false;
+}
+export const PROTECTED_FILE_MESSAGE = 'Blocked: HYSA will not edit .env or secret files.';
+// ── Param normalization ──────────────────────────────
+const PARAM_ALIASES = {
+    file: 'filePath',
+    path: 'filePath',
+    content: 'newContent',
+    new_content: 'newContent',
+    cmd: 'command',
+};
+export function normalizeToolParams(params) {
+    const normalized = {};
+    for (const [key, value] of Object.entries(params)) {
+        const mappedKey = PARAM_ALIASES[key] || key;
+        normalized[mappedKey] = value;
+    }
+    return normalized;
+}
+// ── Safe JSON extraction ─────────────────────────────
+function safeExtractJSON(text, startIdx) {
+    const braceStart = text.indexOf('{', startIdx);
+    if (braceStart === -1)
+        return null;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = braceStart; i < text.length; i++) {
+        const char = text[i];
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (char === '\\' && inString) {
+            escape = true;
+            continue;
+        }
+        if (char === '"') {
+            inString = !inString;
+            continue;
+        }
+        if (!inString) {
+            if (char === '{')
+                depth++;
+            if (char === '}')
+                depth--;
+            if (depth === 0) {
+                const json = text.substring(braceStart, i + 1);
+                return { json, endIdx: i + 1 };
+            }
+        }
+    }
+    return null;
+}
+function tryParseJSON(raw) {
+    try {
+        return JSON.parse(raw);
+    }
+    catch {
+        return null;
+    }
+}
+function safeParseJSON(raw) {
+    // First try direct parse
+    const result = tryParseJSON(raw);
+    if (result)
+        return result;
+    // Try removing trailing garbage after closing brace
+    const braceEnd = raw.lastIndexOf('}');
+    if (braceEnd !== -1 && braceEnd < raw.length - 1) {
+        const cleaned = raw.substring(0, braceEnd + 1);
+        const r2 = tryParseJSON(cleaned);
+        if (r2)
+            return r2;
+    }
+    // Try removing trailing spaces/quotes
+    const trimmed = raw.replace(/[^}]*$/, '');
+    if (trimmed !== raw) {
+        const r3 = tryParseJSON(trimmed);
+        if (r3)
+            return r3;
+    }
+    return null;
+}
+function extractAndParseJSON(text, startIdx) {
+    const extracted = safeExtractJSON(text, startIdx);
+    if (!extracted)
+        return null;
+    const params = safeParseJSON(extracted.json);
+    if (!params)
+        return null;
+    return { params, endIdx: extracted.endIdx };
+}
+// ── Parsers ──────────────────────────────────────────
 function parseParamsFromFunctionStyle(text) {
     const params = {};
-    // Match key="value" pairs where value may contain escaped quotes or nested parens
     const pairRegex = /(\w+)\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g;
     let match;
     while ((match = pairRegex.exec(text)) !== null) {
         const key = match[1];
         let value = match[2];
-        // Strip surrounding quotes
         if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
             value = value.slice(1, -1);
         }
         params[key] = value;
     }
-    return params;
+    return normalizeToolParams(params);
 }
 function parseXmlFormat(content) {
     const calls = [];
-    const regex = /<tool_call>[\s\S]*?<tool_name>(\w+)<\/tool_name>[\s\S]*?({[\s\S]*?})[\s\S]*?<\/tool_call>/g;
-    let match;
-    while ((match = regex.exec(content)) !== null) {
-        const type = match[1].trim();
-        if (!VALID_TOOL_TYPES.has(type))
+    // Match <tool_call>...<tool_name>type</tool_name>...{json}...</tool_call>
+    // Also handle case where JSON has trailing garbage after closing brace
+    let searchIdx = 0;
+    while (true) {
+        const tcStart = content.indexOf('<tool_call>', searchIdx);
+        if (tcStart === -1)
+            break;
+        const tcEnd = content.indexOf('</tool_call>', tcStart);
+        if (tcEnd === -1)
+            break;
+        const block = content.substring(tcStart + 11, tcEnd);
+        const nameMatch = block.match(/<tool_name>\s*(\w+)\s*<\/tool_name>/);
+        if (!nameMatch) {
+            searchIdx = tcEnd + 12;
             continue;
-        try {
-            const params = JSON.parse(match[2]);
-            calls.push({ type: type, params });
         }
-        catch {
-            // malformed
+        const type = nameMatch[1].trim();
+        if (!VALID_TOOL_TYPES.has(type)) {
+            searchIdx = tcEnd + 12;
+            continue;
         }
+        // Try to find JSON in the block
+        const extracted = extractAndParseJSON(block, nameMatch.index);
+        if (extracted) {
+            calls.push({ type: type, params: extracted.params });
+        }
+        searchIdx = tcEnd + 12;
     }
     return calls;
 }
@@ -56,7 +175,6 @@ function parseAngleBracketFormat(content) {
 }
 function parseFunctionStyleFormat(content) {
     const calls = [];
-    // Strip out content already inside known block delimiters
     let stripped = content
         .replace(/<\|tool_call_start\|>[\s\S]*?<\|tool_call_end\|>/g, '')
         .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '');
@@ -75,27 +193,33 @@ function parseFunctionStyleFormat(content) {
 }
 function parseToolNameFormat(content) {
     const calls = [];
-    // Strip markdown code fences first, then match
     const cleaned = content
         .replace(/```[\s\S]*?```/g, (match) => {
-        // Parse inside fence as if it were raw
         const inner = match.replace(/```\w*\n?/, '').replace(/```$/, '');
         return inner;
     });
-    // Try on original content first
     const tryMatch = (text) => {
-        const regex = /<tool_name>\s*(\w+)\s*<\/tool_name>\s*(\{[\s\S]*?\})/g;
-        let match;
-        while ((match = regex.exec(text)) !== null) {
-            const type = match[1].trim();
-            if (!VALID_TOOL_TYPES.has(type))
+        let searchIdx = 0;
+        while (true) {
+            const nameStart = text.indexOf('<tool_name>', searchIdx);
+            if (nameStart === -1)
+                break;
+            const nameEnd = text.indexOf('</tool_name>', nameStart);
+            if (nameEnd === -1)
+                break;
+            const type = text.substring(nameStart + 11, nameEnd).trim();
+            if (!VALID_TOOL_TYPES.has(type)) {
+                searchIdx = nameEnd + 12;
                 continue;
-            try {
-                const params = JSON.parse(match[2]);
-                calls.push({ type: type, params });
             }
-            catch {
-                // malformed JSON
+            // Look for JSON after </tool_name>
+            const extracted = extractAndParseJSON(text, nameEnd + 12);
+            if (extracted) {
+                calls.push({ type: type, params: extracted.params });
+                searchIdx = extracted.endIdx;
+            }
+            else {
+                searchIdx = nameEnd + 12;
             }
         }
     };
@@ -107,21 +231,41 @@ function parseToolNameFormat(content) {
 }
 function parseArgumentFormat(content) {
     const calls = [];
-    // Matches <tool_call>...<tool_name>type</tool_name><arguments>{json}</arguments>...</tool_call>
-    // Also supports <arguments> directly after <tool_name>
-    const regex = /<tool_call>[\s\S]*?<tool_name>\s*(\w+)\s*<\/tool_name>[\s\S]*?<arguments>\s*(\{[\s\S]*?\})\s*<\/arguments>[\s\S]*?<\/tool_call>/g;
-    let match;
-    while ((match = regex.exec(content)) !== null) {
-        const type = match[1].trim();
-        if (!VALID_TOOL_TYPES.has(type))
+    let searchIdx = 0;
+    while (true) {
+        const tcStart = content.indexOf('<tool_call>', searchIdx);
+        if (tcStart === -1)
+            break;
+        const tcEnd = content.indexOf('</tool_call>', tcStart);
+        if (tcEnd === -1)
+            break;
+        const block = content.substring(tcStart + 11, tcEnd);
+        const nameMatch = block.match(/<tool_name>\s*(\w+)\s*<\/tool_name>/);
+        if (!nameMatch) {
+            searchIdx = tcEnd + 12;
             continue;
-        try {
-            const params = JSON.parse(match[2]);
-            calls.push({ type: type, params });
         }
-        catch {
-            // malformed
+        const type = nameMatch[1].trim();
+        if (!VALID_TOOL_TYPES.has(type)) {
+            searchIdx = tcEnd + 12;
+            continue;
         }
+        // Look for <arguments>...</arguments> with robust JSON extraction
+        const argsMatch = block.match(/<arguments>\s*([\s\S]*?)\s*<\/arguments>/);
+        if (argsMatch) {
+            const parsed = safeParseJSON(argsMatch[1]);
+            if (parsed) {
+                calls.push({ type: type, params: parsed });
+                searchIdx = tcEnd + 12;
+                continue;
+            }
+        }
+        // Fallback: find JSON directly in block
+        const extracted = extractAndParseJSON(block, nameMatch.index);
+        if (extracted) {
+            calls.push({ type: type, params: extracted.params });
+        }
+        searchIdx = tcEnd + 12;
     }
     return calls;
 }
@@ -136,7 +280,7 @@ function parseJsonFormat(content) {
         try {
             const parsed = JSON.parse(match[1]);
             const { type: _t, ...params } = parsed;
-            calls.push({ type: type, params });
+            calls.push({ type: type, params: normalizeToolParams(params) });
         }
         catch {
             // malformed
@@ -146,31 +290,54 @@ function parseJsonFormat(content) {
 }
 export function parseToolCalls(content) {
     const allCalls = [];
-    // Try each format in order
     allCalls.push(...parseArgumentFormat(content));
     allCalls.push(...parseXmlFormat(content));
     allCalls.push(...parseAngleBracketFormat(content));
     allCalls.push(...parseToolNameFormat(content));
     allCalls.push(...parseFunctionStyleFormat(content));
     allCalls.push(...parseJsonFormat(content));
-    return allCalls;
+    // Deduplicate by type + params
+    const seen = new Set();
+    return allCalls.filter(c => {
+        const key = `${c.type}:${JSON.stringify(c.params)}`;
+        if (seen.has(key))
+            return false;
+        seen.add(key);
+        return true;
+    });
 }
 export function stripToolCallBlocks(content) {
     let result = content;
-    // Remove <tool_call> blocks (with <arguments> or raw JSON)
+    // Remove <tool_call>...</tool_call> blocks
     result = result.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '');
-    // Remove bare <tool_name> + JSON blocks
-    result = result.replace(/<tool_name>\s*\w+\s*<\/tool_name>\s*\{[\s\S]*?\}/g, '');
-    // Remove bare <tool_name> + <arguments> blocks
-    result = result.replace(/<tool_name>\s*\w+\s*<\/tool_name>\s*<arguments>\s*\{[\s\S]*?\}\s*<\/arguments>/g, '');
+    // Remove bare <tool_name> + JSON (with or without trailing garbage)
+    result = result.replace(/<tool_name>\s*\w+\s*<\/tool_name>[\s\S]*?(?=\n|$)/g, '');
+    // Remove <tool_name> + <arguments> blocks (even with malformed JSON)
+    result = result.replace(/<tool_name>\s*\w+\s*<\/tool_name>\s*<arguments>[\s\S]*?<\/arguments>/g, '');
+    // Remove bare <tool_name> (unclosed or partial)
+    result = result.replace(/<tool_name>\s*\w+\s*<\/tool_name>/g, '');
+    // Remove bare <arguments> blocks
+    result = result.replace(/<arguments>[\s\S]*?<\/arguments>/g, '');
     // Remove angle-bracket blocks
     result = result.replace(/<\|tool_call_start\|>[\s\S]*?<\|tool_call_end\|>/g, '');
-    // Remove function-style tool calls with known tool names
+    // Remove function-style tool calls
     result = result.replace(/\b(?:read_file|edit_file|execute_command|list_symbols|find_references|search_imports|summarize_file|explain_function)\s*\([\s\S]*?\)\s*/g, '');
     // Remove JSON tool call objects
     result = result.replace(/{[\s\S]*?"type"\s*:\s*"(?:read_file|edit_file|execute_command|list_symbols|find_references|search_imports|summarize_file|explain_function)"[\s\S]*?}/g, '');
+    // Remove bare JSON after tool names that wasn't caught
+    result = result.replace(/\{[^}]*"(?:filePath|file|path|newContent|content|command|cmd|symbol|module|functionName)"[^}]*\}/g, '');
+    // Remove any leftover XML tags related to tools
+    result = result.replace(/<\/?tool_call>/g, '');
+    result = result.replace(/<\/?tool_name>/g, '');
+    result = result.replace(/<\/?arguments>/g, '');
+    result = result.replace(/<\|tool_call_start\|>/g, '');
+    result = result.replace(/<\|tool_call_end\|>/g, '');
     // Remove markdown code fences wrapping tool calls
-    result = result.replace(/```[\s\S]*?<\/tool_call>[\s\S]*?```/g, '');
+    result = result.replace(/```[\s\S]*?```/g, (match) => {
+        if (hasToolSyntax(match))
+            return '';
+        return match;
+    });
     return result.trim();
 }
 export function hasToolSyntax(content) {
@@ -180,5 +347,9 @@ export function hasToolSyntax(content) {
         /<arguments>/.test(content) ||
         /\b(read_file|edit_file|execute_command|list_symbols|find_references|search_imports|summarize_file|explain_function)\s*\(/.test(content) ||
         /"type"\s*:\s*"(?:read_file|edit_file|execute_command|list_symbols|find_references|search_imports|summarize_file|explain_function)"/.test(content));
+}
+export function containsOnlyToolSyntax(content) {
+    const stripped = stripToolCallBlocks(content);
+    return !stripped || stripped.length === 0;
 }
 //# sourceMappingURL=tools.js.map

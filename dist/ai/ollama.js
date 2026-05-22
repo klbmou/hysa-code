@@ -30,7 +30,7 @@ export function createOllamaClient(baseUrl, model) {
                     stream: false,
                     options: { num_predict: 4096 },
                 }),
-                signal: signal || AbortSignal.timeout(45000),
+                signal: signal || AbortSignal.timeout(30000),
             });
             if (res.status === 404) {
                 throw new Error(`Model "${model}" not found. Run: ollama pull ${model}`);

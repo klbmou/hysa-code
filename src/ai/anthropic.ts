@@ -28,7 +28,7 @@ export function createAnthropicClient(apiKey: string, model: string): AIClient {
           system: systemPrompt,
           messages: messages.map(m => ({ role: m.role, content: m.content })),
         }),
-        45000,
+         30000,
         signal,
       );
 

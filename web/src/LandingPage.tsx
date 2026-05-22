@@ -335,6 +335,15 @@ export default function LandingPage() {
         <p className="lp-install-hint">
           After install: <code className="lp-inline-code-sm">hysa chat</code> or <code className="lp-inline-code-sm">hysa web</code>
         </p>
+        <div className="lp-download-exe" style={{ textAlign: 'center', marginTop: '1.5rem' }}>
+          <a href="/api/download/exe" className="lp-btn lp-btn-secondary lp-btn-glow" download>
+            <span className="lp-btn-icon">⬇</span>
+            Download hysa.exe (Windows)
+          </a>
+          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
+            Standalone 59MB executable — no Node.js required
+          </p>
+        </div>
       </Section>
 
       {/* ── Why ── */}

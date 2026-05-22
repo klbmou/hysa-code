@@ -1,5 +1,44 @@
 import { getModePromptAddendum } from '../agent/modes.js';
-export function buildSystemPrompt(projectInfo, agentMode) {
+import { COMPACT_PROMPT_PROVIDERS } from '../config/keys.js';
+export function buildCompactSystemPrompt(projectInfo) {
+    const parts = [];
+    parts.push(`You are HYSA Code, a coding assistant.`);
+    if (projectInfo) {
+        parts.push(`\nProject: ${projectInfo.type}`);
+        if (projectInfo.entryPoints.length > 0) {
+            parts.push(`Files: ${projectInfo.entryPoints.join(', ')}`);
+        }
+    }
+    parts.push(`
+Tools: read_file, edit_file, execute_command
+
+Format:
+<tool_call>
+<tool_name>TOOL_NAME</tool_name>
+<arguments>{"key":"value"}</arguments>
+</tool_call>
+
+Rules:
+- Use tools only when needed.
+- For greetings, reply normally.
+- Never edit .env or secrets.
+- Always read a file before editing it.`);
+    return parts.join('\n');
+}
+export function buildSystemPrompt(projectInfo, agentMode, lightMode, provider, promptMode) {
+    const envOveride = process.env.HYSA_PROMPT_MODE;
+    if (envOveride && ['full', 'compact', 'auto'].includes(envOveride)) {
+        promptMode = envOveride;
+    }
+    const effectiveMode = promptMode === 'auto' || !promptMode
+        ? (provider && COMPACT_PROMPT_PROVIDERS.includes(provider) ? 'compact' : 'full')
+        : promptMode;
+    if (effectiveMode === 'compact') {
+        return buildCompactSystemPrompt(projectInfo ? { type: projectInfo.type, entryPoints: projectInfo.entryPoints, fileCount: projectInfo.fileCount } : undefined);
+    }
+    if (lightMode) {
+        return buildCompactSystemPrompt(projectInfo ? { type: projectInfo.type, entryPoints: projectInfo.entryPoints, fileCount: projectInfo.fileCount } : undefined);
+    }
     const parts = [];
     parts.push(`You are HYSA Code, an AI coding assistant that helps users with their codebase.`);
     if (projectInfo) {
@@ -8,7 +47,7 @@ export function buildSystemPrompt(projectInfo, agentMode) {
         if (projectInfo.entryPoints.length > 0) {
             parts.push(`Entry points: ${projectInfo.entryPoints.join(', ')}`);
         }
-        if (projectInfo.configFiles.length > 0) {
+        if (projectInfo.configFiles?.length > 0) {
             parts.push(`Config files: ${projectInfo.configFiles.join(', ')}`);
         }
         parts.push(`Total files: ${projectInfo.fileCount}`);

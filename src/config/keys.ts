@@ -35,6 +35,8 @@ export interface HysaConfig {
   experimentalConfirmed?: boolean;
   agentMode?: AgentMode;
   debug?: boolean;
+  lightMode?: boolean;
+  promptMode?: 'full' | 'compact' | 'auto';
 }
 
 export const PROVIDER_CATEGORIES: Record<ProviderType, ProviderCategory> = {
@@ -176,6 +178,8 @@ export const LOCAL_FREE_PROVIDERS: ProviderType[] = ['ollama', 'local_openai', '
 export const CLOUD_FREE_PROVIDERS: ProviderType[] = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini'];
 
 export const EXPERIMENTAL_FREE_PROVIDERS: ProviderType[] = ['pollinations', 'llm7', 'puter'];
+
+export const COMPACT_PROMPT_PROVIDERS: ProviderType[] = ['ollama', 'local_openai', 'hysa_ai', 'pollinations', 'llm7', 'puter'];
 
 export const EXPERIMENTAL_BASE_URLS: Partial<Record<ProviderType, string>> = {
   pollinations: 'https://text.pollinations.ai/v1',

@@ -3,7 +3,7 @@ import type { AIClient, Message, AIResponse } from './types.js';
 import { parseToolCalls, stripToolCallBlocks } from './tools.js';
 
 export function createOpenAIClient(apiKey: string, model: string): AIClient {
-  const client = new OpenAI({ apiKey, timeout: 45000, maxRetries: 0 });
+  const client = new OpenAI({ apiKey, timeout: 30000, maxRetries: 0 });
 
   return {
     async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {

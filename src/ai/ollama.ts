@@ -33,7 +33,7 @@ export function createOllamaClient(baseUrl: string, model: string): AIClient {
           stream: false,
           options: { num_predict: 4096 },
         }),
-        signal: signal || AbortSignal.timeout(45000),
+        signal: signal || AbortSignal.timeout(30000),
       });
 
       if (res.status === 404) {

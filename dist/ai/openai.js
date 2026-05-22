@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import { parseToolCalls, stripToolCallBlocks } from './tools.js';
 export function createOpenAIClient(apiKey, model) {
-    const client = new OpenAI({ apiKey, timeout: 45000, maxRetries: 0 });
+    const client = new OpenAI({ apiKey, timeout: 30000, maxRetries: 0 });
     return {
         async sendMessage(messages, systemPrompt, signal) {
             const response = await client.chat.completions.create({

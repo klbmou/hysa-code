@@ -11,23 +11,35 @@ import { createDeepSeekClient } from './deepseek.js';
 import { createOpenAICompatibleClient } from './openai-compatible.js';
 import { createOpenCodeZenClient } from './opencode-zen.js';
 import { createHysaAIClient } from './hysa-ai.js';
-import { markHealth, isUnhealthy, isSkippedForRequest, setLastFallbackUsed, getLastError, clearRequestSkips } from './model-health.js';
+import { markHealth, isUnhealthy, isSkippedForRequest, setLastFallbackUsed, getLastError, clearRequestSkips, addFallbackEvent, clearFallbackEvents } from './model-health.js';
 import type { ErrorCategory } from './model-health.js';
+import { saveUsage, recordRequest, recordError } from '../utils/session.js';
 
-const CHAT_TIMEOUT_MS = 45000;
-const FALLBACK_ATTEMPT_TIMEOUT_MS = 30000;
-const MAX_TOTAL_TIME_MS = 90000;
-const MAX_FALLBACK_ATTEMPTS = 3;
+const CHAT_TIMEOUT_MS = 30000;
+const FALLBACK_ATTEMPT_TIMEOUT_MS = 12000;
+const EXPERIMENTAL_TIMEOUT_MS = 8000;
+const LOCAL_TIMEOUT_MS = 15000;
+const MAX_TOTAL_TIME_MS = 60000;
+const MAX_FALLBACK_PROVIDERS = 4;
+
+function getProviderTimeout(provider: ProviderType, isPrimary: boolean): number {
+  const tier = PROVIDER_TIERS[provider];
+  if (tier === 'experimental_free') return EXPERIMENTAL_TIMEOUT_MS;
+  if (tier === 'local_free') return LOCAL_TIMEOUT_MS;
+  if (isPrimary) return CHAT_TIMEOUT_MS;
+  return FALLBACK_ATTEMPT_TIMEOUT_MS;
+}
 
 // ── Error Categorization ──────────────────────────────
 
 export function categorizeError(msg: string): ErrorCategory {
   const lower = msg.toLowerCase();
+  // Auth errors must be checked BEFORE timeout (a 401 may also say "timed out" in its message)
+  if (lower.includes('401') || lower.includes('unauthorized') || lower.includes('authentication') || lower.includes('auth') || lower.includes('api key') || lower.includes('invalid key') || lower.includes('forbidden') || lower.includes('403')) return 'invalid_key';
   if (lower.includes('429') || lower.includes('rate limit') || lower.includes('too many requests')) return 'rate_limit';
-  if (lower.includes('quota') || lower.includes('402') || lower.includes('payment')) return 'quota';
+  if (lower.includes('quota') || lower.includes('402') || lower.includes('payment') || lower.includes('billing') || lower.includes('insufficient')) return 'quota';
   if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('abort')) return 'timeout';
-  if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed') || lower.includes('network') || lower.includes('enotfound')) return 'network';
-  if (lower.includes('401') || lower.includes('unauthorized') || lower.includes('forbidden') || lower.includes('api key') || lower.includes('invalid')) return 'invalid_key';
+  if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed') || lower.includes('network') || lower.includes('enotfound') || lower.includes('econnaborted')) return 'network';
   if (lower.includes('404') || lower.includes('model not found') || lower.includes('not found') || lower.includes('unavailable') || lower.includes('no free') || lower.includes('not supported') || lower.includes('503') || lower.includes('service unavailable') || lower.includes('overloaded') || lower.includes('overload')) return 'model_unavailable';
   return 'unknown';
 }
@@ -58,7 +70,7 @@ function friendlyError(msg: string, provider: ProviderType): string {
     return `${label} quota exceeded. This is a provider-side billing or daily limit, not related to your context tokens.`;
   }
 
-  if (cat === 'timeout') return `${label} timed out after ${CHAT_TIMEOUT_MS / 1000}s. The provider may be slow or overloaded. Automatically falling back...`;
+  if (cat === 'timeout') return `${label} timed out. The provider may be slow or overloaded. Automatically falling back...`;
 
   if (cat === 'network') {
     if (provider === 'ollama' || provider === 'local_openai') return `${label} is not running. Make sure the local server is started.`;
@@ -275,6 +287,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
 
   return {
     async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
+      clearFallbackEvents();
       let lastError: Error | null = null;
       let lastProvider = primary;
       const startTime = Date.now();
@@ -296,6 +309,10 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
           return null;
         }
 
+        const provLabel = PROVIDER_DEFAULTS[provider]?.label || provider;
+        addFallbackEvent(provider, model, `Trying ${provLabel} / ${model}...`);
+        if (!debug) console.log(`  ~ ${provLabel} / ${model}...`);
+
         const ac = new AbortController();
         const timer = setTimeout(() => ac.abort(), timeoutMs);
         if (signal) {
@@ -305,7 +322,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
         const tryOnce = async (): Promise<AIResponse> => {
           totalAttempts++;
           if (debug) {
-            console.log(`  [debug] ${attemptLabel}: ${PROVIDER_DEFAULTS[provider]?.label || provider} / ${model} (timeout: ${timeoutMs / 1000}s)`);
+            console.log(`  [debug] ${attemptLabel}: ${provLabel} / ${model} (timeout: ${timeoutMs / 1000}s)`);
           }
           return await client.sendMessage(messages, systemPrompt, ac.signal);
         };
@@ -319,7 +336,15 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             lastProvider = provider;
             attemptStart = Date.now();
             const result = await tryOnce();
-            markHealth(provider, model, 'healthy', 'success');
+            if (!result.message?.trim() && (!result.toolCalls || result.toolCalls.length === 0)) {
+              const isExperimental = !!(EXPERIMENTAL_BASE_URLS as Record<string, string | undefined>)[provider];
+              const hint = isExperimental ? ' Experimental providers are not guaranteed stable.' : '';
+              addFallbackEvent(provider, model, `${provLabel} returned empty response`);
+              throw new Error(`${provLabel} returned an empty response.${hint}`);
+            }
+            const duration = Date.now() - attemptStart;
+            markHealth(provider, model, 'healthy', 'success', 'unknown', duration);
+            recordRequest(duration);
             return result;
           } catch (err: unknown) {
             retries++;
@@ -327,8 +352,13 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             lastError = err as Error;
             const errMsg = lastError.message || '';
             const cat = categorizeError(errMsg);
+            const attemptDuration = Date.now() - attemptStart;
 
-            markHealth(provider, model, 'unhealthy', friendlyError(errMsg, provider), cat);
+            if (cat === 'timeout') addFallbackEvent(provider, model, `${provLabel} timed out (${timeoutMs / 1000}s)`);
+            else if (cat === 'rate_limit') addFallbackEvent(provider, model, `${provLabel} rate-limited`);
+
+            markHealth(provider, model, 'unhealthy', friendlyError(errMsg, provider), cat, attemptDuration);
+            recordError(errMsg, provider, model);
 
             if (debug) {
               console.log(`  [debug] ${attemptLabel} failed (retry ${retries}/${maxRetries}) after ${((Date.now() - attemptStart) / 1000).toFixed(1)}s:`);
@@ -353,8 +383,9 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
 
       // Try primary provider with current model
       const primaryModel = config.currentModel;
-      if (debug) console.log(`  [debug] Trying primary: ${primary} / ${primaryModel}`);
-      let result = await tryProvider(primary, primaryModel, CHAT_TIMEOUT_MS, 'Primary');
+      const primaryTimeout = getProviderTimeout(primary, true);
+      if (debug) console.log(`  [debug] Trying primary: ${primary} / ${primaryModel} (timeout: ${primaryTimeout / 1000}s)`);
+      let result = await tryProvider(primary, primaryModel, primaryTimeout, 'Primary');
       if (result) return result;
 
       // Check total time
@@ -378,7 +409,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
           }
 
           if (debug) console.log(`  [debug] Model fallback to ${altModel}`);
-          result = await tryProvider(primary, altModel, FALLBACK_ATTEMPT_TIMEOUT_MS, 'Model fallback');
+          result = await tryProvider(primary, altModel, getProviderTimeout(primary, false), 'Model fallback');
           if (result) {
             const errMsg = lastError ? friendlyError((lastError as Error).message, primary) : null;
             if (errMsg) {
@@ -388,6 +419,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
               console.log(`  ⚡ Switched temporarily to ${altModel}.`);
             }
             setLastFallbackUsed(`${PROVIDER_DEFAULTS[primary]?.label || primary} / ${altModel}`);
+            addFallbackEvent(primary, altModel, `Switched to ${PROVIDER_DEFAULTS[primary]?.label || primary} / ${altModel}`);
             return result;
           }
         }
@@ -398,53 +430,91 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
         throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts);
       }
 
-      // Provider-level fallback
-      const candidates = getFallbackCandidates(primary, config);
-      let fallbackCount = 0;
+      // Provider-level fallback — grouped by provider, counting provider groups not model variants
+      const flatCandidates = getFallbackCandidates(primary, config);
+      const providerGroups = new Map<ProviderType, { provider: ProviderType; models: string[] }>();
+      for (const c of flatCandidates) {
+        const existing = providerGroups.get(c.provider);
+        if (existing) {
+          if (!existing.models.includes(c.model)) existing.models.push(c.model);
+        } else {
+          providerGroups.set(c.provider, { provider: c.provider, models: [c.model] });
+        }
+      }
+      const groups = Array.from(providerGroups.values());
+      let providerFallbackCount = 0;
       const debugCandidateInfo: string[] = [];
 
-      for (const c of candidates) {
-        if (fallbackCount >= MAX_FALLBACK_ATTEMPTS) break;
+      for (const group of groups) {
+        if (providerFallbackCount >= MAX_FALLBACK_PROVIDERS) break;
         if (Date.now() - startTime >= MAX_TOTAL_TIME_MS) break;
 
-        if (shouldSkipProvider(c.provider, c.model)) {
-          debugCandidateInfo.push(`  [skip] ${c.label} (unhealthy or already failed)`);
+        const provLabel = PROVIDER_DEFAULTS[group.provider]?.label || group.provider;
+
+        // Skip entire provider group if all its healthy models are also unhealthy
+        const allSkipped = group.models.every(m => shouldSkipProvider(group.provider, m));
+        if (allSkipped) {
+          debugCandidateInfo.push(`  [skip] ${provLabel} (all models unhealthy or already failed)`);
           if (debug) console.log(`  [debug] ${debugCandidateInfo[debugCandidateInfo.length - 1]}`);
+          providerFallbackCount++;
           continue;
         }
 
+        addFallbackEvent(group.provider, '', `Trying ${provLabel}...`);
+        if (!debug) console.log(`  ~ ${provLabel}...`);
+
         if (debug) {
-          console.log(`  [debug] Provider fallback ${fallbackCount + 1}/${MAX_FALLBACK_ATTEMPTS}: ${c.label}`);
+          console.log(`  [debug] Provider fallback ${providerFallbackCount + 1}/${MAX_FALLBACK_PROVIDERS}: ${provLabel} (${group.models.length} models)`);
         }
 
-        result = await tryProvider(c.provider, c.model, FALLBACK_ATTEMPT_TIMEOUT_MS, `Fallback ${fallbackCount + 1}`);
-        fallbackCount++;
-
-        if (result) {
-          const label = PROVIDER_DEFAULTS[c.provider]?.label || c.provider;
-          const errMsg = lastError ? friendlyError((lastError as Error).message, primary) : null;
-          if (errMsg) {
-            console.log(`  ⚡ ${errMsg}`);
-            console.log(`  ⚡ Switched temporarily to ${label} (${c.model}).`);
-          } else {
-            console.log(`  ⚡ Switched temporarily to ${label} (${c.model}).`);
+        let groupSucceeded = false;
+        for (const model of group.models) {
+          if (shouldSkipProvider(group.provider, model)) {
+            if (debug) console.log(`  [debug]  skipping model: ${model} (unhealthy)`);
+            continue;
           }
-          setLastFallbackUsed(c.label);
+          if (Date.now() - startTime >= MAX_TOTAL_TIME_MS) break;
 
-          if (debug) {
-            const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-            console.log(`  [debug] Fallback succeeded after ${totalElapsed}s, ${totalAttempts} attempts.`);
+          const fbTimeout = getProviderTimeout(group.provider, false);
+          const modelResult = await tryProvider(group.provider, model, fbTimeout, `Fallback ${providerFallbackCount + 1}`);
+          if (modelResult) {
+            const label = PROVIDER_DEFAULTS[group.provider]?.label || group.provider;
+            const errMsgFromPrimary = lastError ? friendlyError((lastError as Error).message, primary) : null;
+            if (errMsgFromPrimary) {
+              console.log(`  ⚡ ${errMsgFromPrimary}`);
+              console.log(`  ⚡ Switched to ${label} / ${model}.`);
+            } else {
+              console.log(`  ⚡ Switched to ${label} / ${model}.`);
+            }
+            setLastFallbackUsed(`${label} / ${model}`);
+            addFallbackEvent(group.provider, model, `Switched to ${label} / ${model}`);
+
+            if (debug) {
+              const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+              console.log(`  [debug] Fallback succeeded after ${totalElapsed}s, ${totalAttempts} attempts.`);
+            }
+
+            result = modelResult;
+            groupSucceeded = true;
+            break;
           }
 
-          return result;
+          if (Date.now() - startTime >= MAX_TOTAL_TIME_MS) break;
         }
+
+        if (groupSucceeded) {
+          return result!;
+        }
+
+        addFallbackEvent(group.provider, '', `${provLabel} all models failed.`);
+        providerFallbackCount++;
       }
 
       // All fallbacks exhausted
       if (debug && lastError) {
         const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         console.log(`  [debug] All providers failed after ${totalElapsed}s, ${totalAttempts} attempts.`);
-        console.log(extractDebugInfo(lastError as Error, lastProvider, lastProvider === primary ? primaryModel : '', config, totalElapsed, CHAT_TIMEOUT_MS, totalAttempts));
+        console.log(extractDebugInfo(lastError as Error, lastProvider, lastProvider === primary ? primaryModel : '', config, totalElapsed, getProviderTimeout(lastProvider, lastProvider === primary), totalAttempts));
         if (debugCandidateInfo.length > 0) {
           console.log(`  [debug] Skipped candidates:`);
           for (const si of debugCandidateInfo) console.log(si);
@@ -473,12 +543,17 @@ function throwAllFailedError(lastError: Error | null, primary: ProviderType, pri
 
 // ── Greeting guard ──────────────────────────────────
 
-const GREETINGS = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'السلام', 'صباح', 'مساء', 'مرحبا', 'اهلا'];
+const GREETINGS = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'السلام', 'صباح', 'مساء', 'مرحبا', 'اهلا', 'اه', 'اوك'];
 const CASUAL_RESPONSES: Record<string, string> = {
   bro: "Yo — what do you want to build or fix?",
   thanks: "You're welcome! What's next?",
   ok: "Got it. What do you need help with?",
   lol: "😄 Let me know what you want to build or fix.",
+  اوك: "تمام. ماذا تريد أن أعدل أو أشرح في المشروع؟",
+  تمام: "تمام. ماذا تريد أن أعدل أو أشرح في المشروع؟",
+  نعم: "حسناً. ماذا تريد أن تفعل؟",
+  لا: "حسناً. أخبرني إن احتجت شيئاً.",
+  شكرا: "العفو! هل تحتاج شيئاً آخر؟",
 };
 
 export function isOnlyGreeting(text: string): boolean {
@@ -518,7 +593,10 @@ function applyGreetingGuard(client: AIClient): AIClient {
 export function createClient(config: HysaConfig, signal?: AbortSignal): AIClient {
   const { currentProvider: provider } = config;
   const tier = PROVIDER_TIERS[provider];
+  const isLocal = tier === 'local_free';
+  const lightMode = config.lightMode !== false && isLocal;
   clearRequestSkips();
+  clearFallbackEvents();
 
   if (tier === 'free_api' || tier === 'premium_api') {
     return applyGreetingGuard(createFallbackClient(provider, config));
@@ -531,6 +609,11 @@ export function createClient(config: HysaConfig, signal?: AbortSignal): AIClient
     },
   };
   const finalClient = tier === 'experimental_free' ? wrapClient(wrapped, config.currentProvider) : wrapped;
+
+  // For local providers in light mode, skip fallback entirely
+  if (isLocal && lightMode) {
+    return applyGreetingGuard(wrapped);
+  }
 
   // For local providers, still wrap in fallback for resilience
   return applyGreetingGuard(createFallbackClient(provider, config));
