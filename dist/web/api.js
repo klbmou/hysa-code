@@ -111,6 +111,63 @@ function getVisionFallbackErrorMessage(lang, failures, debug) {
     }
     return msg;
 }
+// ── Friendly error messages (language-matched) ────────
+const ERROR_MESSAGES = {
+    rate_limit: {
+        arabic: 'لم أستطع إكمال الطلب الآن لأن المزود الحالي وصل إلى حد الاستخدام أو غير متاح. جرّب بعد قليل أو غيّر المزود من الإعدادات.',
+        english: 'I couldn\'t complete the request because the current provider is rate-limited or unavailable. Try again shortly or switch providers.',
+    },
+    invalid_key: {
+        arabic: 'لم أستطع الاتصال بالمزود لأن مفتاح API غير صحيح. تحقق من المفتاح في الإعدادات أو جرّب مزود آخر.',
+        english: 'I couldn\'t connect because the API key is invalid. Check your key in settings or try a different provider.',
+    },
+    timeout: {
+        arabic: 'لم يحصل رد من المزود خلال الوقت المحدد. المزود قد يكون بطيئًا أو غير متاح. جرّب بعد قليل أو استخدم مزود آخر.',
+        english: 'The provider did not respond in time. It may be slow or unavailable. Try again shortly or use a different provider.',
+    },
+    network: {
+        arabic: 'تعذر الاتصال بالمزود بسبب مشكلة في الشبكة. تحقق من اتصال الإنترنت وجرّب مرة أخرى.',
+        english: 'Could not reach the provider due to a network issue. Check your internet connection and try again.',
+    },
+    unavailable: {
+        arabic: 'المزود الحالي غير متاح حاليًا. جرّب بعد قليل أو غيّر المزود من الإعدادات.',
+        english: 'The current provider is not available right now. Try again shortly or switch providers.',
+    },
+    generic: {
+        arabic: 'حدث خطأ غير متوقع. جرّب بعد قليل أو غيّر المزود.',
+        english: 'An unexpected error occurred. Try again shortly or switch providers.',
+    },
+};
+function categorizeErrorMessage(msg) {
+    const lower = msg.toLowerCase();
+    if (lower.includes('rate') || lower.includes('limit') || lower.includes('quota') || lower.includes('429') || lower.includes('overloaded'))
+        return 'rate_limit';
+    if (lower.includes('401') || lower.includes('403') || lower.includes('invalid') && lower.includes('key') || lower.includes('auth'))
+        return 'invalid_key';
+    if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('timedout'))
+        return 'timeout';
+    if (lower.includes('network') || lower.includes('econnrefused') || lower.includes('enotfound') || lower.includes('fetch failed') || lower.includes('dns'))
+        return 'network';
+    if (lower.includes('unavailable') || lower.includes('not available') || lower.includes('503') || lower.includes('502') || lower.includes('offline') || lower.includes('fallback'))
+        return 'unavailable';
+    return 'generic';
+}
+function getFriendlyErrorMessage(langs, errorMsg, debug, provider) {
+    const cat = categorizeErrorMessage(errorMsg);
+    const messages = ERROR_MESSAGES[cat] || ERROR_MESSAGES.generic;
+    let msg = langs === 'arabic' ? messages.arabic : messages.english;
+    if (debug) {
+        const lines = [msg];
+        if (provider)
+            lines.push(`Provider: ${provider}`);
+        lines.push(`Reason: ${cat}`);
+        const snippet = errorMsg.slice(0, 120);
+        if (snippet)
+            lines.push(`Detail: ${snippet}`);
+        msg = lines.join('\n');
+    }
+    return msg;
+}
 function buildVisionMessages(messages, attachments) {
     const result = [];
     for (let i = 0; i < messages.length; i++) {
@@ -223,12 +280,14 @@ function getLocalProviderHint(msg, provider) {
 export async function handleChatStream(req, writeEvent) {
     const config = loadConfig();
     if (!config) {
-        writeEvent(`data: ${JSON.stringify({ type: 'error', message: 'No configuration found. Run: hysa chat' })}\n\n`);
+        writeEvent(`data: ${JSON.stringify({ type: 'token', text: 'No configuration found. Run: hysa chat' })}\n\n`);
+        writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: 'No configuration found. Run: hysa chat', toolCalls: [] })}\n\n`);
         return;
     }
     const prov = config.currentProvider;
     if (!req.messages || !Array.isArray(req.messages) || req.messages.length === 0) {
-        writeEvent(`data: ${JSON.stringify({ type: 'error', message: 'Missing or empty messages array in request body' })}\n\n`);
+        writeEvent(`data: ${JSON.stringify({ type: 'token', text: 'No messages provided.' })}\n\n`);
+        writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: 'No messages provided.', toolCalls: [] })}\n\n`);
         return;
     }
     console.log(LOG, `handleChatStream called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
@@ -388,9 +447,13 @@ export async function handleChatStream(req, writeEvent) {
     }
     catch (err) {
         const e = err;
-        const msg = e.message || 'Unknown stream error';
-        console.log(LOG, `Stream failed: ${msg}`);
-        writeEvent(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`);
+        const rawMsg = e.message || 'Unknown stream error';
+        console.log(LOG, `Stream failed: ${rawMsg}`);
+        const userLastMsg = req.messages.filter(m => m.role === 'user').pop()?.content || '';
+        const lang = getResponseLanguage(userLastMsg);
+        const friendlyMsg = getFriendlyErrorMessage(lang, rawMsg, !!config?.debug, config?.currentProvider ? PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider : undefined);
+        writeEvent(`data: ${JSON.stringify({ type: 'token', text: friendlyMsg })}\n\n`);
+        writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: friendlyMsg, toolCalls: [] })}\n\n`);
     }
 }
 export async function handleChat(req) {
@@ -578,18 +641,14 @@ export async function handleChat(req) {
     }
     catch (err) {
         const e = err;
-        const msg = e.message || 'Unknown provider error';
-        console.log(LOG, `Provider failed: ${msg}`);
-        const lastErr = getLastError();
-        const fbEvents = getFallbackEvents();
-        const fallbackEvents = fbEvents.map(e => e.reason);
-        const hint = getLocalProviderHint(msg, prov);
+        const rawMsg = e.message || 'Unknown provider error';
+        console.log(LOG, `Provider failed: ${rawMsg}`);
+        const userLastMsg = req.messages.filter(m => m.role === 'user').pop()?.content || '';
+        const lang = getResponseLanguage(userLastMsg);
+        const friendlyMsg = getFriendlyErrorMessage(lang, rawMsg, !!config.debug, PROVIDER_DEFAULTS[prov]?.label || prov);
         return {
-            message: '',
+            message: friendlyMsg,
             toolCalls: [],
-            error: msg,
-            hint,
-            fallbackEvents: fallbackEvents.length > 0 ? fallbackEvents : undefined,
         };
     }
 }

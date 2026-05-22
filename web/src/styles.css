@@ -626,6 +626,25 @@ body {
   line-height: 1.7;
 }
 
+.bubble.warning {
+  background: var(--bg-surface);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  color: var(--text);
+  line-height: 1.7;
+}
+
+.bubble.warning::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning);
+  margin-right: 8px;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
 .bubble.user {
   background: rgba(179, 136, 255, 0.06);
   border: 1px solid rgba(179, 136, 255, 0.12);
@@ -1260,18 +1279,21 @@ body {
 .msg-attachments {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   width: 100%;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255,255,255,0.05);
 }
 
 .msg-attachment {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px 4px 4px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  gap: 5px;
+  padding: 3px 6px;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
 }
 
 .msg-attachment-image {

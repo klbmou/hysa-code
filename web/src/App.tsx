@@ -252,7 +252,7 @@ export default function App() {
         abortRef.current = null;
       }
       clearState();
-      addError('Provider timed out. Try another provider or HYSA AI.');
+      setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: 'The provider did not respond in time. Try again shortly or switch providers.' }]);
     }, TIMEOUT_MS);
 
     try {
@@ -285,15 +285,17 @@ export default function App() {
         const errText = await res.text().catch(() => '');
         console.debug(LOG, 'Non-200 response body:', errText);
         if (debug) setLastRawResponse(errText || `Status ${res.status}`);
-        const friendly = isRateLimited(errText) ? 'Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.' : `Web API error: ${res.status}`;
-        addError(friendly);
+        const newItems: ChatItem[] = [];
+        newItems.push({ id: nextId(), kind: 'ai_msg', content: isRateLimited(errText) ? 'The provider is rate-limited or unavailable. Try again shortly or switch providers.' : 'Could not reach the server. Try again.' });
+        if (debug) newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'error', message: errText || `Status ${res.status}` });
+        setChatItems(prev => [...prev, ...newItems]);
         return;
       }
 
       // ── Streaming path ──────────────────────────────
       if (useStream) {
         const reader = res.body?.getReader();
-        if (!reader) { addError('Stream not available'); return; }
+        if (!reader) { setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: 'Stream not available. Try again without streaming.' }]); return; }
 
         const decoder = new TextDecoder();
         let buffer = '';
@@ -340,7 +342,7 @@ export default function App() {
                     accumulatedText = event.fullText || accumulatedText;
                     finalToolCalls = event.toolCalls || [];
                   } else if (event.type === 'error') {
-                    streamError = event.message || 'Stream error';
+                    streamError = event.message || '';
                   }
             } catch { /* skip malformed SSE */ }
           }
@@ -361,7 +363,7 @@ export default function App() {
                 accumulatedText = event.fullText || accumulatedText;
                 finalToolCalls = event.toolCalls || [];
               } else if (event.type === 'error') {
-                streamError = event.message || 'Stream error';
+                streamError = event.message || '';
               }
             } catch { /* skip */ }
           }
@@ -371,10 +373,9 @@ export default function App() {
         if (streamError) {
           setChatItems(prev => prev.map(item =>
             item.id === streamItemId && item.kind === 'ai_msg'
-              ? { ...item, content: accumulatedText || `Error: ${streamError}` }
+              ? { ...item, content: accumulatedText || streamError }
               : item
           ));
-          addError(streamError);
         } else if (streamDone) {
           setChatItems(prev => prev.map(item =>
             item.id === streamItemId && item.kind === 'ai_msg'
@@ -428,7 +429,7 @@ export default function App() {
         rawText = await res.text();
         if (debug) setLastRawResponse(rawText);
       } catch {
-        addError('Failed to read response from API.');
+        setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: 'An unexpected error occurred. Try again shortly.' }]);
         return;
       }
 
@@ -436,29 +437,26 @@ export default function App() {
       try {
         data = JSON.parse(rawText);
       } catch {
-        addError('Invalid response from API. Check provider configuration.');
-        return;
-      }
-
-      if (data.error) {
-        const errMsg = data.error.toLowerCase();
-        if (errMsg.includes('rate') || errMsg.includes('limit') || errMsg.includes('quota') || errMsg.includes('429')) {
-          addError('Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.');
-        } else if (errMsg.includes('timeout') || errMsg.includes('timed out')) {
-          addError('Provider timed out. Try OpenRouter, Gemini, or HYSA AI.');
-        } else if (errMsg.includes('fallback') || errMsg.includes('unavailable') || errMsg.includes('all providers')) {
-          addError('All providers failed. Run hysa config to check your setup.');
-        } else {
-          addError(data.error);
-        }
+        setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: 'The server returned an unexpected response. Try again or switch providers.' }]);
         return;
       }
 
       const assistantText = getAssistantText(data);
       const hasToolCalls = data.toolCalls && data.toolCalls.length > 0;
 
+      if (data.error && !assistantText && !hasToolCalls) {
+        // Server returned a raw error (unexpected) — render as ai_msg bubble
+        const newItems: ChatItem[] = [];
+        newItems.push({ id: nextId(), kind: 'ai_msg', content: debug ? `Error: ${data.error}` : 'An unexpected error occurred. Try again shortly.' });
+        if (debug && data.debugError) {
+          newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'error', message: data.debugError });
+        }
+        setChatItems(prev => [...prev, ...newItems]);
+        return;
+      }
+
       if (!assistantText && !hasToolCalls) {
-        addError('HYSA returned an empty response. Check provider configuration or try another provider.');
+        setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: 'HYSA returned an empty response. Try again or switch providers.' }]);
         return;
       }
 
@@ -522,19 +520,14 @@ export default function App() {
         return;
       }
 
-      const msg = e.message ? e.message.toLowerCase() : '';
-      console.debug(LOG, 'Error message:', msg);
-      if (msg.includes('rate') || msg.includes('limit') || msg.includes('quota') || msg.includes('429') || msg.includes('overloaded')) {
-        addError('Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.');
-      } else if (msg.includes('timeout') || msg.includes('timed out')) {
-        addError('Provider timed out. Try another provider or HYSA AI.');
-      } else if (msg.includes('fallback') || msg.includes('unavailable') || msg.includes('all providers')) {
-        addError('All providers failed. Run hysa config to check your setup.');
-      } else {
-        const displayMsg = e.message || 'Unknown error';
-        console.debug(LOG, 'Unhandled error:', displayMsg);
-        addError(`HYSA could not get a response: ${displayMsg}`);
+      // Friendly fallback for unexpected errors (network down, etc.)
+      const fallbackMsg = 'An unexpected error occurred. Try again shortly or switch providers.';
+      const newItems: ChatItem[] = [];
+      newItems.push({ id: nextId(), kind: 'ai_msg', content: fallbackMsg });
+      if (debug && e.message) {
+        newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'error', message: e.message.slice(0, 200) });
       }
+      setChatItems(prev => [...prev, ...newItems]);
     } finally {
       console.debug(LOG, '=== sendMessage finally ===');
       if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
