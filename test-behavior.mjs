@@ -559,8 +559,21 @@ process.on('exit', () => {
       console.log(`      ✗ PDF attachment test error: ${err.message}`);
     }
 
-    // Test 7g: Image attachment with non-vision provider — vision fallback test
-    console.log('\n  7g. Sending image attachment to non-vision provider (expects vision fallback or hint)...');
+    // Set current provider to OpenRouter for vision fallback tests
+    console.log('\n  7g. Setting provider to OpenRouter for vision fallback tests...');
+    try {
+      const configRes = await (await fetch(`${baseUrl}/api/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentProvider: 'openrouter', currentModel: 'qwen/qwen3-coder:free' })
+      })).json();
+      console.log(`      Provider set to: ${configRes.currentProvider} / ${configRes.currentModel}`);
+    } catch (err) {
+      console.log(`      ⚠ Could not set provider: ${err.message}`);
+    }
+
+    // Test 7g: Image attachment with non-vision provider (OpenRouter) — vision fallback test
+    console.log('\n  7g. Image attachment to OpenRouter non-vision model (English) — expects fallback to OpenRouter vision or friendly error...');
     let img7gPassed = true;
     try {
       const imgDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
@@ -582,34 +595,96 @@ process.on('exit', () => {
       const imgDur = ((Date.now() - imgStart) / 1000).toFixed(1);
       console.log(`      Response time: ${imgDur}s`);
       console.log(`      Has message: ${!!imgRes.message}`);
-      if (imgRes.fallbackEvents && imgRes.fallbackEvents.length > 0) {
-        console.log(`      Fallback events: ${imgRes.fallbackEvents.length}`);
-        for (const ev of imgRes.fallbackEvents.slice(0, 5)) {
-          console.log(`        ${ev}`);
-        }
-      }
-      const isNewHint = !!(imgRes.message && imgRes.message.toLowerCase().includes('all vision providers'));
-      const isOldHint = !!(imgRes.message && imgRes.message.toLowerCase().includes('vision') && !imgRes.message.toLowerCase().includes('all vision'));
-      const hasContent = !!(imgRes.message && imgRes.message.length > 10 && !imgRes.message.toLowerCase().includes('vision'));
-      if (isNewHint) {
-        console.log(`      ✓ New-style error with attempted providers`);
-        const snippet = imgRes.message.slice(0, 300);
-        console.log(`      Error: ${snippet}`);
-        console.log(`      (All vision fallbacks exhausted — detailed error returned)`);
-      } else if (isOldHint) {
-        console.log(`      ⚠ Old-style hint still used`);
-        console.log(`      Raw message: ${JSON.stringify(imgRes.message)}`);
-        img7gPassed = false;
-      } else if (hasContent) {
+      const hasContent = !!(imgRes.message && imgRes.message.length > 10);
+      const isVisionError = !!(imgRes.message && imgRes.message.toLowerCase().includes('vision'));
+      const providerCount = imgRes.message ? (imgRes.message.match(/—/g) || []).length : 0;
+
+      if (hasContent && !isVisionError) {
         console.log(`      ✓ Vision fallback succeeded: "${imgRes.message.slice(0, 80)}..."`);
-        console.log(`      (Provider: ${imgRes.provider || '?'} / ${imgRes.model || '?'})`);
+        console.log(`      Provider used: ${imgRes.provider || '?'} / ${imgRes.model || '?'}`);
+        if (imgRes.provider && (imgRes.provider.includes('OpenRouter') || imgRes.model?.includes('gemini'))) {
+          console.log(`      ✓ Used OpenRouter vision candidate`);
+        } else {
+          console.log(`      ⚠ Unexpected provider — expected OpenRouter`);
+        }
+      } else if (isVisionError) {
+        console.log(`      Vision fallback all failed — checking error quality`);
+        const snippet = imgRes.message.slice(0, 200);
+        console.log(`      Error: ${snippet}`);
+        if (providerCount <= 3) {
+          console.log(`      ✓ <=3 provider lines (controlled fallback): ${providerCount}`);
+        } else {
+          console.log(`      ⚠ Too many provider lines (>3): ${providerCount}`);
+          img7gPassed = false;
+        }
+        // Check that error does NOT contain a huge technical dump
+        const lineCount = (imgRes.message || '').split('\n').length;
+        if (lineCount <= 6) {
+          console.log(`      ✓ Error is short (${lineCount} lines)`);
+        } else {
+          console.log(`      ⚠ Error too long (${lineCount} lines)`);
+          img7gPassed = false;
+        }
       } else {
         console.log(`      ⚠ No useful response`);
         img7gPassed = false;
       }
-      console.log(`      ${img7gPassed ? '✓ Image attachment test completed' : '⚠ Image attachment test issues'}`);
+      console.log(`      ${img7gPassed ? '✓ Image English test completed' : '⚠ Image English test issues'}`);
     } catch (err) {
-      console.log(`      ✗ Image attachment test error: ${err.message}`);
+      console.log(`      ✗ Image English test error: ${err.message}`);
+    }
+
+    // Test 7h: Image attachment with Arabic input — expects Arabic friendly error or Arabic description
+    console.log('\n  7h. Image attachment (Arabic) with OpenRouter — expects Arabic response or friendly Arabic error...');
+    let img7hPassed = true;
+    try {
+      const imgDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      const imgStart = Date.now();
+      const imgRes = await (await fetch(`${baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', content: 'اشرح هذه الصورة' }],
+          attachments: [{
+            name: 'test.png',
+            ext: '.png',
+            size: 68,
+            kind: 'image',
+            dataUrl: imgDataUrl,
+          }]
+        })
+      })).json();
+      const imgDur = ((Date.now() - imgStart) / 1000).toFixed(1);
+      console.log(`      Response time: ${imgDur}s`);
+      console.log(`      Has message: ${!!imgRes.message}`);
+      const hasContent = !!(imgRes.message && imgRes.message.length > 10);
+      const isArabic = /[\u0600-\u06FF]/.test(imgRes.message || '');
+      const providerCount = imgRes.message ? (imgRes.message.match(/—/g) || []).length : 0;
+      const lineCount = (imgRes.message || '').split('\n').length;
+
+      if (hasContent && isArabic) {
+        console.log(`      ✓ Arabic response: "${imgRes.message.slice(0, 100)}..."`);
+      } else if (hasContent && !isArabic) {
+        console.log(`      ⚠ Response is not in Arabic (user asked in Arabic): ${imgRes.message.slice(0, 100)}...`);
+        img7hPassed = false;
+      } else {
+        console.log(`      ⚠ No useful response`);
+        img7hPassed = false;
+      }
+      if (providerCount <= 3) {
+        console.log(`      ✓ <=3 provider lines: ${providerCount}`);
+      } else {
+        console.log(`      ⚠ Too many provider lines (>3): ${providerCount}`);
+        img7hPassed = false;
+      }
+      if (lineCount <= 6) {
+        console.log(`      ✓ Error is short (${lineCount} lines, excluding debug)`);
+      } else {
+        console.log(`      ⚠ Error too long (${lineCount} lines)`);
+      }
+      console.log(`      ${img7hPassed ? '✓ Arabic image test passed' : '⚠ Arabic image test issues'}`);
+    } catch (err) {
+      console.log(`      ✗ Arabic image test error: ${err.message}`);
     }
 
     // Cleanup

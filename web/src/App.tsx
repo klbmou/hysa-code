@@ -333,7 +333,7 @@ export default function App() {
                         ? { ...item, content: accumulatedText }
                         : item
                     ));
-                  } else if (event.type === 'fallback') {
+                  } else if (event.type === 'fallback' && debug) {
                     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
                   } else if (event.type === 'done') {
                     streamDone = true;
@@ -354,7 +354,7 @@ export default function App() {
               const event = JSON.parse(trimmed.slice(6));
               if (event.type === 'token') {
                 accumulatedText += event.text;
-              } else if (event.type === 'fallback') {
+              } else if (event.type === 'fallback' && debug) {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
               } else if (event.type === 'done') {
                 streamDone = true;
@@ -464,14 +464,10 @@ export default function App() {
 
       const newItems: ChatItem[] = [];
 
-      if (data.fallbackEvents && data.fallbackEvents.length > 0) {
+      if (debug && data.fallbackEvents && data.fallbackEvents.length > 0) {
         for (const event of data.fallbackEvents) {
           newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event });
         }
-      }
-
-      if (data.hint) {
-        newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'fallback', message: `⚠ ${data.hint}` });
       }
 
       if (assistantText) {

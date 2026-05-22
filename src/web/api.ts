@@ -28,6 +28,10 @@ function isArabic(text: string): boolean {
   return arabicCount > 0;
 }
 
+function getResponseLanguage(text: string): 'arabic' | 'english' {
+  return isArabic(text) ? 'arabic' : 'english';
+}
+
 function injectLanguageInstruction(messages: { role: string; content: string | any[] }[]): void {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -69,27 +73,26 @@ interface AttachmentPayload {
   dataUrl?: string;
 }
 
-const VISION_CAPABLE_PROVIDERS: Record<string, string[]> = {
+// Known vision-capable models per provider (for supportsVision check)
+const VISION_CAPABLE_MODELS: Record<string, string[]> = {
   gemini: ['gemini-2.5-flash', 'gemini-1.5-flash'],
   openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'],
   anthropic: ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022'],
-  openrouter: [
-    'google/gemini-2.5-flash',
-    'google/gemini-2.5-flash:free',
-    'google/gemini-1.5-flash',
-    'google/gemini-1.5-flash:free',
-    'qwen/qwen2.5-vl-72b-instruct:free',
-    'qwen/qwen-vl-plus',
-    'qwen/qwen-vl-plus:free',
-    'meta-llama/llama-3.2-11b-vision-instruct:free',
-  ],
+  openrouter: ['google/gemini-2.5-flash', 'qwen/qwen2.5-vl-72b-instruct:free'],
 };
 
 function supportsVision(provider: string, model: string): boolean {
-  const models = VISION_CAPABLE_PROVIDERS[provider];
+  const models = VISION_CAPABLE_MODELS[provider];
   if (!models) return false;
   return models.some(m => model.includes(m.replace('google/', '').replace(':free', '')) || model === m);
 }
+
+// Preferred ordered list of vision fallback models (max 3 attempted)
+const VISION_FALLBACK_ORDER: { provider: ProviderType; model: string }[] = [
+  { provider: 'openrouter', model: 'google/gemini-2.5-flash' },
+  { provider: 'openrouter', model: 'qwen/qwen2.5-vl-72b-instruct:free' },
+  { provider: 'gemini', model: 'gemini-2.5-flash' },
+];
 
 function hasImageAttachments(attachments?: AttachmentPayload[]): boolean {
   if (!attachments || attachments.length === 0) return false;
@@ -98,43 +101,39 @@ function hasImageAttachments(attachments?: AttachmentPayload[]): boolean {
 
 function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderType; model: string; label: string }[] {
   const candidates: { provider: ProviderType; model: string; label: string }[] = [];
-  const added = new Set<string>();
   const currentProv = config.currentProvider;
 
-  const tryAddOther = (provider: ProviderType) => {
-    if (provider === currentProv) return;
-    const models = VISION_CAPABLE_PROVIDERS[provider];
-    if (!models) return;
-    const key = config.apiKeys[provider as keyof typeof config.apiKeys];
-    if (!key) return;
-    for (const model of models) {
-      const k = `${provider}:${model}`;
-      if (!added.has(k)) {
-        added.add(k);
-        candidates.push({ provider, model, label: `${PROVIDER_DEFAULTS[provider]?.label || provider} / ${model}` });
-      }
+  for (const fb of VISION_FALLBACK_ORDER) {
+    if (fb.provider !== currentProv) {
+      const key = config.apiKeys[fb.provider as keyof typeof config.apiKeys];
+      if (!key) continue;
     }
-  };
-
-  // 1. Same provider vision models first (already authenticated, no key check needed)
-  const currentVisionModels = VISION_CAPABLE_PROVIDERS[currentProv];
-  if (currentVisionModels) {
-    for (const model of currentVisionModels) {
-      const k = `${currentProv}:${model}`;
-      if (!added.has(k)) {
-        added.add(k);
-        candidates.push({ provider: currentProv, model, label: `${PROVIDER_DEFAULTS[currentProv]?.label || currentProv} / ${model}` });
-      }
-    }
+    const label = `${PROVIDER_DEFAULTS[fb.provider]?.label || fb.provider} / ${fb.model}`;
+    candidates.push({ provider: fb.provider, model: fb.model, label });
+    if (candidates.length >= 3) break;
   }
 
-  // 2. Other providers with API keys
-  tryAddOther('gemini');
-  tryAddOther('openrouter');
-  tryAddOther('openai');
-  tryAddOther('anthropic');
-
   return candidates;
+}
+
+function getVisionFallbackErrorMessage(
+  lang: 'arabic' | 'english',
+  failures: { label: string; reason: string }[],
+  debug: boolean,
+): string {
+  if (lang === 'arabic') {
+    let msg = 'لم أستطع تحليل الصورة الآن لأن نماذج الرؤية المتاحة غير متوفرة أو وصلت للحد اليومي. جرّب لاحقًا أو غيّر المزود إلى Gemini/OpenRouter Vision.';
+    if (debug && failures.length > 0) {
+      msg += '\n\nجرّبت ' + failures.length + ' نماذج رؤية:\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason).join('\n');
+    }
+    return msg;
+  }
+
+  let msg = 'I couldn\'t analyze the image right now because the available vision models are unavailable or quota-limited. Try again later or switch to Gemini/OpenRouter Vision.';
+  if (debug && failures.length > 0) {
+    msg += '\n\nTried ' + failures.length + ' vision models:\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason).join('\n');
+  }
+  return msg;
 }
 
 function buildVisionMessages(
@@ -310,7 +309,6 @@ export async function handleChatStream(
 
     // ── Vision fallback: if images present but current provider not vision-capable ──
     if (hasImages && !visionAvailable) {
-      // Debug log for image dataUrl presence
       if (req.attachments) {
         for (const att of req.attachments) {
           if (att.kind === 'image') {
@@ -320,7 +318,7 @@ export async function handleChatStream(
       }
 
       const visionCandidates = getVisionFallbackCandidates(config);
-      const failures: { label: string; reason: string; detail: string }[] = [];
+      const failures: { label: string; reason: string }[] = [];
       if (visionCandidates.length > 0) {
         console.log(LOG, `Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)...`);
 
@@ -341,8 +339,7 @@ export async function handleChatStream(
         injectLanguageInstruction(fbMessages);
 
         for (const c of visionCandidates) {
-          const timeoutMs = 15000;
-          writeEvent(`data: ${JSON.stringify({ type: 'fallback', message: `Trying vision model: ${c.label}` })}\n\n`);
+          const timeoutMs = 10000;
           try {
             console.log(LOG, `Trying vision provider: ${c.label}`);
             const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
@@ -355,13 +352,13 @@ export async function handleChatStream(
                 }),
                 timeoutMs,
               );
-              writeEvent(`data: ${JSON.stringify({ type: 'fallback', message: `Switched to vision model: ${c.label}` })}\n\n`);
+              console.log(LOG, `Vision fallback succeeded with ${c.label}`);
               writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls })}\n\n`);
               return;
             } else {
               const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
               if (result.message) {
-                writeEvent(`data: ${JSON.stringify({ type: 'fallback', message: `Switched to vision model: ${c.label}` })}\n\n`);
+                console.log(LOG, `Vision fallback succeeded with ${c.label}`);
                 writeEvent(`data: ${JSON.stringify({ type: 'token', text: result.message })}\n\n`);
                 writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: result.message, toolCalls: result.toolCalls })}\n\n`);
                 return;
@@ -378,18 +375,16 @@ export async function handleChatStream(
             else if (cat === 'model_unavailable') reasonStr = 'unavailable';
             else if (cat === 'network') reasonStr = 'network error';
             else reasonStr = 'failed';
-            failures.push({ label: c.label, reason: reasonStr, detail: e.message?.slice(0, 80) || '' });
-            writeEvent(`data: ${JSON.stringify({ type: 'fallback', message: `Vision model failed: ${c.label} — ${reasonStr}` })}\n\n`);
+            failures.push({ label: c.label, reason: reasonStr });
             console.log(LOG, `Vision fallback failed with ${c.label}: ${e.message?.slice(0, 100)}`);
           }
         }
       }
 
-      // All vision fallbacks failed
-      let errorText = 'Image understanding failed because all vision providers were unavailable or quota-limited.';
-      if (failures && failures.length > 0) {
-        errorText += '\nTried:\n' + failures.map(f => `- ${f.label} — ${f.reason}`).join('\n');
-      }
+      // All vision fallbacks failed — friendly message in user's language
+      const userLastMsg = req.messages.filter(m => m.role === 'user').pop()?.content || '';
+      const lang = getResponseLanguage(userLastMsg);
+      const errorText = getVisionFallbackErrorMessage(lang, failures, !!config.debug);
       writeEvent(`data: ${JSON.stringify({ type: 'token', text: errorText })}\n\n`);
       writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: errorText, toolCalls: [] })}\n\n`);
       return;
@@ -499,7 +494,6 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
 
     // ── Vision fallback: if images present but current provider not vision-capable ──
     if (hasImages && !visionAvailable) {
-      // Debug log for image dataUrl presence
       if (req.attachments) {
         for (const att of req.attachments) {
           if (att.kind === 'image') {
@@ -509,13 +503,11 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       }
 
       const visionCandidates = getVisionFallbackCandidates(config);
-      const fbEvents: string[] = [];
       const failures: { label: string; reason: string }[] = [];
 
       if (visionCandidates.length > 0) {
         console.log(LOG, `Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)...`);
 
-        // Build vision messages
         const visionMsgs = buildVisionMessages(req.messages, req.attachments!);
         const fbProjectInfo = getProjectInfo(workingDir);
         const fbSysPrompt = buildSystemPrompt({
@@ -533,19 +525,16 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
         injectLanguageInstruction(fbMessages);
 
         for (const c of visionCandidates) {
-          const timeoutMs = 15000;
-          fbEvents.push(`Trying vision model: ${c.label}`);
+          const timeoutMs = 10000;
           try {
             console.log(LOG, `Trying vision provider: ${c.label}`);
             const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
             const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
             if (result.message) {
               console.log(LOG, `Vision fallback succeeded with ${c.label}`);
-              fbEvents.push(`Switched to vision model: ${c.label}`);
               return {
                 message: result.message,
                 toolCalls: result.toolCalls,
-                fallbackEvents: fbEvents,
                 provider: PROVIDER_DEFAULTS[c.provider]?.label || c.provider,
                 model: c.model,
               };
@@ -562,18 +551,16 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
             else if (cat === 'network') reasonStr = 'network error';
             else reasonStr = 'failed';
             failures.push({ label: c.label, reason: reasonStr });
-            fbEvents.push(`Vision model failed: ${c.label} — ${reasonStr}`);
             console.log(LOG, `Vision fallback failed with ${c.label}: ${e.message?.slice(0, 100)}`);
           }
         }
       }
 
-      // All vision providers failed — return hint with actual reasons
-      let msg = 'Image understanding failed because all vision providers were unavailable or quota-limited.';
-      if (failures.length > 0) {
-        msg += '\nTried:\n' + failures.map(f => `- ${f.label} — ${f.reason}`).join('\n');
-      }
-      return { message: msg, toolCalls: [], fallbackEvents: fbEvents, hint: 'All vision providers failed.' };
+      // All vision providers failed — friendly message in user's language
+      const userLastMsg = req.messages.filter(m => m.role === 'user').pop()?.content || '';
+      const lang = getResponseLanguage(userLastMsg);
+      const msg = getVisionFallbackErrorMessage(lang, failures, !!config.debug);
+      return { message: msg, toolCalls: [] };
     }
 
     // Inject attachment text content as context before the user's question

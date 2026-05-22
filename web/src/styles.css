@@ -748,12 +748,23 @@ body {
 .tool-event.error .tool-event-dot { background: var(--error); }
 .tool-event.fallback .tool-event-dot { background: var(--accent); }
 
+.tool-event.fallback {
+  color: var(--accent);
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+
+.tool-event.fallback:hover {
+  opacity: 1;
+}
+
 .tool-event.read { color: var(--info); }
 .tool-event.edit { color: var(--accent); }
 .tool-event.done { color: var(--success); }
 .tool-event.run { color: var(--warning); }
 .tool-event.error { color: var(--error); }
-.tool-event.fallback { color: var(--accent); }
 
 /* ── Diff Cards (inline in chat) ───────────────── */
 
