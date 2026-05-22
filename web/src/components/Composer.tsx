@@ -17,7 +17,7 @@ export interface Attachment {
 interface ComposerProps {
   onSend: (msg: string, attachments?: Attachment[]) => void;
   loading: boolean;
-  status: { provider: string; model: string } | null;
+  status: { provider: string; model: string; visionCapable?: boolean } | null;
   onCancel?: () => void;
 }
 
@@ -224,6 +224,10 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
       </div>
 
       {attachError && <div className="composer-attach-error">{attachError}</div>}
+
+      {attachments.some(a => a.kind === 'image') && status && !status.visionCapable && (
+        <div className="composer-vision-warn">Current provider does not support images. Will try a vision-capable provider.</div>
+      )}
 
       {attachments.length > 0 && (
         <div className="composer-attachments">

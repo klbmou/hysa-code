@@ -23,6 +23,7 @@ interface StatusData {
   provider: string;
   model: string;
   tier: string;
+  visionCapable: boolean;
   git: { branch: string | null; hasChanges: boolean } | null;
 }
 
@@ -591,8 +592,12 @@ export default function App() {
                               <div className="msg-attachments">
                                 {item.attachments.map(a => {
                                   let note = '';
-                                  if (a.kind === 'image') note = 'Image · ready for analysis';
-                                  else if (a.kind === 'pdf' && a.pdfStatus === 'ready') note = 'PDF · ready for analysis';
+                                  if (a.kind === 'image') {
+                                    note = 'Image · ready for analysis';
+                                    if (status && !status.visionCapable) {
+                                      note = 'Image · will try vision-capable provider';
+                                    }
+                                  } else if (a.kind === 'pdf' && a.pdfStatus === 'ready') note = 'PDF · ready for analysis';
                                   else if (a.kind === 'pdf' && (a.pdfStatus === 'scanned_pdf' || a.pdfStatus === 'failed')) note = 'This PDF may be scanned or image-based. OCR is not enabled yet.';
                                   else if (a.kind === 'pdf' && a.pdfStatus === 'too_large') note = 'PDF too large for text extraction';
                                   else if (a.kind === 'pdf') note = 'PDF · ready for analysis';

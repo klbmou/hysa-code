@@ -1105,6 +1105,14 @@ body {
   line-height: 1.4;
 }
 
+.composer-vision-warn {
+  font-size: 11px;
+  color: var(--warning, #f59e0b);
+  padding: 2px 2px 4px;
+  line-height: 1.4;
+  font-style: italic;
+}
+
 .composer-attachments {
   display: flex;
   flex-wrap: wrap;

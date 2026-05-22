@@ -559,9 +559,9 @@ process.on('exit', () => {
       console.log(`      ✗ PDF attachment test error: ${err.message}`);
     }
 
-    // Test 7g: Image attachment with non-vision provider — expect vision hint
-    console.log('\n  7g. Sending image attachment to non-vision provider...');
-    let imageTestPassed = true;
+    // Test 7g: Image attachment with non-vision provider — vision fallback test
+    console.log('\n  7g. Sending image attachment to non-vision provider (expects vision fallback or hint)...');
+    let img7gPassed = true;
     try {
       const imgDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
       const imgStart = Date.now();
@@ -582,12 +582,19 @@ process.on('exit', () => {
       const imgDur = ((Date.now() - imgStart) / 1000).toFixed(1);
       console.log(`      Response time: ${imgDur}s`);
       console.log(`      Has message: ${!!imgRes.message}`);
-      if (imgRes.message && imgRes.message.toLowerCase().includes('vision')) {
-        console.log(`      ✓ Got vision provider hint: "${imgRes.message.slice(0, 80)}..."`);
+      const isHint = !!(imgRes.message && imgRes.message.toLowerCase().includes('vision'));
+      const hasContent = !!(imgRes.message && imgRes.message.length > 10);
+      if (isHint) {
+        console.log(`      ✓ Vision hint: "${imgRes.message.slice(0, 80)}..."`);
+        console.log(`      (All vision fallbacks exhausted — hint returned)`);
+      } else if (hasContent) {
+        console.log(`      ✓ Vision fallback succeeded: "${imgRes.message.slice(0, 80)}..."`);
+        console.log(`      (Provider: ${imgRes.provider || '?'} / ${imgRes.model || '?'})`);
       } else {
-        console.log(`      Response: ${(imgRes.message || '').slice(0, 80)}`);
+        console.log(`      ⚠ No useful response`);
+        img7gPassed = false;
       }
-      console.log(`      ${imageTestPassed ? '✓ Image attachment test completed' : '⚠ Image attachment test issues'}`);
+      console.log(`      ${img7gPassed ? '✓ Image attachment test completed' : '⚠ Image attachment test issues'}`);
     } catch (err) {
       console.log(`      ✗ Image attachment test error: ${err.message}`);
     }

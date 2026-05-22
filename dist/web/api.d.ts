@@ -30,6 +30,7 @@ export declare function getStatus(): {
     provider: string;
     model: string;
     tier: string;
+    visionCapable: boolean;
     git: {
         branch: string | null;
         hasChanges: boolean;

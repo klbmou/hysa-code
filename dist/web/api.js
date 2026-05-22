@@ -4,7 +4,7 @@ import { getProjectInfo } from '../context/builder.js';
 import { readFile, shouldIgnore } from '../files/reader.js';
 import { writeFileWithBackup, previewEdit } from '../files/writer.js';
 import { getGitInfo } from '../utils/git.js';
-import { createClient, isOnlyGreeting } from '../ai/client.js';
+import { createClient, createSingleClient, isOnlyGreeting } from '../ai/client.js';
 import { buildSystemPrompt, resolvePromptMode } from '../prompts/system.js';
 import { getYolo, setYolo } from '../utils/session.js';
 import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents } from '../ai/model-health.js';
@@ -21,6 +21,12 @@ function isSimpleQuestion(text) {
         return false;
     return true;
 }
+function withTimeout(promise, ms) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`Timed out after ${ms / 1000}s`)), ms)),
+    ]);
+}
 const workingDir = resolve('.');
 const VISION_CAPABLE_PROVIDERS = {
     gemini: ['gemini-2.5-flash', 'gemini-1.5-flash'],
@@ -31,6 +37,8 @@ const VISION_CAPABLE_PROVIDERS = {
         'google/gemini-2.5-flash:free',
         'google/gemini-1.5-flash',
         'google/gemini-1.5-flash:free',
+        'qwen/qwen2.5-vl-72b-instruct:free',
+        'qwen/qwen-vl-plus',
         'qwen/qwen-vl-plus:free',
         'meta-llama/llama-3.2-11b-vision-instruct:free',
     ],
@@ -45,6 +53,33 @@ function hasImageAttachments(attachments) {
     if (!attachments || attachments.length === 0)
         return false;
     return attachments.some(a => a.kind === 'image' && a.dataUrl);
+}
+function getVisionFallbackCandidates(config) {
+    const candidates = [];
+    const added = new Set();
+    const tryAdd = (provider) => {
+        const models = VISION_CAPABLE_PROVIDERS[provider];
+        if (!models)
+            return;
+        if (provider === config.currentProvider)
+            return;
+        const key = config.apiKeys[provider];
+        if (!key)
+            return;
+        for (const model of models) {
+            const k = `${provider}:${model}`;
+            if (!added.has(k)) {
+                added.add(k);
+                candidates.push({ provider, model, label: `${PROVIDER_DEFAULTS[provider]?.label || provider} / ${model}` });
+            }
+        }
+    };
+    // Order matters: Gemini first (most likely to work for free image analysis)
+    tryAdd('gemini');
+    tryAdd('openrouter');
+    tryAdd('openai');
+    tryAdd('anthropic');
+    return candidates;
 }
 function buildVisionMessages(messages, attachments) {
     const result = [];
@@ -76,7 +111,7 @@ function buildVisionMessages(messages, attachments) {
 export function getStatus() {
     const config = loadConfig();
     if (!config) {
-        return { provider: 'not configured', model: '', tier: '', git: null };
+        return { provider: 'not configured', model: '', tier: '', visionCapable: false, git: null };
     }
     const prov = config.currentProvider;
     const label = PROVIDER_DEFAULTS[prov]?.label || prov;
@@ -87,6 +122,7 @@ export function getStatus() {
         provider: label,
         model: config.currentModel,
         tier: tierLabel,
+        visionCapable: supportsVision(prov, config.currentModel),
         git: gitInfo.isRepo ? { branch: gitInfo.branch, hasChanges: gitInfo.hasChanges } : null,
     };
 }
@@ -169,9 +205,57 @@ export async function handleChatStream(req, writeEvent) {
     try {
         const hasImages = hasImageAttachments(req.attachments);
         const visionAvailable = supportsVision(prov, config.currentModel);
+        // ── Vision fallback: if images present but current provider not vision-capable ──
         if (hasImages && !visionAvailable) {
-            writeEvent(`data: ${JSON.stringify({ type: 'token', text: 'Image understanding needs a vision-capable provider. Try Gemini (gemini-2.5-flash) or OpenRouter with a vision model like google/gemini-2.5-flash:free.' })}\n\n`);
-            writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: 'Image understanding needs a vision-capable provider. Try Gemini (gemini-2.5-flash) or OpenRouter with a vision model like google/gemini-2.5-flash:free.', toolCalls: [] })}\n\n`);
+            const visionCandidates = getVisionFallbackCandidates(config);
+            if (visionCandidates.length > 0) {
+                console.log(LOG, `Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)...`);
+                const visionMsgs = buildVisionMessages(req.messages, req.attachments);
+                const fbProjectInfo = getProjectInfo(workingDir);
+                const fbSysPrompt = buildSystemPrompt({
+                    type: fbProjectInfo.type,
+                    entryPoints: fbProjectInfo.entryPoints,
+                    configFiles: fbProjectInfo.configFiles,
+                    fileCount: fbProjectInfo.fileCount,
+                    tree: fbProjectInfo.tree.length < 3000 ? fbProjectInfo.tree : fbProjectInfo.tree.slice(0, 3000) + '\n... (truncated)',
+                }, config.agentMode || 'chat', false, prov, config.promptMode || 'auto');
+                const fbMessages = visionMsgs.map(m => ({
+                    role: m.role,
+                    content: m.content,
+                }));
+                for (const c of visionCandidates) {
+                    const timeoutMs = 15000;
+                    try {
+                        console.log(LOG, `Trying vision provider: ${c.label}`);
+                        const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+                        if (client.sendMessageStream) {
+                            const response = await withTimeout(client.sendMessageStream(fbMessages, fbSysPrompt, (event) => {
+                                if (event.type === 'token') {
+                                    writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
+                                }
+                            }), timeoutMs);
+                            writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls })}\n\n`);
+                            return;
+                        }
+                        else {
+                            const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
+                            if (result.message) {
+                                writeEvent(`data: ${JSON.stringify({ type: 'token', text: result.message })}\n\n`);
+                                writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: result.message, toolCalls: result.toolCalls })}\n\n`);
+                                return;
+                            }
+                        }
+                    }
+                    catch (err) {
+                        const e = err;
+                        console.log(LOG, `Vision fallback failed with ${c.label}: ${e.message?.slice(0, 100)}`);
+                    }
+                }
+            }
+            // All vision fallbacks failed
+            const hintText = 'Image understanding needs a vision-capable provider. Try Gemini (gemini-2.5-flash) or OpenRouter with a vision model like google/gemini-2.5-flash:free.';
+            writeEvent(`data: ${JSON.stringify({ type: 'token', text: hintText })}\n\n`);
+            writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: hintText, toolCalls: [] })}\n\n`);
             return;
         }
         // Inject attachment text content as context before the user's question
@@ -262,7 +346,48 @@ export async function handleChat(req) {
     try {
         const hasImages = hasImageAttachments(req.attachments);
         const visionAvailable = supportsVision(prov, config.currentModel);
+        // ── Vision fallback: if images present but current provider not vision-capable ──
         if (hasImages && !visionAvailable) {
+            const visionCandidates = getVisionFallbackCandidates(config);
+            if (visionCandidates.length > 0) {
+                console.log(LOG, `Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)...`);
+                // Build vision messages
+                const visionMsgs = buildVisionMessages(req.messages, req.attachments);
+                const fbProjectInfo = getProjectInfo(workingDir);
+                const fbSysPrompt = buildSystemPrompt({
+                    type: fbProjectInfo.type,
+                    entryPoints: fbProjectInfo.entryPoints,
+                    configFiles: fbProjectInfo.configFiles,
+                    fileCount: fbProjectInfo.fileCount,
+                    tree: fbProjectInfo.tree.length < 3000 ? fbProjectInfo.tree : fbProjectInfo.tree.slice(0, 3000) + '\n... (truncated)',
+                }, config.agentMode || 'chat', false, prov, config.promptMode || 'auto');
+                const fbMessages = visionMsgs.map(m => ({
+                    role: m.role,
+                    content: m.content,
+                }));
+                for (const c of visionCandidates) {
+                    const timeoutMs = 15000;
+                    try {
+                        console.log(LOG, `Trying vision provider: ${c.label}`);
+                        const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+                        const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
+                        if (result.message) {
+                            console.log(LOG, `Vision fallback succeeded with ${c.label}`);
+                            return {
+                                message: result.message,
+                                toolCalls: result.toolCalls,
+                                provider: PROVIDER_DEFAULTS[c.provider]?.label || c.provider,
+                                model: c.model,
+                            };
+                        }
+                    }
+                    catch (err) {
+                        const e = err;
+                        console.log(LOG, `Vision fallback failed with ${c.label}: ${e.message?.slice(0, 100)}`);
+                    }
+                }
+            }
+            // All vision providers failed — return hint
             const msg = 'Image understanding needs a vision-capable provider. Try Gemini (gemini-2.5-flash) or OpenRouter with a vision model like google/gemini-2.5-flash:free.';
             return { message: msg, toolCalls: [], hint: 'Switch to a vision-capable provider to analyze images.' };
         }
