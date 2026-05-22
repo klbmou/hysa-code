@@ -1,14 +1,14 @@
-# HYSA Code v0.5
+# HYSA Code v0.5.1
 
 <div dir="rtl">
 
-## HYSA كود v0.5 - مساعد برمجة بالذكاء الاصطناعي
+## HYSA كود v0.5.1 - مساعد برمجة بالذكاء الاصطناعي
 
 أداة سطر أوامر مفتوحة المصدر لمساعدة المطورين في كتابة وتحرير الأكواد البرمجية باستخدام الذكاء الاصطناعي.
 تدعم 12 مزود مع وضع مجاني سحابي ومحلي.
 
 ```bash
-npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.5.0/hysa-code-0.5.0.tgz
+npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.5.1/hysa-code-0.5.1.tgz
 hysa
 ```
 
@@ -20,15 +20,23 @@ hysa
 It supports 12 AI providers across 4 tiers — **Free API Key** (sign-up required), **Local Free** (offline, no key), **Premium API** (paid), and **Experimental Free** (no-key, no guarantees).
 
 ```bash
-npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.5.0/hysa-code-0.5.0.tgz
+npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.5.1/hysa-code-0.5.1.tgz
 hysa
 ```
 
+> **v0.5.1 hotfix — Image understanding UX:**
+> - **Fixed vision fallback** — OpenRouter vision models are now tried first when current provider is OpenRouter (was only trying Gemini). Same-provider candidates are no longer incorrectly skipped.
+> - **Limited fallback attempts** — max 3 vision models tried per request (was up to 12), with shorter 10s timeouts.
+> - **Friendly error messages** — no more huge technical error dumps. When all vision models fail, users see a short message in their own language (Arabic or English) with no raw provider names.
+> - **Language matching** — Arabic users asking "اشرح" now get Arabic image descriptions and Arabic error messages across all features (images, PDFs, text files, vision fallback).
+> - **Cleaner chat layout** — centered 820px column, polished message bubbles, image cards displayed properly under user text, compact top bar, reduced visual noise.
+> - **Debug mode hides fallback noise** — fallback timeline events are collapsed by default and only visible in debug mode.
+>
 > **v0.5.0 improvements:**
 > - **Chat attachments** — attach text files, images, PDFs, and DOCX files in `#/chat`. Drag-and-drop or click to attach. Text files up to 500KB, images up to 5MB, PDF/DOCX up to 10MB.
 > - **PDF text extraction** — selectable-text PDFs are extracted in-browser using pdf.js. Extracted text is sent as context to the AI for analysis. Scanned/image-based PDFs are detected but OCR is not yet supported.
 > - **Image understanding** — attach images for AI analysis. Requires a vision-capable provider (Gemini, OpenRouter with vision models, OpenAI GPT-4o, Anthropic Claude). Non-vision providers automatically fall back to a vision-capable provider. If no vision provider is available, a clear hint is shown instead of a generic error.
-> - **Vision provider fallback** — when your current provider cannot process images, HYSA automatically tries Gemini → OpenRouter vision models → OpenAI → Anthropic. If all fail, the user sees: *"Image understanding needs a vision-capable provider."*
+> - **Vision provider fallback** — when your current provider cannot process images, HYSA automatically tries Gemini, OpenRouter vision models, OpenAI, and Anthropic. If all fail, a clear hint is shown.
 > - **Files workspace** — new `#/files` tab provides a standalone file browser and code editor for quick file access without starting a chat.
 > - **Cleaner chat layout** — compact message headers, improved attachment cards with colored file-type badges, streamlined composer with quick-action buttons (Summarize, Explain, Describe image, etc.).
 > - **Hardened secret logging** — no API key characters are ever printed in logs or diagnostics. Doctor shows only `[configured]` or `[not set]`. Gemini errors print truncated messages, not full stack traces.
@@ -271,7 +279,7 @@ hysa doctor --provider puter
 - **Chat attachments** — attach text files (500KB max), images (5MB max), PDFs (10MB max), DOCX files (10MB max)
 - **PDF text extraction** — selectable-text PDFs extracted in-browser via pdf.js; scanned PDFs detected (OCR not yet supported)
 - **Image understanding** — attach images for AI analysis; requires vision-capable provider (Gemini, OpenRouter vision, GPT-4o, Claude)
-- **Vision provider fallback** — non-vision providers automatically route to Gemini → OpenRouter → OpenAI → Anthropic
+- **Vision provider fallback** — non-vision providers automatically route to OpenRouter vision → Gemini vision models
 - **Smart project detection** — auto-detects Next.js, React, Express, Django, Go, Rust, and more
 - **Context-aware** — knows your project structure, key files, and entry points
 - **Multi-step reasoning** — AI reads, analyzes, then edits in one turn

@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.5.1] - 2025-05-23
+
+### Fixed
+- Automatic vision fallback now tries OpenRouter vision models first when current provider is OpenRouter
+- Same-provider vision candidates no longer incorrectly skipped (was returning 1, now returns up to 3)
+- Vision fallback limited to max 3 attempts with 10s timeout per attempt
+- Huge technical error dumps removed from normal chat — shows friendly Arabic/English failure messages instead
+- Fallback timeline events hidden from chat UI unless debug mode is on
+- Language matching now applies to image analysis, PDF summaries, text attachments, and all vision responses
+- Chat layout redesigned: centered 820px column, polished bubbles, proper image card layout below user text
+
+### Added
+- Friendly vision failure messages in user's language:
+  - Arabic: "لم أستطع تحليل الصورة الآن لأن نماذج الرؤية المتاحة غير متوفرة..."
+  - English: "I couldn't analyze the image right now because the available vision models are unavailable..."
+- Debug mode shows compact "Tried X vision models:" list with per-model reasons
+- Collapsible fallback detail events in debug mode
+- `getResponseLanguage()` helper for language-matched error messages
+- System prompt instructions for language matching and concise image analysis
+- Document-aware quick actions in composer (when attachments present)
+
+### Changed
+- Vision fallback timeout reduced from 15s to 10s per model
+- Vision candidates prioritized: OpenRouter vision → Gemini (not Gemini → OpenRouter)
+- `getVisionFallbackCandidates()` now checks only 3 preferred models instead of iterating all provider model lists
+- Quick actions switch between document actions and code actions based on attachment presence
+- Composer centered within chat column (same max-width as messages)
+- Top bar reduced to compact height with cleaner styling
+
 ## [0.5.0] - 2025-05-22
 
 ### Added
