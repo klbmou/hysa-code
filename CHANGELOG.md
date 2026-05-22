@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.5.0] - 2025-05-22
+
+### Added
+- Chat attachments inside `#/chat` — drag-and-drop or click to attach files
+- Text file understanding — attach `.txt`, `.md`, `.json`, `.js`, `.ts`, `.tsx`, `.jsx`, `.css`, `.html` files
+- PDF text extraction in browser using pdf.js — extracted text sent as context to AI
+- PDF analysis via extracted text context — AI reads and answers questions about PDF content
+- Image attachment previews — thumbnails in composer and expanded in chat
+- Vision-capable provider routing — images sent to non-vision providers automatically fall back to Gemini, OpenRouter vision models, OpenAI, or Anthropic
+- Non-vision providers return instant hint when no vision provider is available
+- Files workspace at `#/files` — stand-alone file browser and editor
+- Cleaner chat layout — compact message headers, improved attachment display
+- Compact attachment UI — file chips with colored extension badges in composer
+
+### Changed
+- Version bumped to 0.5.0
+- Secret logging hardened — no API key characters printed in logs or diagnostics
+- `.gitignore` now covers all `.env.*` patterns and `.envrc`
+- Improved attachment size limits: text 500KB, images 5MB, PDF/DOCX 10MB
+
+### Fixed
+- Log statements no longer leak partial API key strings
+- Gemini error logs no longer print full stack traces
+- Doctor diagnostics show only `[configured]` status, never key fragments
+
 ## [0.2.0] - 2025-05-18
 
 ### Added

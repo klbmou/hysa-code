@@ -1,14 +1,14 @@
-# HYSA Code v0.4
+# HYSA Code v0.5
 
 <div dir="rtl">
 
-## HYSA كود v0.4 - مساعد برمجة بالذكاء الاصطناعي
+## HYSA كود v0.5 - مساعد برمجة بالذكاء الاصطناعي
 
 أداة سطر أوامر مفتوحة المصدر لمساعدة المطورين في كتابة وتحرير الأكواد البرمجية باستخدام الذكاء الاصطناعي.
-تدعم 7 مزودين مع وضع مجاني سحابي ومحلي.
+تدعم 12 مزود مع وضع مجاني سحابي ومحلي.
 
 ```bash
-npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.4.0/hysa-code-0.4.0.tgz
+npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.5.0/hysa-code-0.5.0.tgz
 hysa
 ```
 
@@ -20,11 +20,20 @@ hysa
 It supports 12 AI providers across 4 tiers — **Free API Key** (sign-up required), **Local Free** (offline, no key), **Premium API** (paid), and **Experimental Free** (no-key, no guarantees).
 
 ```bash
-npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.4.0/hysa-code-0.4.0.tgz
+npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.5.0/hysa-code-0.5.0.tgz
 hysa
 ```
 
-> **v0.4.0 improvements:**
+> **v0.5.0 improvements:**
+> - **Chat attachments** — attach text files, images, PDFs, and DOCX files in `#/chat`. Drag-and-drop or click to attach. Text files up to 500KB, images up to 5MB, PDF/DOCX up to 10MB.
+> - **PDF text extraction** — selectable-text PDFs are extracted in-browser using pdf.js. Extracted text is sent as context to the AI for analysis. Scanned/image-based PDFs are detected but OCR is not yet supported.
+> - **Image understanding** — attach images for AI analysis. Requires a vision-capable provider (Gemini, OpenRouter with vision models, OpenAI GPT-4o, Anthropic Claude). Non-vision providers automatically fall back to a vision-capable provider. If no vision provider is available, a clear hint is shown instead of a generic error.
+> - **Vision provider fallback** — when your current provider cannot process images, HYSA automatically tries Gemini → OpenRouter vision models → OpenAI → Anthropic. If all fail, the user sees: *"Image understanding needs a vision-capable provider."*
+> - **Files workspace** — new `#/files` tab provides a standalone file browser and code editor for quick file access without starting a chat.
+> - **Cleaner chat layout** — compact message headers, improved attachment cards with colored file-type badges, streamlined composer with quick-action buttons (Summarize, Explain, Describe image, etc.).
+> - **Hardened secret logging** — no API key characters are ever printed in logs or diagnostics. Doctor shows only `[configured]` or `[not set]`. Gemini errors print truncated messages, not full stack traces.
+>
+> Previous v0.4.0 improvements:
 > - **Safe streaming** — simple chat responses stream tokens live with no tool interference. CTRL+C aborts mid-stream cleanly.
 > - **Cleaner CLI interface** — removed broken ASCII box header, simplified tool events (READ/EDIT/RUN), added "You:" section separation, no duplicate "HYSA:" output after streaming.
 > - **Cleaner fallback display** — grouped repeated fallback lines, clear "Rate limited. Trying next..." and "OK Switched to..." messages.
@@ -146,7 +155,8 @@ Many free models are listed in the [OpenRouter Logs](https://openrouter.ai/logs)
 2. Create a free API key
 3. Run `hysa`, select **Free API Key**, choose Gemini
 
-**Limits:** 60 requests per minute, daily quota applies. 503 errors are common on overload.
+**Vision support:** Gemini supports image understanding. Attach images in `#/chat` and ask questions about them.
+**Limits:** 60 requests per minute, daily quota applies (≈20 requests/day on free tier). 503/429 errors are common on overload.
 
 ### 🖥️  Ollama (Local Free)
 
@@ -258,6 +268,10 @@ hysa doctor --provider puter
 - **Free API Key tier** — OpenRouter, Groq, DeepSeek, Gemini (free key, no local models)
 - **Local Free** — Ollama, LM Studio, Jan, llama.cpp (no API key, offline capable)
 - **Experimental Free** — no-key providers for testing, not production-safe
+- **Chat attachments** — attach text files (500KB max), images (5MB max), PDFs (10MB max), DOCX files (10MB max)
+- **PDF text extraction** — selectable-text PDFs extracted in-browser via pdf.js; scanned PDFs detected (OCR not yet supported)
+- **Image understanding** — attach images for AI analysis; requires vision-capable provider (Gemini, OpenRouter vision, GPT-4o, Claude)
+- **Vision provider fallback** — non-vision providers automatically route to Gemini → OpenRouter → OpenAI → Anthropic
 - **Smart project detection** — auto-detects Next.js, React, Express, Django, Go, Rust, and more
 - **Context-aware** — knows your project structure, key files, and entry points
 - **Multi-step reasoning** — AI reads, analyzes, then edits in one turn
@@ -520,13 +534,16 @@ Open http://localhost:8787 in your browser.
 
 - **File tree** (left) — browse all project files, click to edit
 - **Code editor** (center) — Monaco Editor with syntax highlighting, language auto-detection, and save
-- **AI Chat** (right) — full AI conversation panel, same provider/model as CLI
+- **AI Chat** (center) — full AI conversation panel, same provider/model as CLI
+- **Files workspace** at `#/files` — stand-alone file browser and editor
+- **Chat attachments** — attach text, images, PDFs, DOCX files via drag-and-drop or file picker
+- **Image previews** — thumbnails in composer, expanded images in chat messages
+- **PDF extraction** — selectable-text PDFs are extracted and sent as AI context
 - **Bottom panel** with three tabs:
   - **Diff** — review file changes before applying (Apply / Reject buttons)
   - **Command** — approve or cancel shell commands proposed by the AI
   - **Activity** — tool call log (reads, edits, commands)
 - **Top bar** — current provider, model, tier, git branch, YOLO toggle
-- **AI Chat** (center) — full AI conversation panel, same provider/model as CLI
 
 ### Safety
 
