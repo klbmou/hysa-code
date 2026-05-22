@@ -1,14 +1,14 @@
-# HYSA Code v0.3
+# HYSA Code v0.4
 
 <div dir="rtl">
 
-## HYSA كود v0.3 - مساعد برمجة بالذكاء الاصطناعي
+## HYSA كود v0.4 - مساعد برمجة بالذكاء الاصطناعي
 
 أداة سطر أوامر مفتوحة المصدر لمساعدة المطورين في كتابة وتحرير الأكواد البرمجية باستخدام الذكاء الاصطناعي.
 تدعم 7 مزودين مع وضع مجاني سحابي ومحلي.
 
 ```bash
-npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.3.0/hysa-code-0.3.0.tgz
+npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.4.0/hysa-code-0.4.0.tgz
 hysa
 ```
 
@@ -20,17 +20,19 @@ hysa
 It supports 12 AI providers across 4 tiers — **Free API Key** (sign-up required), **Local Free** (offline, no key), **Premium API** (paid), and **Experimental Free** (no-key, no guarantees).
 
 ```bash
-npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.3.0/hysa-code-0.3.0.tgz
+npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.4.0/hysa-code-0.4.0.tgz
 hysa
 ```
 
-> **v0.3.0 improvements:**
-> - **Provider fallback grouping** — fallback candidates grouped by provider, not by model. One provider is tried with all its models before switching providers.
-> - **Auth error classification** — 401/403/authentication errors correctly categorized (previously misclassified as timeouts), with billing/insufficient quota detection.
-> - **Prompt compression & minimal prompt** — simple questions (≤60 chars, no action keywords) get a ~100-token minimal prompt instead of the full system prompt. Auto-detected per query.
-> - **Local provider diagnostics** — `hysa doctor --provider ollama`, `--provider local-openai`, `--provider llama-cpp` with server unreachable, model missing, and reachable status.
-> - **Local setup guide** — `hysa local setup` prints setup instructions for Ollama, HYSA AI, LM Studio, and llama.cpp.
-> - **Pre-flight local provider checks** — before sending a request to a local provider, the server is pinged (3s timeout). If unreachable, you get a setup hint instantly instead of waiting for a 30s timeout.
+> **v0.4.0 improvements:**
+> - **Safe streaming** — simple chat responses stream tokens live with no tool interference. CTRL+C aborts mid-stream cleanly.
+> - **Cleaner CLI interface** — removed broken ASCII box header, simplified tool events (READ/EDIT/RUN), added "You:" section separation, no duplicate "HYSA:" output after streaming.
+> - **Cleaner fallback display** — grouped repeated fallback lines, clear "Rate limited. Trying next..." and "OK Switched to..." messages.
+> - **Faster fallback retries** — non-primary fallback models get 0 retries (no more 12s timeouts per model). OpenRouter model fallback limited to 3 attempts.
+> - **Improved file discovery** — auto-resolves common file paths (`index.html`, `public/index.html`, `src/App.tsx`). Extension fallbacks (`App.tsx` → `App.jsx`). Web monorepo support (`web/index.html`, `web/src/App.tsx`).
+> - **Generated output protection** — `dist/`, `web/dist/`, `build/`, `out/`, `.next/`, `coverage/` are excluded from edit discovery. Edits to generated files blocked unless YOLO mode is enabled.
+> - **App title tasks** — "change the app title" correctly finds `web/index.html` or the right source file, asks for the new title locally without a second provider call, then applies the edit.
+> - **Streaming for all providers** — OpenAI and Anthropic now support streaming via SDK. All 9 providers with proxy support have `sendMessageStream`.
 
 ## Quick Start
 
