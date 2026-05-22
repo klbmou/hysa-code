@@ -1,5 +1,28 @@
 import { getModePromptAddendum } from '../agent/modes.js';
 import { COMPACT_PROMPT_PROVIDERS } from '../config/keys.js';
+// ── Mode resolution ──────────────────────────────────
+export function resolvePromptMode(promptMode = 'auto', provider, isSimple) {
+    const env = process.env.HYSA_PROMPT_MODE;
+    if (env && ['full', 'compact', 'minimal', 'auto'].includes(env))
+        promptMode = env;
+    if (promptMode !== 'auto')
+        return promptMode;
+    if (isSimple)
+        return 'minimal';
+    if (provider && COMPACT_PROMPT_PROVIDERS.includes(provider))
+        return 'compact';
+    return 'full';
+}
+// ── Minimal prompt (simple questions) ────────────────
+export function buildMinimalSystemPrompt() {
+    return [
+        `You are HYSA Code, a coding assistant.`,
+        `Answer the user's question clearly and concisely.`,
+        `Do not use tools unless the user explicitly asks you to read, edit, or run something.`,
+        `Keep your response brief.`,
+    ].join('\n');
+}
+// ── Compact prompt (local / experimental providers) ──
 export function buildCompactSystemPrompt(projectInfo) {
     const parts = [];
     parts.push(`You are HYSA Code, a coding assistant.`);
@@ -25,20 +48,8 @@ Rules:
 - Always read a file before editing it.`);
     return parts.join('\n');
 }
-export function buildSystemPrompt(projectInfo, agentMode, lightMode, provider, promptMode) {
-    const envOveride = process.env.HYSA_PROMPT_MODE;
-    if (envOveride && ['full', 'compact', 'auto'].includes(envOveride)) {
-        promptMode = envOveride;
-    }
-    const effectiveMode = promptMode === 'auto' || !promptMode
-        ? (provider && COMPACT_PROMPT_PROVIDERS.includes(provider) ? 'compact' : 'full')
-        : promptMode;
-    if (effectiveMode === 'compact') {
-        return buildCompactSystemPrompt(projectInfo ? { type: projectInfo.type, entryPoints: projectInfo.entryPoints, fileCount: projectInfo.fileCount } : undefined);
-    }
-    if (lightMode) {
-        return buildCompactSystemPrompt(projectInfo ? { type: projectInfo.type, entryPoints: projectInfo.entryPoints, fileCount: projectInfo.fileCount } : undefined);
-    }
+// ── Full prompt (complex / edit / tool tasks) ─────────
+function buildFullSystemPrompt(projectInfo, agentMode) {
     const parts = [];
     parts.push(`You are HYSA Code, an AI coding assistant that helps users with their codebase.`);
     if (projectInfo) {
@@ -173,6 +184,17 @@ Risk: The calculateTotal function is used in 3 other files, verify they still wo
         parts.push(getModePromptAddendum(agentMode));
     }
     return parts.join('\n');
+}
+// ── Public API ───────────────────────────────────────
+export function buildSystemPrompt(projectInfo, agentMode, lightMode, provider, promptMode) {
+    const resolved = resolvePromptMode(promptMode, provider);
+    if (resolved === 'minimal') {
+        return buildMinimalSystemPrompt();
+    }
+    if (resolved === 'compact' || lightMode) {
+        return buildCompactSystemPrompt(projectInfo ? { type: projectInfo.type, entryPoints: projectInfo.entryPoints, fileCount: projectInfo.fileCount } : undefined);
+    }
+    return buildFullSystemPrompt(projectInfo, agentMode);
 }
 export const SYSTEM_PROMPT = buildSystemPrompt();
 //# sourceMappingURL=system.js.map

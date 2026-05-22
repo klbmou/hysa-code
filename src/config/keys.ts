@@ -36,7 +36,7 @@ export interface HysaConfig {
   agentMode?: AgentMode;
   debug?: boolean;
   lightMode?: boolean;
-  promptMode?: 'full' | 'compact' | 'auto';
+  promptMode?: 'full' | 'compact' | 'minimal' | 'auto';
 }
 
 export const PROVIDER_CATEGORIES: Record<ProviderType, ProviderCategory> = {

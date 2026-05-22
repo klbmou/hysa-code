@@ -32,6 +32,7 @@ export interface SessionUsage {
   lastRequestDuration?: number;
   lastRequestTimestamp?: number;
   lastRequestTokens?: number;
+  lastPromptMode?: string;
   lastError?: string;
   lastProvider?: string;
   lastModel?: string;
@@ -163,6 +164,12 @@ export function recordRequest(durationMs: number, tokens?: number): void {
   usage.lastRequestDuration = durationMs;
   usage.lastRequestTimestamp = Date.now();
   if (tokens !== undefined) usage.lastRequestTokens = tokens;
+  saveUsage(usage);
+}
+
+export function recordPromptMode(mode: string): void {
+  const usage = getUsage();
+  usage.lastPromptMode = mode;
   saveUsage(usage);
 }
 

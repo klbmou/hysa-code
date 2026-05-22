@@ -11,14 +11,14 @@ import { createClient, isOnlyGreeting, getCasualResponse, createSingleClient } f
 import { getProjectInfo, invalidateCache } from './context/builder.js';
 import { rankFiles } from './context/ranker.js';
 import { estimateTokens, truncateMessages } from './context/tokens.js';
-import { buildSystemPrompt } from './prompts/system.js';
+import { buildSystemPrompt, resolvePromptMode } from './prompts/system.js';
 import { isProtectedFilePath, PROTECTED_FILE_MESSAGE, normalizeToolParams, containsOnlyToolSyntax, stripToolCallBlocks } from './ai/tools.js';
 import { readFile } from './files/reader.js';
 import { writeFileWithBackup, previewEdit } from './files/writer.js';
 import { Spinner } from './utils/spinner.js';
 import { detectSecrets } from './utils/secrets.js';
 import { getGitInfo } from './utils/git.js';
-import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo, getProviderHealth, clearProviderHealth, getUsage } from './utils/session.js';
+import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo, getProviderHealth, clearProviderHealth, getUsage, recordPromptMode } from './utils/session.js';
 import { grepSearch, findFiles } from './utils/searcher.js';
 import { classifyCommand } from './utils/commands.js';
 import { ALL_MODES, MODE_LABELS, MODE_DESCRIPTIONS } from './agent/modes.js';
@@ -642,6 +642,16 @@ function detectPendingEdit(aiMsg, projectInfo) {
         return { filePath: projectInfo.entryPoints[0], content: mainBlock.content };
     }
     return null;
+}
+// ── Simple question detection ──────────────────────────
+function isSimpleQuestion(text) {
+    const trimmed = text.trim().toLowerCase();
+    if (trimmed.length > 60)
+        return false;
+    const actionWords = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe|apply|remove|delete|rename|move|copy)\b/i;
+    if (actionWords.test(trimmed))
+        return false;
+    return true;
 }
 async function chatLoop(initialConfig, initialYolo = false) {
     let config = initialConfig;
@@ -1430,13 +1440,24 @@ async function chatLoop(initialConfig, initialYolo = false) {
             continue;
         // Track the task in session
         addTask(trimmed);
+        // ── Detect question type and rebuild prompt ─────
+        const isSimpleQ = isSimpleQuestion(trimmed);
+        const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, isSimpleQ);
+        systemPrompt = buildSystemPrompt({
+            type: projectInfo.type,
+            entryPoints: projectInfo.entryPoints,
+            configFiles: projectInfo.configFiles,
+            fileCount: projectInfo.fileCount,
+            tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
+        }, currentAgentMode, lightActive, config.currentProvider, resolvedMode);
+        recordPromptMode(resolvedMode);
         const contextStartTime = Date.now();
-        // Light mode: skip file context building, use minimal history
+        // Build context and messages
         let userMessage = trimmed;
         let allMessages;
         let wasTruncated = false;
         if (lightActive) {
-            // Light mode: use aggressive token limit (2000 max)
+            // Light mode: skip file context, aggressive truncation
             const { messages: safeMessages } = truncateMessages([...messages], 2000);
             allMessages = [
                 ...safeMessages,
@@ -1444,8 +1465,17 @@ async function chatLoop(initialConfig, initialYolo = false) {
             ];
             wasTruncated = allMessages.length < messages.length + 1;
         }
+        else if (isSimpleQ) {
+            // Simple question: skip file context, normal history limit
+            const { messages: safeMessages } = truncateMessages([...messages]);
+            allMessages = [
+                ...safeMessages,
+                { role: 'user', content: userMessage },
+            ];
+            wasTruncated = allMessages.length < messages.length + 1;
+        }
         else {
-            // Rank relevant files for this query
+            // Complex query: rank and include relevant files
             const ranked = rankFiles(projectInfo.importantFiles, trimmed, 5);
             const allFiles = projectInfo.tree.split('\n').filter(f => !f.endsWith('/'));
             const rankedAll = rankFiles(allFiles, trimmed, 8);
@@ -1489,6 +1519,7 @@ async function chatLoop(initialConfig, initialYolo = false) {
             const historyTokens = allMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
             const totalTokens = systemTokens + historyTokens;
             console.log(pc.dim(`  [debug] Context build time: ${contextBuildTime}ms`));
+            console.log(pc.dim(`  [debug] Prompt mode: ${resolvedMode}`));
             console.log(pc.dim(`  [debug] System prompt: ~${systemTokens} tokens`));
             console.log(pc.dim(`  [debug] History/messages: ~${historyTokens} tokens`));
             console.log(pc.dim(`  [debug] Total estimated: ~${totalTokens} tokens`));
@@ -1505,12 +1536,8 @@ async function chatLoop(initialConfig, initialYolo = false) {
         const requestAbortController = new AbortController();
         cancelThinking = () => { if (!requestAbortController.signal.aborted)
             requestAbortController.abort(); };
-        // Multi-step auto-continue loop: fewer steps for light mode, 1 for simple chat
-        const isSimpleChat = trimmed.trim().length < 20
-            && !trimmed.includes('/')
-            && !trimmed.includes('.')
-            && !trimmed.match(/\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe)\b/i);
-        const MAX_STEPS = isSimpleChat ? 1 : (lightActive ? 2 : 5);
+        // Multi-step auto-continue loop: fewer steps for light/simple mode
+        const MAX_STEPS = lightActive ? 2 : (isSimpleQ ? 1 : 5);
         let steps = 0;
         let lastResponse = null;
         let stepError = null;

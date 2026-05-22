@@ -104,6 +104,11 @@ export function recordRequest(durationMs, tokens) {
         usage.lastRequestTokens = tokens;
     saveUsage(usage);
 }
+export function recordPromptMode(mode) {
+    const usage = getUsage();
+    usage.lastPromptMode = mode;
+    saveUsage(usage);
+}
 export function recordError(error, provider, model) {
     const usage = getUsage();
     usage.totalErrors++;

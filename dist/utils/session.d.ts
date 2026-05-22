@@ -23,6 +23,7 @@ export interface SessionUsage {
     lastRequestDuration?: number;
     lastRequestTimestamp?: number;
     lastRequestTokens?: number;
+    lastPromptMode?: string;
     lastError?: string;
     lastProvider?: string;
     lastModel?: string;
@@ -54,5 +55,6 @@ export declare function getLastProviderError(): string | null;
 export declare function saveUsage(data: SessionUsage): void;
 export declare function getUsage(): SessionUsage;
 export declare function recordRequest(durationMs: number, tokens?: number): void;
+export declare function recordPromptMode(mode: string): void;
 export declare function recordError(error: string, provider: string, model: string): void;
 //# sourceMappingURL=session.d.ts.map
