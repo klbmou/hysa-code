@@ -87,7 +87,8 @@ export function createGeminiClient(apiKey: string, model: string): AIClient {
           content = result.response.text();
         }
       } catch (err) {
-        console.log('[Gemini] Error details:', err instanceof Error ? err.stack : String(err));
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log('[Gemini] Error:', msg.slice(0, 200));
         throw err;
       }
 
@@ -136,7 +137,8 @@ export function createGeminiClient(apiKey: string, model: string): AIClient {
           }
         }
       } catch (err) {
-        console.log('[Gemini] Error details:', err instanceof Error ? err.stack : String(err));
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log('[Gemini] Error:', msg.slice(0, 200));
         throw err;
       }
 

@@ -72,7 +72,8 @@ export function createGeminiClient(apiKey, model) {
                 }
             }
             catch (err) {
-                console.log('[Gemini] Error details:', err instanceof Error ? err.stack : String(err));
+                const msg = err instanceof Error ? err.message : String(err);
+                console.log('[Gemini] Error:', msg.slice(0, 200));
                 throw err;
             }
             return handleContent(content);
@@ -111,7 +112,8 @@ export function createGeminiClient(apiKey, model) {
                 }
             }
             catch (err) {
-                console.log('[Gemini] Error details:', err instanceof Error ? err.stack : String(err));
+                const msg = err instanceof Error ? err.message : String(err);
+                console.log('[Gemini] Error:', msg.slice(0, 200));
                 throw err;
             }
             onEvent({ type: 'done', fullText: stripToolCallBlocks(fullContent), toolCalls: parseToolCalls(fullContent) });

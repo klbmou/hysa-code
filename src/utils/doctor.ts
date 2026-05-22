@@ -123,7 +123,7 @@ async function checkOpenRouterDetailed(apiKey: string, debug: boolean): Promise<
     results.push({ name: 'OpenRouter Key Format', status: 'error', message: cleaned.error || 'Invalid key' });
     return results;
   }
-  results.push({ name: 'OpenRouter Key Format', status: 'ok', message: `Valid (${cleaned.key.slice(0, 6)}...${cleaned.key.slice(-4)})` });
+  results.push({ name: 'OpenRouter Key Format', status: 'ok', message: 'Valid' });
 
   try {
     const headers: Record<string, string> = {
@@ -724,9 +724,9 @@ export async function runDoctor(debug = false, provider?: string): Promise<void>
   }
 
   if (debug) {
-    console.log(pc.dim(`\n  Debug info: Current provider: ${config?.currentProvider}, model: ${config?.currentModel}`));
+      console.log(pc.dim(`\n  Debug info: Current provider: ${config?.currentProvider}, model: ${config?.currentModel}`));
     if (config?.apiKeys.openrouter) {
-      console.log(pc.dim(`  OpenRouter key: ${config.apiKeys.openrouter.length > 10 ? config.apiKeys.openrouter.slice(0, 6) + '...' + config.apiKeys.openrouter.slice(-4) : '[set]'}`));
+      console.log(pc.dim(`  OpenRouter key: [configured]`));
     }
   }
 

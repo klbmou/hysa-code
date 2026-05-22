@@ -401,8 +401,7 @@ async function handleToolCall(toolCall, yolo = false, debug = false) {
             }
             const secrets = detectSecrets(content);
             if (secrets.length > 0) {
-                spinner.fail(`ERR  Secrets detected in ${foundPath}!`);
-                console.log(`  Found: ${secrets.join(', ')}`);
+                spinner.fail(`ERR  ${secrets.length} potential secret(s) detected in ${foundPath}!`);
                 return `Blocked: ${foundPath} contains potential secrets.`;
             }
             if (foundPath !== filePath) {
