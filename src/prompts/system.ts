@@ -213,6 +213,14 @@ Risk: The calculateTotal function is used in 3 other files, verify they still wo
   parts.push(`- CRITICAL: If you want to modify a file, you MUST use edit_file tool.`);
   parts.push(`  Never say "I will edit" without calling the edit_file tool immediately after.`);
 
+  parts.push(`\n## File Discovery`);
+  parts.push(`When you need to read or edit a file but the first path you try does not exist:`);
+  parts.push(`- Check the entry points and config files listed in Project Context above.`);
+  parts.push(`- For HTML files, try: index.html, public/index.html, app/index.html, src/index.html`);
+  parts.push(`- For React components, try: src/App.tsx, src/App.jsx, src/main.tsx, src/main.jsx`);
+  parts.push(`- The system will automatically retry common alternatives if the first path fails.`);
+  parts.push(`- Do NOT ask the user for the file path unless all alternatives above have failed.`);
+
   if (agentMode) {
     parts.push(getModePromptAddendum(agentMode));
   }

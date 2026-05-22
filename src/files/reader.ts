@@ -26,6 +26,31 @@ export function readFile(filePath: string): string | null {
   }
 }
 
+const COMMON_PARENT_DIRS = ['', 'public', 'app', 'src', 'client/src', 'client'];
+
+const WELL_KNOWN_FILES = new Set([
+  'index.html',
+  'App.tsx', 'App.jsx',
+  'main.tsx', 'main.jsx',
+  'vite.config.ts', 'vite.config.js',
+]);
+
+export function resolveFileReadPath(filePath: string): string[] {
+  const paths: string[] = [filePath];
+  const basename = filePath.split(/[\/\\]/).pop() || '';
+
+  if (WELL_KNOWN_FILES.has(basename)) {
+    for (const dir of COMMON_PARENT_DIRS) {
+      const candidate = dir ? `${dir}/${basename}` : basename;
+      if (!paths.includes(candidate)) {
+        paths.push(candidate);
+      }
+    }
+  }
+
+  return paths;
+}
+
 export function shouldIgnore(filePath: string, rootDir: string): boolean {
   const rel = relative(rootDir, filePath).replace(/\\/g, '/');
   const parts = rel.split('/');

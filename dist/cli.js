@@ -13,7 +13,7 @@ import { rankFiles } from './context/ranker.js';
 import { estimateTokens, truncateMessages } from './context/tokens.js';
 import { buildSystemPrompt, resolvePromptMode } from './prompts/system.js';
 import { isProtectedFilePath, PROTECTED_FILE_MESSAGE, normalizeToolParams, containsOnlyToolSyntax, stripToolCallBlocks } from './ai/tools.js';
-import { readFile } from './files/reader.js';
+import { readFile, resolveFileReadPath } from './files/reader.js';
 import { writeFileWithBackup, previewEdit } from './files/writer.js';
 import { Spinner } from './utils/spinner.js';
 import { detectSecrets } from './utils/secrets.js';
@@ -401,21 +401,35 @@ async function handleToolCall(toolCall, yolo = false, debug = false) {
             if (!filePath)
                 return 'Error: missing filePath parameter';
             const spinner = new Spinner();
-            spinner.start(`📖 Reading: ${filePath}`);
-            const content = readFile(filePath);
+            const pathsToTry = resolveFileReadPath(filePath);
+            spinner.start(`📖 Reading: ${pathsToTry.length > 1 ? `${pathsToTry[0]} (trying ${pathsToTry.length} paths)` : filePath}`);
+            let foundPath = '';
+            let content = null;
+            for (const tryPath of pathsToTry) {
+                content = readFile(tryPath);
+                if (content !== null) {
+                    foundPath = tryPath;
+                    break;
+                }
+            }
             if (content === null) {
                 spinner.fail(`File not found: ${filePath}`);
                 return `Error: file not found: ${filePath}`;
             }
             const secrets = detectSecrets(content);
             if (secrets.length > 0) {
-                spinner.fail(`⚠ Secrets detected in ${filePath}! Not sending to AI.`);
+                spinner.fail(`⚠ Secrets detected in ${foundPath}! Not sending to AI.`);
                 console.log(pc.red(`  Found: ${secrets.join(', ')}`));
-                return `Blocked: ${filePath} contains potential secrets.`;
+                return `Blocked: ${foundPath} contains potential secrets.`;
             }
-            spinner.succeed(`Read ${filePath} (${content.split('\n').length} lines)`);
-            addRecentFile(filePath);
-            return `Content of ${filePath}:\n\`\`\`\n${content}\n\`\`\``;
+            if (foundPath !== filePath) {
+                spinner.succeed(`Read ${foundPath} (auto-resolved from ${filePath})`);
+            }
+            else {
+                spinner.succeed(`Read ${filePath} (${content.split('\n').length} lines)`);
+            }
+            addRecentFile(foundPath);
+            return `Content of ${foundPath}:\n\`\`\`\n${content}\n\`\`\``;
         }
         case 'edit_file': {
             const filePath = params.filePath;
