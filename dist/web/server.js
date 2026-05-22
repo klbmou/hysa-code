@@ -10,7 +10,7 @@ try {
 catch {
     _dirname = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
 }
-import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus } from './api.js';
+import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus } from './api.js';
 // Keep server reference alive so GC doesn't close it
 let _serverRef = null;
 export function getServerRef() { return _serverRef; }
@@ -109,6 +109,20 @@ export async function startWebServer(port = 8787) {
             const e = err;
             res.status(500).json({ error: e.message });
         }
+    });
+    app.post('/api/chat/stream', async (req, res) => {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.flushHeaders();
+        const writeEvent = (event) => {
+            try {
+                res.write(event);
+            }
+            catch { /* client disconnected */ }
+        };
+        await handleChatStream(req.body, writeEvent);
+        res.end();
     });
     app.post('/api/run', async (req, res) => {
         const { command } = req.body;

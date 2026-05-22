@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import type { AIClient, Message, AIResponse } from './types.js';
+import type { AIClient, Message, AIResponse, StreamEvent } from './types.js';
 import { parseToolCalls, stripToolCallBlocks } from './tools.js';
 
 function toGeminiRole(role: 'user' | 'assistant'): string {
@@ -23,16 +23,24 @@ function withTimeout<T>(promise: Promise<T>, ms: number, signal?: AbortSignal): 
 export function createGeminiClient(apiKey: string, model: string): AIClient {
   const genAI = new GoogleGenerativeAI(apiKey);
 
+  const handleContent = (content: string): AIResponse => ({
+    message: stripToolCallBlocks(content),
+    toolCalls: parseToolCalls(content),
+  });
+
+  const buildContents = (messages: Message[], systemPrompt: string) => {
+    const history = messages.slice(0, -1).map(m => ({
+      role: toGeminiRole(m.role),
+      parts: [{ text: m.content }],
+    }));
+    const lastMessage = messages[messages.length - 1];
+    return { history, lastMessage };
+  };
+
   return {
     async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
       const geminiModel = genAI.getGenerativeModel({ model });
-
-      const history = messages.slice(0, -1).map(m => ({
-        role: toGeminiRole(m.role),
-        parts: [{ text: m.content }],
-      }));
-
-      const lastMessage = messages[messages.length - 1];
+      const { history, lastMessage } = buildContents(messages, systemPrompt);
 
       let content: string;
 
@@ -59,10 +67,52 @@ export function createGeminiClient(apiKey: string, model: string): AIClient {
         content = result.response.text();
       }
 
-      return {
-        message: stripToolCallBlocks(content),
-        toolCalls: parseToolCalls(content),
-      };
+      return handleContent(content);
+    },
+
+    async sendMessageStream(messages: Message[], systemPrompt: string, onEvent: (event: StreamEvent) => void, signal?: AbortSignal): Promise<AIResponse> {
+      const geminiModel = genAI.getGenerativeModel({ model });
+      const { history, lastMessage } = buildContents(messages, systemPrompt);
+
+      let fullContent = '';
+
+      if (messages.length === 1) {
+        const result = await withTimeout(
+          geminiModel.generateContentStream({
+            contents: [{ role: 'user', parts: [{ text: lastMessage.content }] }],
+            systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+          }),
+          30000,
+          signal,
+        );
+        for await (const chunk of result.stream) {
+          const delta = chunk.text();
+          if (delta) {
+            fullContent += delta;
+            onEvent({ type: 'token', text: delta });
+          }
+        }
+      } else {
+        const chat = geminiModel.startChat({
+          history,
+          systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+        });
+        const result = await withTimeout(
+          chat.sendMessageStream(lastMessage.content),
+          30000,
+          signal,
+        );
+        for await (const chunk of result.stream) {
+          const delta = chunk.text();
+          if (delta) {
+            fullContent += delta;
+            onEvent({ type: 'token', text: delta });
+          }
+        }
+      }
+
+      onEvent({ type: 'done', fullText: stripToolCallBlocks(fullContent), toolCalls: parseToolCalls(fullContent) });
+      return handleContent(fullContent);
     },
   };
 }

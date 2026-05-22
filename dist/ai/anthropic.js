@@ -33,6 +33,34 @@ export function createAnthropicClient(apiKey, model) {
                 toolCalls,
             };
         },
+        async sendMessageStream(messages, systemPrompt, onEvent, signal) {
+            const ac = new AbortController();
+            const timer = setTimeout(() => ac.abort(), 30000);
+            if (signal) {
+                signal.addEventListener('abort', () => { clearTimeout(timer); ac.abort(); }, { once: true });
+            }
+            const stream = client.messages.stream({
+                model,
+                max_tokens: 4096,
+                system: systemPrompt,
+                messages: messages.map(m => ({ role: m.role, content: m.content })),
+            }, { signal: ac.signal });
+            let fullContent = '';
+            for await (const event of stream) {
+                if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+                    const delta = event.delta.text;
+                    if (delta) {
+                        fullContent += delta;
+                        onEvent({ type: 'token', text: delta });
+                    }
+                }
+            }
+            clearTimeout(timer);
+            const toolCalls = parseToolCalls(fullContent);
+            const cleanContent = stripToolCallBlocks(fullContent);
+            onEvent({ type: 'done', fullText: cleanContent, toolCalls });
+            return { message: cleanContent, toolCalls };
+        },
     };
 }
 //# sourceMappingURL=anthropic.js.map

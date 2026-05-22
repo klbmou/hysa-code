@@ -54,6 +54,13 @@ function isConfirmation(text: string): boolean {
   return CONFIRM_PATTERNS.some(p => p.test(text.trim()));
 }
 
+function isSimpleQuestion(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  if (trimmed.length > 60) return false;
+  const actionWords = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe|apply|remove|delete|rename|move|copy|refactor)\b/i;
+  return !actionWords.test(trimmed);
+}
+
 export default function App() {
   const [status, setStatus] = useState<StatusData | null>(null);
   const [files, setFiles] = useState<string[]>([]);
@@ -249,10 +256,13 @@ export default function App() {
     try {
       const chatMessages = buildMessages([...chatItems, userItem]);
       const payload = { messages: chatMessages };
-      console.debug(LOG, 'Sending to /api/chat, payload messages count:', chatMessages.length);
-      console.debug(LOG, 'Payload:', JSON.stringify(payload));
+      const lastUserContent = finalInput;
+      const useStream = isSimpleQuestion(lastUserContent);
+      const apiEndpoint = useStream ? '/api/chat/stream' : '/api/chat';
 
-      const res = await fetch('/api/chat', {
+      console.debug(LOG, `Sending to ${apiEndpoint}, messages:`, chatMessages.length, 'stream:', useStream);
+
+      const res = await fetch(apiEndpoint, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
         signal: controller.signal,
@@ -267,29 +277,158 @@ export default function App() {
         console.debug(LOG, 'Non-200 response body:', errText);
         if (debug) setLastRawResponse(errText || `Status ${res.status}`);
         const friendly = isRateLimited(errText) ? 'Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.' : `Web API error: ${res.status}`;
-        console.debug(LOG, 'Non-200 error:', friendly);
         addError(friendly);
         return;
       }
 
-      let data: any;
+      // ── Streaming path ──────────────────────────────
+      if (useStream) {
+        const reader = res.body?.getReader();
+        if (!reader) { addError('Stream not available'); return; }
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let accumulatedText = '';
+        let streamDone = false;
+        let streamError: string | null = null;
+        let finalToolCalls: any[] | null = null;
+        let streamItemId: string | null = null;
+
+        // Create a placeholder AI message that will be updated
+        const placeholderItem: ChatItem = { id: nextId(), kind: 'ai_msg', content: '' };
+        streamItemId = placeholderItem.id;
+        setChatItems(prev => [...prev, placeholderItem]);
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+            try {
+              const event = JSON.parse(trimmed.slice(6));
+
+              if (event.type === 'token') {
+                if (!accumulatedText) {
+                  setLoading(false);
+                }
+                accumulatedText += event.text;
+                setChatItems(prev => prev.map(item =>
+                  item.id === streamItemId && item.kind === 'ai_msg'
+                    ? { ...item, content: accumulatedText }
+                    : item
+                ));
+              } else if (event.type === 'done') {
+                streamDone = true;
+                accumulatedText = event.fullText || accumulatedText;
+                finalToolCalls = event.toolCalls || [];
+              } else if (event.type === 'error') {
+                streamError = event.message || 'Stream error';
+              }
+            } catch { /* skip malformed SSE */ }
+          }
+        }
+
+        // Process remaining buffer
+        if (buffer.trim()) {
+          const trimmed = buffer.trim();
+          if (trimmed.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(trimmed.slice(6));
+              if (event.type === 'token') {
+                accumulatedText += event.text;
+              } else if (event.type === 'done') {
+                streamDone = true;
+                accumulatedText = event.fullText || accumulatedText;
+                finalToolCalls = event.toolCalls || [];
+              } else if (event.type === 'error') {
+                streamError = event.message || 'Stream error';
+              }
+            } catch { /* skip */ }
+          }
+        }
+
+        // Finalize the streaming message
+        if (streamError) {
+          setChatItems(prev => prev.map(item =>
+            item.id === streamItemId && item.kind === 'ai_msg'
+              ? { ...item, content: accumulatedText || `Error: ${streamError}` }
+              : item
+          ));
+          addError(streamError);
+        } else if (streamDone) {
+          setChatItems(prev => prev.map(item =>
+            item.id === streamItemId && item.kind === 'ai_msg'
+              ? { ...item, content: accumulatedText }
+              : item
+          ));
+
+          // Handle tool calls from stream response
+          if (finalToolCalls && finalToolCalls.length > 0) {
+            const toolItems: ChatItem[] = [];
+            for (const tc of finalToolCalls) {
+              if (tc.type === 'read_file') {
+                const fp = tc.params.filePath || '';
+                toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'done', message: `Read ${fp}` });
+                openFile(fp);
+              } else if (tc.type === 'edit_file') {
+                const fp = tc.params.filePath || '';
+                const nc = tc.params.newContent || tc.params.content || '';
+                toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'edit', message: `Proposed edit for ${fp}` });
+                try {
+                  const previewRes = await fetch('/api/file/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: fp, content: nc }) });
+                  const previewData = await previewRes.json();
+                  toolItems.push({ id: nextId(), kind: 'diff_card', filePath: fp, content: nc, diff: previewData.diff || 'No diff available' });
+                } catch { toolItems.push({ id: nextId(), kind: 'diff_card', filePath: fp, content: nc, diff: 'Error generating diff' }); }
+              } else if (tc.type === 'execute_command') {
+                const cmd = tc.params.command || '';
+                toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'run', message: `Proposed command: ${cmd}` });
+                toolItems.push({ id: nextId(), kind: 'command_card', command: cmd });
+              } else {
+                toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'run', message: `Tool: ${tc.type}` });
+              }
+            }
+            if (toolItems.length > 0) {
+              setChatItems(prev => [...prev, ...toolItems]);
+            }
+          }
+        } else {
+          // Stream ended without done/error — likely incomplete
+          setChatItems(prev => prev.map(item =>
+            item.id === streamItemId && item.kind === 'ai_msg'
+              ? { ...item, content: accumulatedText || '(Incomplete response)' }
+              : item
+          ));
+        }
+        return;
+      }
+
+      // ── Non-streaming path (tool tasks, fallback) ──
       let rawText: string;
       try {
         rawText = await res.text();
-        console.debug(LOG, 'Raw response text:', rawText);
         if (debug) setLastRawResponse(rawText);
+      } catch {
+        addError('Failed to read response from API.');
+        return;
+      }
+
+      let data: any;
+      try {
         data = JSON.parse(rawText);
-        console.debug(LOG, 'Parsed JSON keys:', Object.keys(data).join(', '));
-        console.debug(LOG, 'Parsed JSON:', JSON.stringify(data));
-      } catch (parseErr: unknown) {
-        console.debug(LOG, 'JSON parse failed:', (parseErr as Error).message);
+      } catch {
         addError('Invalid response from API. Check provider configuration.');
         return;
       }
 
       if (data.error) {
         const errMsg = data.error.toLowerCase();
-        console.debug(LOG, 'API returned error:', data.error);
         if (errMsg.includes('rate') || errMsg.includes('limit') || errMsg.includes('quota') || errMsg.includes('429')) {
           addError('Provider is rate-limited. Try OpenRouter, Gemini, or HYSA AI.');
         } else if (errMsg.includes('timeout') || errMsg.includes('timed out')) {
@@ -304,11 +443,8 @@ export default function App() {
 
       const assistantText = getAssistantText(data);
       const hasToolCalls = data.toolCalls && data.toolCalls.length > 0;
-      console.debug(LOG, 'getAssistantText result:', JSON.stringify(assistantText));
-      console.debug(LOG, 'hasToolCalls:', hasToolCalls, data.toolCalls ? data.toolCalls.length : 0);
 
       if (!assistantText && !hasToolCalls) {
-        console.debug(LOG, 'Response has no assistant text and no toolCalls — showing error');
         addError('HYSA returned an empty response. Check provider configuration or try another provider.');
         return;
       }
@@ -316,7 +452,6 @@ export default function App() {
       const newItems: ChatItem[] = [];
 
       if (data.fallbackEvents && data.fallbackEvents.length > 0) {
-        console.debug(LOG, 'Fallback events:', JSON.stringify(data.fallbackEvents));
         for (const event of data.fallbackEvents) {
           newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event });
         }
@@ -327,12 +462,10 @@ export default function App() {
       }
 
       if (assistantText) {
-        console.debug(LOG, 'Adding assistant message:', JSON.stringify(assistantText));
         newItems.push({ id: nextId(), kind: 'ai_msg', content: assistantText });
       }
 
       if (hasToolCalls) {
-        console.debug(LOG, 'Tool calls count:', data.toolCalls.length);
         for (const tc of data.toolCalls as ToolCall[]) {
           if (tc.type === 'read_file') {
             const fp = tc.params.filePath || '';
@@ -357,9 +490,7 @@ export default function App() {
         }
       }
 
-      console.debug(LOG, 'Calling setChatItems with', newItems.length, 'new items');
       setChatItems(prev => [...prev, ...newItems]);
-      console.debug(LOG, 'setChatItems called successfully');
     } catch (err: unknown) {
       console.debug(LOG, 'Caught error:', err);
       if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }

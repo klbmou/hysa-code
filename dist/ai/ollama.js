@@ -15,18 +15,22 @@ export async function checkOllama(baseUrl) {
     }
 }
 export function createOllamaClient(baseUrl, model) {
+    const buildMessages = (messages, systemPrompt) => [
+        { role: 'system', content: systemPrompt },
+        ...messages.map(m => ({ role: m.role, content: m.content })),
+    ];
+    const handleResponse = (content) => ({
+        message: stripToolCallBlocks(content),
+        toolCalls: parseToolCalls(content),
+    });
     return {
         async sendMessage(messages, systemPrompt, signal) {
-            const ollamaMessages = [
-                { role: 'system', content: systemPrompt },
-                ...messages.map(m => ({ role: m.role, content: m.content })),
-            ];
             const res = await fetch(`${baseUrl}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     model,
-                    messages: ollamaMessages,
+                    messages: buildMessages(messages, systemPrompt),
                     stream: false,
                     options: { num_predict: 4096 },
                 }),
@@ -40,11 +44,54 @@ export function createOllamaClient(baseUrl, model) {
                 throw new Error(`Ollama error (${res.status}): ${text || res.statusText}`);
             }
             const data = await res.json();
-            const content = data.message?.content || '';
-            return {
-                message: stripToolCallBlocks(content),
-                toolCalls: parseToolCalls(content),
-            };
+            return handleResponse(data.message?.content || '');
+        },
+        async sendMessageStream(messages, systemPrompt, onEvent, signal) {
+            const res = await fetch(`${baseUrl}/api/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model,
+                    messages: buildMessages(messages, systemPrompt),
+                    stream: true,
+                    options: { num_predict: 4096 },
+                }),
+                signal: signal || AbortSignal.timeout(30000),
+            });
+            if (res.status === 404) {
+                throw new Error(`Model "${model}" not found. Run: ollama pull ${model}`);
+            }
+            if (!res.ok) {
+                const text = await res.text().catch(() => '');
+                throw new Error(`Ollama error (${res.status}): ${text || res.statusText}`);
+            }
+            const reader = res.body?.getReader();
+            if (!reader)
+                throw new Error('Ollama: no response body');
+            const decoder = new TextDecoder();
+            let fullContent = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done)
+                    break;
+                const lines = decoder.decode(value, { stream: true }).split('\n');
+                for (const line of lines) {
+                    if (!line.trim())
+                        continue;
+                    try {
+                        const json = JSON.parse(line);
+                        const delta = json.message?.content || '';
+                        if (delta) {
+                            fullContent += delta;
+                            onEvent({ type: 'token', text: delta });
+                        }
+                    }
+                    catch {
+                        // Skip malformed JSON lines
+                    }
+                }
+            }
+            return handleResponse(fullContent);
         },
     };
 }

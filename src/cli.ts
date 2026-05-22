@@ -11,7 +11,7 @@ import { fetchOpenRouterModels, filterFreeModels, formatModelsTable } from './ai
 import type { OpenRouterModel } from './ai/openrouter-models.js';
 import { getSettings, updateSettings, updateAgentMode } from './config/settings.js';
 import { createClient, isOnlyGreeting, getCasualResponse, createSingleClient } from './ai/client.js';
-import type { AIClient, Message, ToolCall, AIResponse, ToolType } from './ai/types.js';
+import type { AIClient, Message, ToolCall, AIResponse, ToolType, StreamEvent } from './ai/types.js';
 import { buildProjectTree, getProjectInfo, invalidateCache } from './context/builder.js';
 import type { ProjectInfo } from './context/builder.js';
 import { rankFiles } from './context/ranker.js';
@@ -1667,17 +1667,96 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       }
     }
 
-    const spinner = new Spinner();
     const requestStart = Date.now();
     thinkingCancelled = false;
     const provLabel = PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider;
-    spinner.start(`🤔 ${provLabel} / ${config.currentModel}...`);
 
     // Setup cancellation for this user request
     const requestAbortController = new AbortController();
     cancelThinking = () => { if (!requestAbortController.signal.aborted) requestAbortController.abort(); };
 
-    // Multi-step auto-continue loop: fewer steps for light/simple mode
+    // ── Streaming path for simple queries ──────────
+    const canStream = isSimpleQ && typeof client.sendMessageStream === 'function';
+    if (canStream) {
+      const spinnerStream = new Spinner();
+      spinnerStream.start(`🤔 ${provLabel} / ${config.currentModel}...`);
+
+      let streamedContent = '';
+      let streamError: Error | null = null;
+      let lastResponse: AIResponse | null = null;
+
+      try {
+        const signal = requestAbortController.signal;
+        const result = await client.sendMessageStream!(allMessages, systemPrompt, (event) => {
+          if (event.type === 'token') {
+            if (streamedContent.length === 0) {
+              spinnerStream.stop();
+              console.log(); // newline after spinner line
+            }
+            process.stdout.write(event.text);
+            streamedContent += event.text;
+          }
+        }, signal);
+
+        if (streamedContent.length > 0) {
+          console.log(); // final newline
+        } else {
+          spinnerStream.stop();
+        }
+
+        // ── Process stream result ─────────────────────
+        const cleanMessage = stripToolCallBlocks(result.message);
+        const displayMsg = cleanMessage;
+        if (streamedContent.length === 0 && displayMsg) {
+          console.log(`${pc.bold(pc.magenta('HYSA:'))} ${displayMsg}\n`);
+        }
+
+        const safeUserMsg = wasTruncated ? `${trimmed}\n\n[Note: Some older context was trimmed for token safety]` : trimmed;
+        allMessages.push({ role: 'assistant', content: result.message });
+        messages.push({ role: 'user', content: safeUserMsg }, { role: 'assistant', content: result.message });
+
+        // Handle any tool calls (unlikely for simple Q but safe)
+        if (result.toolCalls && result.toolCalls.length > 0) {
+          const spinnerTools = new Spinner();
+          spinnerTools.start('Executing tools...');
+          for (const toolCall of result.toolCalls) {
+            await handleToolCall(toolCall, yoloMode, !!config.debug);
+          }
+          spinnerTools.succeed('Tools executed');
+        }
+
+        lastResponse = result;
+      } catch (err: unknown) {
+        const e = err as Error;
+        streamError = e;
+
+        if (streamedContent.length > 0) {
+          console.log();
+        } else {
+          spinnerStream.stop();
+        }
+
+        if (thinkingCancelled) {
+          console.log(pc.dim('\n  (Cancelled.)\n'));
+        } else {
+          console.log(pc.red(`\n  ${e.message || 'Stream error'}\n`));
+        }
+        lastResponse = null;
+      }
+
+      // Cleanup
+      cancelThinking = null;
+      thinkingPromise = null;
+
+      continue;
+    }
+
+    // ── Non-streaming path (existing behavior) ─────
+    const spinner = new Spinner();
+    thinkingCancelled = false;
+    spinner.start(`🤔 ${provLabel} / ${config.currentModel}...`);
+
+    // Multi-step auto-continue loop
     const MAX_STEPS = lightActive ? 2 : (isSimpleQ ? 1 : 5);
     let steps = 0;
     let lastResponse: AIResponse | null = null;

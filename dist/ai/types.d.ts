@@ -13,7 +13,19 @@ export interface AIResponse {
 }
 export interface AIClient {
     sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse>;
+    sendMessageStream?(messages: Message[], systemPrompt: string, onEvent: (event: StreamEvent) => void, signal?: AbortSignal): Promise<AIResponse>;
 }
+export type StreamEvent = {
+    type: 'token';
+    text: string;
+} | {
+    type: 'done';
+    fullText: string;
+    toolCalls: ToolCall[];
+} | {
+    type: 'error';
+    message: string;
+};
 export interface HealthCheckResult {
     ok: boolean;
     message: string;

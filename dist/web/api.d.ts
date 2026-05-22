@@ -42,6 +42,7 @@ export declare function saveFile(path: string, content: string): {
     error?: string;
     diff?: string;
 };
+export declare function handleChatStream(req: ChatRequest, writeEvent: (event: string) => void): Promise<void>;
 export declare function handleChat(req: ChatRequest): Promise<ChatResult>;
 export declare function runCommand(command: string): Promise<{
     stdout: string;

@@ -138,6 +138,77 @@ function getLocalProviderHint(msg: string, provider: string): string | undefined
   return undefined;
 }
 
+export async function handleChatStream(
+  req: ChatRequest,
+  writeEvent: (event: string) => void,
+): Promise<void> {
+  const config = loadConfig();
+  if (!config) {
+    writeEvent(`data: ${JSON.stringify({ type: 'error', message: 'No configuration found. Run: hysa chat' })}\n\n`);
+    return;
+  }
+
+  const prov = config.currentProvider;
+
+  try {
+    const lastMessage = req.messages[req.messages.length - 1];
+    if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastMessage.content)) {
+      writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: 'Hi! How can I help with this project?', toolCalls: [] })}\n\n`);
+      return;
+    }
+
+    const client = createClient(config);
+    if (!client.sendMessageStream) {
+      // Fall back to non-streaming
+      const result = await handleChat(req);
+      const msg = result.error || result.message || '';
+      if (result.error) {
+        writeEvent(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`);
+      } else {
+        writeEvent(`data: ${JSON.stringify({ type: 'token', text: msg })}\n\n`);
+        writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: msg, toolCalls: result.toolCalls || [] })}\n\n`);
+      }
+      return;
+    }
+
+    const projectInfo = getProjectInfo(workingDir);
+    const isLocal = LOCAL_FREE_PROVIDERS.includes(config.currentProvider);
+    const lightActive = config.lightMode !== false && isLocal;
+
+    const messages: Message[] = req.messages.map(m => ({
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+    }));
+    const maxTokens = lightActive ? 2000 : 8000;
+    const { messages: safeMessages } = truncateMessages(messages, maxTokens);
+
+    const lastUserMsg = safeMessages.filter(m => m.role === 'user').pop()?.content || '';
+    const isSimpleQ = isSimpleQuestion(lastUserMsg);
+    const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, isSimpleQ);
+
+    const perQueryPrompt = buildSystemPrompt({
+      type: projectInfo.type,
+      entryPoints: projectInfo.entryPoints,
+      configFiles: projectInfo.configFiles,
+      fileCount: projectInfo.fileCount,
+      tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
+    }, config.agentMode || 'chat', lightActive, config.currentProvider, resolvedMode);
+
+    const response = await client.sendMessageStream(safeMessages, perQueryPrompt, (event) => {
+      if (event.type === 'token') {
+        writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
+      }
+    });
+
+    writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls })}\n\n`);
+  } catch (err: unknown) {
+    const e = err as Error;
+    const msg = e.message || 'Unknown stream error';
+    console.log(LOG, `Stream failed: ${msg}`);
+    writeEvent(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`);
+  }
+}
+
 export async function handleChat(req: ChatRequest): Promise<ChatResult> {
   const config = loadConfig();
   if (!config) {

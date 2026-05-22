@@ -1,4 +1,4 @@
-import type { AIClient, Message, AIResponse } from './types.js';
+import type { AIClient, Message, AIResponse, StreamEvent } from './types.js';
 import type { ProviderType, HysaConfig } from '../config/keys.js';
 import { PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_TIERS, FREE_API_PROVIDERS, PREMIUM_API_PROVIDERS, LOCAL_FREE_PROVIDERS, PROVIDER_SIGNUP_URLS, EXPERIMENTAL_BASE_URLS } from '../config/keys.js';
 import { createAnthropicClient } from './anthropic.js';
@@ -287,10 +287,74 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
 
   return {
     async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
+      return sendMessageFallback(messages, systemPrompt, signal);
+    },
+
+    async sendMessageStream(messages: Message[], systemPrompt: string, onEvent: (event: StreamEvent) => void, signal?: AbortSignal): Promise<AIResponse> {
+      const startTime = Date.now();
+      clearFallbackEvents();
+      const primaryModel = config.currentModel;
+      const primaryTimeout = getProviderTimeout(primary, true);
+
+      if (!shouldSkipProvider(primary, primaryModel)) {
+        const client = tryCreateClient(primary, primaryModel, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+        if (client?.sendMessageStream) {
+          const provLabel = PROVIDER_DEFAULTS[primary]?.label || primary;
+          addFallbackEvent(primary, primaryModel, `Streaming ${provLabel} / ${primaryModel}...`);
+
+          const ac = new AbortController();
+          const timer = setTimeout(() => ac.abort(), primaryTimeout);
+          if (signal) {
+            signal.addEventListener('abort', () => { clearTimeout(timer); ac.abort(); }, { once: true });
+          }
+
+          let contentStarted = false;
+          let streamError: Error | null = null;
+
+          try {
+            const result = await client.sendMessageStream(messages, systemPrompt, (event) => {
+              if (event.type === 'token') contentStarted = true;
+              onEvent(event);
+            }, ac.signal);
+            clearTimeout(timer);
+            const duration = Date.now() - startTime;
+            markHealth(primary, primaryModel, 'healthy', 'success', 'unknown', duration);
+            recordRequest(duration);
+            return result;
+          } catch (err) {
+            clearTimeout(timer);
+            streamError = err as Error;
+            const errMsg = streamError.message || '';
+            const cat = categorizeError(errMsg);
+            markHealth(primary, primaryModel, 'unhealthy', friendlyError(errMsg, primary), cat);
+            recordError(errMsg, primary, primaryModel);
+
+            if (contentStarted) {
+              // Some content was already emitted — cannot cleanly fallback
+              throw streamError;
+            }
+            // No content yet — fall through to non-streaming fallback
+          }
+        }
+      }
+
+      // Fall back to non-streaming with retry/fallback
+      const result = await sendMessageFallback(messages, systemPrompt, signal);
+      // Emit the complete non-streaming result as events
+      if (result.message) {
+        onEvent({ type: 'token', text: result.message });
+      }
+      onEvent({ type: 'done', fullText: result.message, toolCalls: result.toolCalls });
+      return result;
+    },
+  };
+
+  // Shared fallback logic used by both sendMessage and sendMessageStream fallback path
+  async function sendMessageFallback(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
+      const startTime = Date.now();
       clearFallbackEvents();
       let lastError: Error | null = null;
       let lastProvider = primary;
-      const startTime = Date.now();
       let totalAttempts = 0;
       const skippedReasons: string[] = [];
       const attemptLog: string[] = [];
@@ -328,7 +392,8 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
         };
 
         let retries = 0;
-        const maxRetries = 2;
+        const isPrimaryAttempt = attemptLabel === 'Primary';
+        const maxRetries = isPrimaryAttempt ? 2 : 0;
         let attemptStart = Date.now();
 
         while (retries <= maxRetries) {
@@ -393,10 +458,11 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
         throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts);
       }
 
-      // Model-level fallback for OpenRouter
+      // Model-level fallback for OpenRouter — limit to avoid slow fallback chains
+      const MAX_FALLBACK_MODELS = 3;
       if (primary === 'openrouter') {
         const triedModels = new Set([primaryModel]);
-        const orderedModels = PROVIDER_MODELS.openrouter.filter(m => m !== primaryModel);
+        const orderedModels = PROVIDER_MODELS.openrouter.filter(m => m !== primaryModel).slice(0, MAX_FALLBACK_MODELS);
 
         for (const altModel of orderedModels) {
           if (triedModels.has(altModel)) continue;
@@ -531,9 +597,8 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
         : `${primaryLabel} is unavailable. No fallback providers configured.`;
 
       throw new Error(`${errMsg}\n  All fallback providers failed. Run hysa doctor to check your configuration.`);
-    },
-  };
-}
+    }
+  }
 
 function throwAllFailedError(lastError: Error | null, primary: ProviderType, primaryModel: string, startTime: number, skipped: string[], totalAttempts: number): never {
   const el = ((Date.now() - startTime) / 1000).toFixed(0);
@@ -568,7 +633,7 @@ export function getCasualResponse(text: string): string | null {
 }
 
 function applyGreetingGuard(client: AIClient): AIClient {
-  return {
+  const guarded: AIClient = {
     async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
       const lastUser = [...messages].reverse().find(m => m.role === 'user');
       if (lastUser) {
@@ -586,6 +651,10 @@ function applyGreetingGuard(client: AIClient): AIClient {
       return result;
     },
   };
+  if (client.sendMessageStream) {
+    guarded.sendMessageStream = client.sendMessageStream.bind(client);
+  }
+  return guarded;
 }
 
 // ── Local provider pre-flight check ────────────────
@@ -632,6 +701,15 @@ export function createClient(config: HysaConfig, signal?: AbortSignal): AIClient
       return client.sendMessage(messages, systemPrompt, signal);
     },
   };
+  // Pass through streaming if the underlying client supports it
+  if (client.sendMessageStream) {
+    wrapped.sendMessageStream = async (messages, systemPrompt, onEvent, streamSignal) => {
+      if (isLocal) {
+        await checkLocalProviderReachable(provider, config);
+      }
+      return client.sendMessageStream!(messages, systemPrompt, onEvent, streamSignal || signal);
+    };
+  }
   const finalClient = tier === 'experimental_free' ? wrapClient(wrapped, config.currentProvider) : wrapped;
 
   // For local providers in light mode, skip fallback entirely
@@ -644,7 +722,7 @@ export function createClient(config: HysaConfig, signal?: AbortSignal): AIClient
 }
 
 function wrapClient(client: AIClient, provider: ProviderType): AIClient {
-  return {
+  const wrapped: AIClient = {
     async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
       try {
         return await client.sendMessage(messages, systemPrompt, signal);
@@ -654,6 +732,17 @@ function wrapClient(client: AIClient, provider: ProviderType): AIClient {
       }
     },
   };
+  if (client.sendMessageStream) {
+    wrapped.sendMessageStream = async (messages, systemPrompt, onEvent, signal) => {
+      try {
+        return await client.sendMessageStream!(messages, systemPrompt, onEvent, signal);
+      } catch (err: unknown) {
+        const raw = (err as Error).message || String(err);
+        throw new Error(friendlyError(raw, provider));
+      }
+    };
+  }
+  return wrapped;
 }
 
 export type { AIClient } from './types.js';
