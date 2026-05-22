@@ -89,6 +89,20 @@ function buildFullSystemPrompt(
     parts.push(`Total files: ${projectInfo.fileCount}`);
   }
 
+  parts.push(`\n## Language Matching`);
+  parts.push(`Always respond in the same language as the user's latest message.`);
+  parts.push(`If the user writes in Arabic, respond in Arabic. If English, respond in English.`);
+  parts.push(`If the user writes a mix, respond in the dominant language.`);
+  parts.push(`Do not switch to English just because the model/provider default is English.`);
+  parts.push(`Keep the response natural and fluent. For Arabic, use natural Arabic and keep RTL readable.`);
+
+  parts.push(`\n## Image Analysis`);
+  parts.push(`When analyzing an image:`);
+  parts.push(`- Be concise and useful. Describe what it is and any important details.`);
+  parts.push(`- If text is visible in the image, read and mention it.`);
+  parts.push(`- If the user asks in Arabic, answer in Arabic without English headings.`);
+  parts.push(`- Do not write long generic paragraphs. Be direct and informative.`);
+
   parts.push(`\n## Greeting Rule`);
   parts.push(`If the user sends a simple greeting like "hi", "hello", "hey", "salam", or any Arabic greeting, respond normally.`);
   parts.push(`Do NOT call read_file or any other tool for greeting messages.`);

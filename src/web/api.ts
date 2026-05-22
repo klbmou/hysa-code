@@ -5,7 +5,7 @@ import { getProjectInfo } from '../context/builder.js';
 import { readFile, shouldIgnore } from '../files/reader.js';
 import { writeFileWithBackup, previewEdit } from '../files/writer.js';
 import { getGitInfo } from '../utils/git.js';
-import { createClient, createSingleClient, isOnlyGreeting } from '../ai/client.js';
+import { createClient, createSingleClient, isOnlyGreeting, categorizeError } from '../ai/client.js';
 import type { Message } from '../ai/types.js';
 import { buildSystemPrompt, resolvePromptMode } from '../prompts/system.js';
 import { getYolo, setYolo, getProviderHealth } from '../utils/session.js';
@@ -14,6 +14,33 @@ import { detectSecrets } from '../utils/secrets.js';
 import { estimateTokens, truncateMessages } from '../context/tokens.js';
 
 const LOG = '[HYSA Chat]';
+
+// ── Language detection ──────────────────────────────────
+
+const ARABIC_PATTERN = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+
+function isArabic(text: string): boolean {
+  if (!text) return false;
+  let arabicCount = 0;
+  for (const char of text) {
+    if (ARABIC_PATTERN.test(char)) arabicCount++;
+  }
+  return arabicCount > 0;
+}
+
+function injectLanguageInstruction(messages: { role: string; content: string | any[] }[]): void {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== 'user') continue;
+    if (typeof msg.content === 'string') {
+      const isAr = isArabic(msg.content);
+      if (isAr) {
+        msg.content += '\n\nRespond in Arabic. Use natural Arabic. Do not switch to English.';
+      }
+    }
+    break;
+  }
+}
 
 // ── Simple question detection ──────────────────────────
 
@@ -72,11 +99,12 @@ function hasImageAttachments(attachments?: AttachmentPayload[]): boolean {
 function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderType; model: string; label: string }[] {
   const candidates: { provider: ProviderType; model: string; label: string }[] = [];
   const added = new Set<string>();
+  const currentProv = config.currentProvider;
 
-  const tryAdd = (provider: ProviderType) => {
+  const tryAddOther = (provider: ProviderType) => {
+    if (provider === currentProv) return;
     const models = VISION_CAPABLE_PROVIDERS[provider];
     if (!models) return;
-    if (provider === config.currentProvider) return;
     const key = config.apiKeys[provider as keyof typeof config.apiKeys];
     if (!key) return;
     for (const model of models) {
@@ -88,11 +116,23 @@ function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderTy
     }
   };
 
-  // Order matters: Gemini first (most likely to work for free image analysis)
-  tryAdd('gemini');
-  tryAdd('openrouter');
-  tryAdd('openai');
-  tryAdd('anthropic');
+  // 1. Same provider vision models first (already authenticated, no key check needed)
+  const currentVisionModels = VISION_CAPABLE_PROVIDERS[currentProv];
+  if (currentVisionModels) {
+    for (const model of currentVisionModels) {
+      const k = `${currentProv}:${model}`;
+      if (!added.has(k)) {
+        added.add(k);
+        candidates.push({ provider: currentProv, model, label: `${PROVIDER_DEFAULTS[currentProv]?.label || currentProv} / ${model}` });
+      }
+    }
+  }
+
+  // 2. Other providers with API keys
+  tryAddOther('gemini');
+  tryAddOther('openrouter');
+  tryAddOther('openai');
+  tryAddOther('anthropic');
 
   return candidates;
 }
@@ -270,7 +310,17 @@ export async function handleChatStream(
 
     // ── Vision fallback: if images present but current provider not vision-capable ──
     if (hasImages && !visionAvailable) {
+      // Debug log for image dataUrl presence
+      if (req.attachments) {
+        for (const att of req.attachments) {
+          if (att.kind === 'image') {
+            console.log(LOG, `image attachment: ${att.name}, ${att.size}B, hasDataUrl ${!!att.dataUrl}`);
+          }
+        }
+      }
+
       const visionCandidates = getVisionFallbackCandidates(config);
+      const failures: { label: string; reason: string; detail: string }[] = [];
       if (visionCandidates.length > 0) {
         console.log(LOG, `Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)...`);
 
@@ -288,9 +338,11 @@ export async function handleChatStream(
           role: m.role as 'user' | 'assistant',
           content: m.content,
         }));
+        injectLanguageInstruction(fbMessages);
 
         for (const c of visionCandidates) {
           const timeoutMs = 15000;
+          writeEvent(`data: ${JSON.stringify({ type: 'fallback', message: `Trying vision model: ${c.label}` })}\n\n`);
           try {
             console.log(LOG, `Trying vision provider: ${c.label}`);
             const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
@@ -303,11 +355,13 @@ export async function handleChatStream(
                 }),
                 timeoutMs,
               );
+              writeEvent(`data: ${JSON.stringify({ type: 'fallback', message: `Switched to vision model: ${c.label}` })}\n\n`);
               writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls })}\n\n`);
               return;
             } else {
               const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
               if (result.message) {
+                writeEvent(`data: ${JSON.stringify({ type: 'fallback', message: `Switched to vision model: ${c.label}` })}\n\n`);
                 writeEvent(`data: ${JSON.stringify({ type: 'token', text: result.message })}\n\n`);
                 writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: result.message, toolCalls: result.toolCalls })}\n\n`);
                 return;
@@ -315,15 +369,29 @@ export async function handleChatStream(
             }
           } catch (err: unknown) {
             const e = err as Error;
+            const cat = categorizeError(e.message || '');
+            let reasonStr: string;
+            if (cat === 'rate_limit') reasonStr = 'rate-limited';
+            else if (cat === 'quota') reasonStr = 'quota exceeded';
+            else if (cat === 'timeout') reasonStr = 'timed out';
+            else if (cat === 'invalid_key') reasonStr = 'invalid key';
+            else if (cat === 'model_unavailable') reasonStr = 'unavailable';
+            else if (cat === 'network') reasonStr = 'network error';
+            else reasonStr = 'failed';
+            failures.push({ label: c.label, reason: reasonStr, detail: e.message?.slice(0, 80) || '' });
+            writeEvent(`data: ${JSON.stringify({ type: 'fallback', message: `Vision model failed: ${c.label} — ${reasonStr}` })}\n\n`);
             console.log(LOG, `Vision fallback failed with ${c.label}: ${e.message?.slice(0, 100)}`);
           }
         }
       }
 
       // All vision fallbacks failed
-      const hintText = 'Image understanding needs a vision-capable provider. Try Gemini (gemini-2.5-flash) or OpenRouter with a vision model like google/gemini-2.5-flash:free.';
-      writeEvent(`data: ${JSON.stringify({ type: 'token', text: hintText })}\n\n`);
-      writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: hintText, toolCalls: [] })}\n\n`);
+      let errorText = 'Image understanding failed because all vision providers were unavailable or quota-limited.';
+      if (failures && failures.length > 0) {
+        errorText += '\nTried:\n' + failures.map(f => `- ${f.label} — ${f.reason}`).join('\n');
+      }
+      writeEvent(`data: ${JSON.stringify({ type: 'token', text: errorText })}\n\n`);
+      writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: errorText, toolCalls: [] })}\n\n`);
       return;
     }
 
@@ -332,7 +400,8 @@ export async function handleChatStream(
       console.log(LOG, `Attachments: ${req.attachments.length} file(s)`);
       for (const att of req.attachments) {
         const hasText = !!att.textContent && att.textContent.length > 0;
-        console.log(LOG, `  ${att.name} (${att.kind}, ${att.size}B, hasText: ${hasText})`);
+        const hasDataUrl = !!att.dataUrl;
+        console.log(LOG, `  ${att.name} (${att.kind}, ${att.size}B, hasText: ${hasText}${att.kind === 'image' ? `, hasDataUrl: ${hasDataUrl}` : ''})`);
         if (hasText && att.kind !== 'image') {
           const contextMsg = {
             role: 'user' as const,
@@ -379,6 +448,7 @@ export async function handleChatStream(
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }));
+    injectLanguageInstruction(messages);
 
     const lastUserMsgRaw = visionMessages.filter(m => m.role === 'user').pop()?.content || '';
     const lastUserMsgStr = typeof lastUserMsgRaw === 'string' ? lastUserMsgRaw : '';
@@ -429,7 +499,19 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
 
     // ── Vision fallback: if images present but current provider not vision-capable ──
     if (hasImages && !visionAvailable) {
+      // Debug log for image dataUrl presence
+      if (req.attachments) {
+        for (const att of req.attachments) {
+          if (att.kind === 'image') {
+            console.log(LOG, `image attachment: ${att.name}, ${att.size}B, hasDataUrl ${!!att.dataUrl}`);
+          }
+        }
+      }
+
       const visionCandidates = getVisionFallbackCandidates(config);
+      const fbEvents: string[] = [];
+      const failures: { label: string; reason: string }[] = [];
+
       if (visionCandidates.length > 0) {
         console.log(LOG, `Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)...`);
 
@@ -448,32 +530,50 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
           role: m.role as 'user' | 'assistant',
           content: m.content,
         }));
+        injectLanguageInstruction(fbMessages);
 
         for (const c of visionCandidates) {
           const timeoutMs = 15000;
+          fbEvents.push(`Trying vision model: ${c.label}`);
           try {
             console.log(LOG, `Trying vision provider: ${c.label}`);
             const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
             const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
             if (result.message) {
               console.log(LOG, `Vision fallback succeeded with ${c.label}`);
+              fbEvents.push(`Switched to vision model: ${c.label}`);
               return {
                 message: result.message,
                 toolCalls: result.toolCalls,
+                fallbackEvents: fbEvents,
                 provider: PROVIDER_DEFAULTS[c.provider]?.label || c.provider,
                 model: c.model,
               };
             }
           } catch (err: unknown) {
             const e = err as Error;
+            const cat = categorizeError(e.message || '');
+            let reasonStr: string;
+            if (cat === 'rate_limit') reasonStr = 'rate-limited';
+            else if (cat === 'quota') reasonStr = 'quota exceeded';
+            else if (cat === 'timeout') reasonStr = 'timed out';
+            else if (cat === 'invalid_key') reasonStr = 'invalid key';
+            else if (cat === 'model_unavailable') reasonStr = 'unavailable';
+            else if (cat === 'network') reasonStr = 'network error';
+            else reasonStr = 'failed';
+            failures.push({ label: c.label, reason: reasonStr });
+            fbEvents.push(`Vision model failed: ${c.label} — ${reasonStr}`);
             console.log(LOG, `Vision fallback failed with ${c.label}: ${e.message?.slice(0, 100)}`);
           }
         }
       }
 
-      // All vision providers failed — return hint
-      const msg = 'Image understanding needs a vision-capable provider. Try Gemini (gemini-2.5-flash) or OpenRouter with a vision model like google/gemini-2.5-flash:free.';
-      return { message: msg, toolCalls: [], hint: 'Switch to a vision-capable provider to analyze images.' };
+      // All vision providers failed — return hint with actual reasons
+      let msg = 'Image understanding failed because all vision providers were unavailable or quota-limited.';
+      if (failures.length > 0) {
+        msg += '\nTried:\n' + failures.map(f => `- ${f.label} — ${f.reason}`).join('\n');
+      }
+      return { message: msg, toolCalls: [], fallbackEvents: fbEvents, hint: 'All vision providers failed.' };
     }
 
     // Inject attachment text content as context before the user's question
@@ -481,7 +581,8 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       console.log(LOG, `Attachments: ${req.attachments.length} file(s)`);
       for (const att of req.attachments) {
         const hasText = !!att.textContent && att.textContent.length > 0;
-        console.log(LOG, `  ${att.name} (${att.kind}, ${att.size}B, hasText: ${hasText})`);
+        const hasDataUrl = !!att.dataUrl;
+        console.log(LOG, `  ${att.name} (${att.kind}, ${att.size}B, hasText: ${hasText}${att.kind === 'image' ? `, hasDataUrl: ${hasDataUrl}` : ''})`);
         if (hasText && att.kind !== 'image') {
           const contextMsg = {
             role: 'user' as const,
@@ -527,6 +628,7 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }));
+    injectLanguageInstruction(messages);
 
     // ── Per-query prompt mode resolution ────────────────
     const lastUserMsgRaw = visionMessages.filter(m => m.role === 'user').pop()?.content || '';

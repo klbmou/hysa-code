@@ -323,23 +323,25 @@ export default function App() {
             try {
               const event = JSON.parse(trimmed.slice(6));
 
-              if (event.type === 'token') {
-                if (!accumulatedText) {
-                  setLoading(false);
-                }
-                accumulatedText += event.text;
-                setChatItems(prev => prev.map(item =>
-                  item.id === streamItemId && item.kind === 'ai_msg'
-                    ? { ...item, content: accumulatedText }
-                    : item
-                ));
-              } else if (event.type === 'done') {
-                streamDone = true;
-                accumulatedText = event.fullText || accumulatedText;
-                finalToolCalls = event.toolCalls || [];
-              } else if (event.type === 'error') {
-                streamError = event.message || 'Stream error';
-              }
+                  if (event.type === 'token') {
+                    if (!accumulatedText) {
+                      setLoading(false);
+                    }
+                    accumulatedText += event.text;
+                    setChatItems(prev => prev.map(item =>
+                      item.id === streamItemId && item.kind === 'ai_msg'
+                        ? { ...item, content: accumulatedText }
+                        : item
+                    ));
+                  } else if (event.type === 'fallback') {
+                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
+                  } else if (event.type === 'done') {
+                    streamDone = true;
+                    accumulatedText = event.fullText || accumulatedText;
+                    finalToolCalls = event.toolCalls || [];
+                  } else if (event.type === 'error') {
+                    streamError = event.message || 'Stream error';
+                  }
             } catch { /* skip malformed SSE */ }
           }
         }
@@ -352,6 +354,8 @@ export default function App() {
               const event = JSON.parse(trimmed.slice(6));
               if (event.type === 'token') {
                 accumulatedText += event.text;
+              } else if (event.type === 'fallback') {
+                setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
               } else if (event.type === 'done') {
                 streamDone = true;
                 accumulatedText = event.fullText || accumulatedText;

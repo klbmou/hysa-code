@@ -198,6 +198,7 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
 
   return (
     <div className="composer-wrapper">
+      <div className="composer-inner">
       <input
         ref={fileInputRef}
         type="file"
@@ -208,7 +209,7 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
       />
 
       {!loading && (
-        <div className={`composer-actions${attachments.length > 0 ? ' has-attachments' : ''}`}>
+        <div className="composer-actions">
           {(attachments.length > 0 ? DOC_ACTIONS : QUICK_ACTIONS).map(qa => (
             <button key={qa.label} className="composer-action-btn" onClick={() => handleQuickAction(qa.action)}>
               {qa.label}
@@ -243,7 +244,7 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
               <div className="attach-chip-body">
                 <span className="attach-chip-name">{a.name}</span>
                 <span className="attach-chip-size">
-                  {a.kind === 'image' && (a.previewUrl ? 'Image · ready' : 'Image')}
+                  {a.kind === 'image' && (a.previewUrl ? 'Image · ready for analysis' : 'Image')}
                   {a.pdfStatus === 'extracting' && 'extracting...'}
                   {a.pdfStatus === 'ready' && `PDF text extracted · ${a.pdfCharCount?.toLocaleString()} chars`}
                   {a.pdfStatus === 'too_large' && 'too large'}
@@ -297,6 +298,7 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
             Send
           </button>
         </div>
+      </div>
       </div>
     </div>
   );

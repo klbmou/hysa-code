@@ -582,11 +582,24 @@ process.on('exit', () => {
       const imgDur = ((Date.now() - imgStart) / 1000).toFixed(1);
       console.log(`      Response time: ${imgDur}s`);
       console.log(`      Has message: ${!!imgRes.message}`);
-      const isHint = !!(imgRes.message && imgRes.message.toLowerCase().includes('vision'));
-      const hasContent = !!(imgRes.message && imgRes.message.length > 10);
-      if (isHint) {
-        console.log(`      ✓ Vision hint: "${imgRes.message.slice(0, 80)}..."`);
-        console.log(`      (All vision fallbacks exhausted — hint returned)`);
+      if (imgRes.fallbackEvents && imgRes.fallbackEvents.length > 0) {
+        console.log(`      Fallback events: ${imgRes.fallbackEvents.length}`);
+        for (const ev of imgRes.fallbackEvents.slice(0, 5)) {
+          console.log(`        ${ev}`);
+        }
+      }
+      const isNewHint = !!(imgRes.message && imgRes.message.toLowerCase().includes('all vision providers'));
+      const isOldHint = !!(imgRes.message && imgRes.message.toLowerCase().includes('vision') && !imgRes.message.toLowerCase().includes('all vision'));
+      const hasContent = !!(imgRes.message && imgRes.message.length > 10 && !imgRes.message.toLowerCase().includes('vision'));
+      if (isNewHint) {
+        console.log(`      ✓ New-style error with attempted providers`);
+        const snippet = imgRes.message.slice(0, 300);
+        console.log(`      Error: ${snippet}`);
+        console.log(`      (All vision fallbacks exhausted — detailed error returned)`);
+      } else if (isOldHint) {
+        console.log(`      ⚠ Old-style hint still used`);
+        console.log(`      Raw message: ${JSON.stringify(imgRes.message)}`);
+        img7gPassed = false;
       } else if (hasContent) {
         console.log(`      ✓ Vision fallback succeeded: "${imgRes.message.slice(0, 80)}..."`);
         console.log(`      (Provider: ${imgRes.provider || '?'} / ${imgRes.model || '?'})`);
