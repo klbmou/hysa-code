@@ -1,14 +1,14 @@
-# HYSA Code v0.2
+# HYSA Code v0.3
 
 <div dir="rtl">
 
-## HYSA كود v0.2 - مساعد برمجة بالذكاء الاصطناعي
+## HYSA كود v0.3 - مساعد برمجة بالذكاء الاصطناعي
 
 أداة سطر أوامر مفتوحة المصدر لمساعدة المطورين في كتابة وتحرير الأكواد البرمجية باستخدام الذكاء الاصطناعي.
 تدعم 7 مزودين مع وضع مجاني سحابي ومحلي.
 
 ```bash
-npm install -g hysa-code
+npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.3.0/hysa-code-0.3.0.tgz
 hysa
 ```
 
@@ -20,9 +20,17 @@ hysa
 It supports 12 AI providers across 4 tiers — **Free API Key** (sign-up required), **Local Free** (offline, no key), **Premium API** (paid), and **Experimental Free** (no-key, no guarantees).
 
 ```bash
-npm install -g hysa-code
+npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.3.0/hysa-code-0.3.0.tgz
 hysa
 ```
+
+> **v0.3.0 improvements:**
+> - **Provider fallback grouping** — fallback candidates grouped by provider, not by model. One provider is tried with all its models before switching providers.
+> - **Auth error classification** — 401/403/authentication errors correctly categorized (previously misclassified as timeouts), with billing/insufficient quota detection.
+> - **Prompt compression & minimal prompt** — simple questions (≤60 chars, no action keywords) get a ~100-token minimal prompt instead of the full system prompt. Auto-detected per query.
+> - **Local provider diagnostics** — `hysa doctor --provider ollama`, `--provider local-openai`, `--provider llama-cpp` with server unreachable, model missing, and reachable status.
+> - **Local setup guide** — `hysa local setup` prints setup instructions for Ollama, HYSA AI, LM Studio, and llama.cpp.
+> - **Pre-flight local provider checks** — before sending a request to a local provider, the server is pinged (3s timeout). If unreachable, you get a setup hint instantly instead of waiting for a 30s timeout.
 
 ## Quick Start
 
@@ -257,7 +265,8 @@ hysa doctor --provider puter
 - **Token safety** — automatically manages context window limits
 - **Git awareness** — shows current branch and dirty state
 - **Automatic fallback** — if a Free API Key provider rate-limits or fails, tries another
-- **Model-level fallback** — if a model fails, tries other models on the same provider before switching providers
+- **Provider-level fallback** — fallback candidates grouped by provider, tries all models on one provider before switching
+- **Auth error classification** — 401/403/authentication errors correctly categorized (not misclassified as timeouts)
 - **Model health tracking** — models that fail tool calls are deprioritized
 - **Automatic retry** — exponential backoff on rate limits and server errors
 - **Friendly error messages** — raw JSON hidden in favor of human-readable tips
@@ -283,6 +292,7 @@ hysa doctor --provider puter
 | `/read <path>` | Read a file directly |
 | `/run <command>` | Execute a shell command (with approval) |
 | `/yolo`             | Toggle YOLO mode (auto-apply edits) |
+| `hysa local setup` | Show local provider setup instructions |
 | `/exit` | Exit HYSA Code |
 
 ---
