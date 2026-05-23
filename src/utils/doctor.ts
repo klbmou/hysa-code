@@ -4,6 +4,7 @@ import type { ProviderType, HysaConfig } from '../config/keys.js';
 import { checkOpenCodeZenAPI } from '../ai/opencode-zen.js';
 import { checkAnthropicProxyAPI } from '../ai/anthropic-proxy.js';
 import { checkOpenAICompatibleAPI } from '../ai/openai-compatible.js';
+import { getWebSearchConfig, getSearchDiagnostics } from '../tools/web-search.js';
 
 const DOCTOR_TIMEOUT_MS = 15000;
 
@@ -818,6 +819,22 @@ export async function runDoctor(debug = false, provider?: string): Promise<void>
       }
     } else {
       results.push({ name: 'OpenAI Router', status: 'warn', message: 'Not configured. Set HYSA_OPENAI_ROUTER_BASE_URL.' });
+    }
+
+    // Web search status
+    const wsConfig = getWebSearchConfig();
+    const wsDiag = getSearchDiagnostics();
+    if (wsConfig.provider !== 'none') {
+      results.push({ name: 'Web Search', status: 'ok', message: `Provider: ${wsConfig.provider}` });
+      if (wsConfig.tavilyKey) results.push({ name: 'Tavily Key', status: 'ok', message: 'Configured' });
+      if (wsConfig.serperKey) results.push({ name: 'Serper Key', status: 'ok', message: 'Configured' });
+      if (wsConfig.braveKey) results.push({ name: 'Brave Key', status: 'ok', message: 'Configured' });
+      if (wsDiag.ddgExperimental) {
+        results.push({ name: 'DDG Fallback', status: 'warn', message: 'Limited instant answer API — configure a reliable provider for full search.' });
+      }
+    } else {
+      results.push({ name: 'Web Search', status: 'warn', message: 'Not configured. Set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.' });
+      results.push({ name: 'DDG Fallback', status: 'ok', message: 'Available (no API key needed, but limited — instant answers only)' });
     }
   } else {
     results.push({ name: 'Config', status: 'error', message: 'No config found. Run: hysa chat' });

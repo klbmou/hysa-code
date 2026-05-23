@@ -20,6 +20,7 @@ import { detectSecrets } from './utils/secrets.js';
 import { getGitInfo } from './utils/git.js';
 import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo, getProviderHealth, clearProviderHealth, getUsage, recordPromptMode } from './utils/session.js';
 import { grepSearch, findFiles } from './utils/searcher.js';
+import { searchWeb, formatSearchResults, getWebSearchConfig, getSearchDiagnostics } from './tools/web-search.js';
 import { classifyCommand } from './utils/commands.js';
 import { ALL_MODES, MODE_LABELS, MODE_DESCRIPTIONS } from './agent/modes.js';
 import { createTask, getActiveTask } from './agent/tasks.js';
@@ -1578,13 +1579,85 @@ async function chatLoop(initialConfig, initialYolo = false) {
             tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
         }, currentAgentMode, lightActive, config.currentProvider, resolvedMode);
         recordPromptMode(resolvedMode);
+        // ── Web search intent detection ────────────────
+        let webSearchResults = null;
+        let isExplicitSearchCmd = false;
+        const searchPatterns = [
+            // Explicit hysa search/websearch commands — check FIRST
+            /^hysa\s+(?:search|websearch)\s+"(.+?)"$/i,
+            /^hysa\s+(?:search|websearch)\s+'(.+?)'$/i,
+            /^hysa\s+(?:search|websearch)\s+(.+)$/i,
+            /^(?:search|find|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
+            /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
+            /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
+            /^(?:where\s+can\s+(?:I|we)\s+(?:watch|find|get)\s+)/i,
+            /^(?:who\s+(?:is|are|was|were)\s+the\s+(?:current|latest|new)\s+)/i,
+            /^(?:how\s+(?:much|many)\s+(?:is|are|does)\s+)/i,
+            /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
+            /^(?:آخر\s+أخبار\s+)(.+)/i,
+            /^(?:هل\s+هذا\s+صحيح\s+(?:الآن|حاليا|حالياً)?)/i,
+            /^(?:ما\s+هو\s+(?:آخر|أحدث)\s+)/i,
+        ];
+        let searchQuery = null;
+        for (const p of searchPatterns) {
+            const m = trimmed.match(p);
+            if (m) {
+                searchQuery = m[1]?.trim() || trimmed;
+                // Check if this was an explicit hysa search/websearch command
+                isExplicitSearchCmd = /^hysa\s+(?:search|websearch)\s+/i.test(trimmed);
+                break;
+            }
+        }
+        if (searchQuery) {
+            console.log(pc.cyan(`  Web search: "${searchQuery}"`));
+            const wsConfig = getWebSearchConfig();
+            const wsDiag = getSearchDiagnostics();
+            if (!wsDiag.isReliable) {
+                const hasArabic = /[\u0600-\u06FF]/.test(trimmed);
+                const configMsg = hasArabic
+                    ? 'البحث في الإنترنت غير مضبوط بشكل موثوق. فعّل TAVILY_API_KEY أو SERPER_API_KEY أو BRAVE_SEARCH_API_KEY.'
+                    : 'Web search is not reliably configured. To enable web search, set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.';
+                console.log(pc.yellow(`\n  ${configMsg}\n`));
+                continue;
+            }
+            else {
+                try {
+                    const results = await searchWeb(searchQuery, { maxResults: 5 });
+                    webSearchResults = formatSearchResults(searchQuery, results);
+                    if (results.length > 0) {
+                        console.log(pc.dim(`  ${results.length} result(s) found, injecting into conversation.`));
+                    }
+                    else {
+                        console.log(pc.yellow(`  No results found.`));
+                    }
+                    if (config.debug)
+                        console.log(pc.dim(`  [debug] Web search: ${results.length} results for "${searchQuery}"`));
+                }
+                catch (err) {
+                    webSearchResults = `Web search failed: ${err.message}`;
+                    console.log(pc.red(`  Web search failed: ${err.message}`));
+                    if (config.debug)
+                        console.log(pc.dim(`  [debug] Web search failed: ${err.message}`));
+                }
+            }
+        }
         const contextStartTime = Date.now();
         // Build context and messages
-        let userMessage = trimmed;
+        // For explicit search commands, don't include the raw command — only search results
+        let userMessage;
+        if (isExplicitSearchCmd && webSearchResults) {
+            userMessage = `[Web search results for "${searchQuery}"]\n\n${webSearchResults}`;
+        }
+        else if (webSearchResults) {
+            userMessage = `${trimmed}\n\n${webSearchResults}`;
+        }
+        else {
+            userMessage = trimmed;
+        }
         let allMessages;
         let wasTruncated = false;
-        if (lightActive) {
-            // Light mode: skip file context, aggressive truncation
+        if (lightActive || isExplicitSearchCmd) {
+            // Light mode or explicit search: skip file context, aggressive truncation
             const { messages: safeMessages } = truncateMessages([...messages], 2000);
             allMessages = [
                 ...safeMessages,
@@ -2358,6 +2431,43 @@ export async function start() {
             console.log(pc.green(`\n  All providers healthy.`));
         }
         console.log();
+    });
+    program
+        .command('search')
+        .description('Search the web. Set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.')
+        .argument('<query>', 'Search query')
+        .option('--max <number>', 'Max results', '5')
+        .action(async (query, opts) => {
+        const max = Math.min(parseInt(opts.max || '5', 10) || 5, 10);
+        try {
+            const wsConfig = getWebSearchConfig();
+            if (wsConfig.provider === 'none') {
+                console.log(pc.yellow('\n  Web search is not configured. Set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.\n'));
+                return;
+            }
+            console.log(pc.cyan(`\n  Searching (${wsConfig.provider})...\n`));
+            const results = await searchWeb(query, { maxResults: max });
+            if (results.length === 0) {
+                if (wsConfig.provider === 'ddg') {
+                    console.log(pc.yellow('  No results returned from DuckDuckGo fallback. For reliable search, configure TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.\n'));
+                }
+                else {
+                    console.log(pc.yellow('  No results found.\n'));
+                }
+                return;
+            }
+            for (const r of results) {
+                console.log(`  ${pc.bold(r.title)}`);
+                console.log(`  ${pc.dim(r.url)}`);
+                console.log(`  ${r.snippet.slice(0, 200)}`);
+                if (r.source)
+                    console.log(`  ${pc.dim(`[${r.source}]`)}`);
+                console.log();
+            }
+        }
+        catch (err) {
+            console.log(pc.red(`  ${err.message}\n`));
+        }
     });
     program
         .command('usage')

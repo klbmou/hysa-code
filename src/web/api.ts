@@ -11,6 +11,7 @@ import { buildSystemPrompt, resolvePromptMode } from '../prompts/system.js';
 import { getYolo, setYolo, getProviderHealth } from '../utils/session.js';
 import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents, getLastSuccessfulProvider, getLastSuccessfulModel, getAllHealth } from '../ai/model-health.js';
 import { detectSecrets } from '../utils/secrets.js';
+import { searchWeb, formatSearchResults, getSearchDiagnostics } from '../tools/web-search.js';
 import { estimateTokens, truncateMessages } from '../context/tokens.js';
 
 const LOG = '[HYSA Chat]';
@@ -744,6 +745,59 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       console.log(LOG, `[debug] Total estimated: ~${totalTokens} tokens`);
       if (lightActive && totalTokens > 2000) {
         console.log(LOG, `[debug] Local prompt trimmed from ~${totalTokens} tokens to ~2000 tokens.`);
+      }
+    }
+
+    // ── Web search detection ────────────────────────
+    const searchLastMsg = messages[messages.length - 1];
+    const searchLastContent = typeof searchLastMsg?.content === 'string' ? searchLastMsg.content : '';
+    const isExplicitSearchCmd = /^hysa\s+(?:search|websearch)\s+/i.test(searchLastContent);
+    const searchPatterns = [
+      // Explicit hysa search/websearch commands — check FIRST
+      /^hysa\s+(?:search|websearch)\s+"(.+?)"$/i,
+      /^hysa\s+(?:search|websearch)\s+'(.+?)'$/i,
+      /^hysa\s+(?:search|websearch)\s+(.+)$/i,
+      /^(?:search|find|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
+      /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
+      /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
+      /^(?:where\s+can\s+(?:I|we)\s+(?:watch|find|get)\s+)/i,
+      /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
+      /^(?:آخر\s+أخبار\s+)(.+)/i,
+      /^(?:هل\s+هذا\s+صحيح\s+(?:الآن|حاليا|حالياً)?)/i,
+      /^(?:ما\s+هو\s+(?:آخر|أحدث)\s+)/i,
+    ];
+    let searchQuery: string | null = null;
+    for (const p of searchPatterns) {
+      const m = searchLastContent.match(p);
+      if (m) {
+        searchQuery = m[1]?.trim() || searchLastContent;
+        break;
+      }
+    }
+    if (searchQuery) {
+      const wsDiag = getSearchDiagnostics();
+      if (!wsDiag.isReliable) {
+        const hasArabic = /[\u0600-\u06FF]/.test(searchLastContent);
+        const configMsg = hasArabic
+          ? 'البحث في الإنترنت غير مضبوط بشكل موثوق. فعّل TAVILY_API_KEY أو SERPER_API_KEY أو BRAVE_SEARCH_API_KEY.'
+          : 'Web search is not reliably configured. To enable web search, set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.';
+        console.log(LOG, `[req:${reqId}] Web search skipped (provider: ${wsDiag.provider}, no reliable API keys)`);
+        return { message: configMsg, toolCalls: [] };
+      } else {
+        try {
+          const results = await searchWeb(searchQuery, { maxResults: 5 });
+          const formatted = formatSearchResults(searchQuery, results);
+          if (isExplicitSearchCmd) {
+            // Replace the raw command with search results
+            searchLastMsg.content = `[Web search results for "${searchQuery}"]\n\n${formatted}`;
+          } else {
+            const searchMsg = { role: 'user' as const, content: formatted };
+            messages.splice(messages.length - 1, 0, searchMsg);
+          }
+          console.log(LOG, `[req:${reqId}] Web search: ${results.length} results for "${searchQuery}"`);
+        } catch (err: unknown) {
+          console.log(LOG, `[req:${reqId}] Web search failed: ${(err as Error).message}`);
+        }
       }
     }
 
