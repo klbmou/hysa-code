@@ -21,10 +21,10 @@ export default function WelcomeScreen({ onHint, fileCount, status, yolo }: Welco
     <div className="welcome">
       <div className="welcome-glow" />
       <div className="welcome-mascot">
-        <div className="welcome-mascot-body"><span>&gt;_</span></div>
+        <div className="welcome-mascot-body">H</div>
       </div>
-      <h1 className="welcome-title">What are we building today?</h1>
-      <p className="welcome-sub">Ask HYSA to inspect, edit, debug, explain, or improve this project.</p>
+      <h1 className="welcome-title">What can I help you with?</h1>
+      <p className="welcome-sub">Ask HYSA to inspect, edit, debug, explain, or improve your project.</p>
 
       {status && (
         <div className="welcome-summary">
@@ -32,7 +32,7 @@ export default function WelcomeScreen({ onHint, fileCount, status, yolo }: Welco
           <div className="welcome-summary-item"><span className="ws-icon-provider">{status.provider}</span></div>
           <div className="welcome-summary-item">
             <span className={`welcome-summary-dot ${yolo ? 'yolo' : 'safe'}`} />
-            {yolo ? 'YOLO mode' : 'Safe mode'}
+            {yolo ? 'YOLO' : 'Safe'}
           </div>
         </div>
       )}

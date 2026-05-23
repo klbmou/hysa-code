@@ -1,6 +1,6 @@
 {
   "name": "hysa-code",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Open-source AI coding assistant CLI - multiple providers including free cloud and local models",
   "type": "module",
   "license": "MIT",
