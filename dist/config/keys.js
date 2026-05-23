@@ -81,7 +81,7 @@ export const PROVIDER_MODELS = {
     puter: ['gpt-4o-mini'],
     hysa_ai: ['hysa-coder-lite', 'hysa-coder', 'hysa-fast'],
     anthropic_proxy: ['claude-3-5-sonnet-latest', 'claude-3-opus-latest', 'claude-3-haiku-latest'],
-    openai_router: ['qw/qwen3-coder-flash', 'qw/qwen3-coder-plus', 'deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'cc/claude-sonnet-4-6'],
+    openai_router: ['oc/deepseek-v4-flash-free', 'oc/nemotron-3-super-free', 'qw/qwen3-coder-flash', 'qw/qwen3-coder-plus', 'deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'cc/claude-sonnet-4-6'],
 };
 export const PROVIDER_TIERS = {
     anthropic: 'premium_api',
