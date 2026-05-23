@@ -1,6 +1,8 @@
 import pc from 'picocolors';
 import { loadConfig, PROVIDER_SIGNUP_URLS, PROVIDER_DEFAULTS, PROVIDER_TIERS, TIER_LABELS, FREE_API_PROVIDERS, EXPERIMENTAL_FREE_PROVIDERS, EXPERIMENTAL_BASE_URLS, validateApiKey } from '../config/keys.js';
 import { checkOpenCodeZenAPI } from '../ai/opencode-zen.js';
+import { checkAnthropicProxyAPI } from '../ai/anthropic-proxy.js';
+import { checkOpenAICompatibleAPI } from '../ai/openai-compatible.js';
 const DOCTOR_TIMEOUT_MS = 15000;
 async function withTimeout(promise, timeoutMs) {
     const timeoutPromise = new Promise((_, reject) => {
@@ -366,6 +368,72 @@ async function checkHysaAIDetailed(debug) {
     results.push(chatResult);
     return results;
 }
+async function checkAnthropicProxyDetailed(config, debug) {
+    const results = [];
+    const baseUrl = config.anthropicProxyBaseUrl;
+    if (!baseUrl) {
+        results.push({ name: 'Base URL', status: 'error', message: 'Not configured. Set HYSA_ANTHROPIC_PROXY_BASE_URL.' });
+        return results;
+    }
+    try {
+        const parsedUrl = new URL(baseUrl);
+        results.push({ name: 'Base URL', status: 'ok', message: parsedUrl.href });
+    }
+    catch {
+        results.push({ name: 'Base URL', status: 'error', message: `Invalid URL: ${baseUrl}` });
+        return results;
+    }
+    const checkResult = await checkAnthropicProxyAPI(baseUrl, config.apiKeys.anthropic_proxy);
+    if (checkResult.ok) {
+        results.push({ name: 'API Connection', status: 'ok', message: 'Proxy endpoint is reachable' });
+    }
+    else {
+        results.push({ name: 'API Connection', status: 'error', message: checkResult.message });
+        return results;
+    }
+    const model = config.anthropicProxyModel || 'claude-3-5-sonnet-latest';
+    results.push({ name: 'Default Model', status: 'ok', message: model });
+    if (config.apiKeys.anthropic_proxy) {
+        results.push({ name: 'API Key', status: 'ok', message: 'Configured' });
+    }
+    else {
+        results.push({ name: 'API Key', status: 'warn', message: 'Not configured (optional)' });
+    }
+    return results;
+}
+async function checkOpenAIRouterDetailed(config, debug) {
+    const results = [];
+    const baseUrl = config.openaiRouterBaseUrl;
+    if (!baseUrl) {
+        results.push({ name: 'Base URL', status: 'error', message: 'Not configured. Set HYSA_OPENAI_ROUTER_BASE_URL.' });
+        return results;
+    }
+    try {
+        const parsedUrl = new URL(baseUrl);
+        results.push({ name: 'Base URL', status: 'ok', message: parsedUrl.href });
+    }
+    catch {
+        results.push({ name: 'Base URL', status: 'error', message: `Invalid URL: ${baseUrl}` });
+        return results;
+    }
+    const checkResult = await checkOpenAICompatibleAPI(baseUrl, config.apiKeys.openai_router);
+    if (checkResult.ok) {
+        results.push({ name: 'API Connection', status: 'ok', message: 'Router endpoint is reachable' });
+    }
+    else {
+        results.push({ name: 'API Connection', status: 'error', message: checkResult.message });
+        return results;
+    }
+    const model = config.openaiRouterModel || 'gpt-4o-mini (default)';
+    results.push({ name: 'Default Model', status: 'ok', message: model });
+    if (config.apiKeys.openai_router) {
+        results.push({ name: 'API Key', status: 'ok', message: 'Configured' });
+    }
+    else {
+        results.push({ name: 'API Key', status: 'warn', message: 'Not configured (optional)' });
+    }
+    return results;
+}
 async function checkChatCompletionForModel(provider, baseURL, apiKey, model, debug) {
     const label = `${provider} POST /chat`;
     try {
@@ -560,6 +628,12 @@ export async function runDoctor(debug = false, provider) {
         else if (provider === 'hysa_ai') {
             results = await checkHysaAIDetailed(debug);
         }
+        else if (provider === 'anthropic_proxy') {
+            results = await checkAnthropicProxyDetailed(config, debug);
+        }
+        else if (provider === 'openai_router') {
+            results = await checkOpenAIRouterDetailed(config, debug);
+        }
         else if (provider === 'anthropic' || provider === 'openai' || provider === 'opencode_zen') {
             console.log(pc.yellow(`  Diagnostics for "${provider}" not yet supported in detailed mode. Try:\n  hysa doctor\n  hysa doctor --provider hysa-ai\n`));
             return;
@@ -572,7 +646,7 @@ export async function runDoctor(debug = false, provider) {
             const icon = r.status === 'ok' ? pc.green('✔') : r.status === 'warn' ? pc.yellow('⚠') : pc.red('✘');
             console.log(`  ${icon} ${pc.bold(r.name.padEnd(32))} ${r.message}`);
         }
-        const hasIssues = results.some(r => r.status !== 'ok');
+        const hasIssues = results.some(r => r.status === 'error');
         if (hasIssues) {
             console.log(pc.yellow('\n  Some tests failed. Check the errors above and verify your setup.\n'));
         }
@@ -652,6 +726,36 @@ export async function runDoctor(debug = false, provider) {
                 status: 'warn',
                 message: 'Free tier: 60 requests/min. Daily limit applies.',
             });
+        }
+        // Anthropic proxy status
+        if (config.anthropicProxyBaseUrl) {
+            results.push({ name: 'Anthropic Proxy', status: 'ok', message: `Base URL: ${config.anthropicProxyBaseUrl}` });
+            const proxyModel = config.anthropicProxyModel || 'claude-3-5-sonnet-latest (default)';
+            results.push({ name: 'Proxy Model', status: 'ok', message: proxyModel });
+            if (config.apiKeys.anthropic_proxy) {
+                results.push({ name: 'Proxy Key', status: 'ok', message: 'Configured (optional)' });
+            }
+            else {
+                results.push({ name: 'Proxy Key', status: 'warn', message: 'Not configured (optional)' });
+            }
+        }
+        else {
+            results.push({ name: 'Anthropic Proxy', status: 'warn', message: 'Not configured. Set HYSA_ANTHROPIC_PROXY_BASE_URL.' });
+        }
+        // OpenAI router status
+        if (config.openaiRouterBaseUrl) {
+            results.push({ name: 'OpenAI Router', status: 'ok', message: `Base URL: ${config.openaiRouterBaseUrl}` });
+            const routerModel = config.openaiRouterModel || 'gpt-4o-mini (default)';
+            results.push({ name: 'Router Model', status: 'ok', message: routerModel });
+            if (config.apiKeys.openai_router) {
+                results.push({ name: 'Router Key', status: 'ok', message: 'Configured (optional)' });
+            }
+            else {
+                results.push({ name: 'Router Key', status: 'warn', message: 'Not configured (optional)' });
+            }
+        }
+        else {
+            results.push({ name: 'OpenAI Router', status: 'warn', message: 'Not configured. Set HYSA_OPENAI_ROUTER_BASE_URL.' });
         }
     }
     else {

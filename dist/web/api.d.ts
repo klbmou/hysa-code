@@ -72,8 +72,18 @@ export declare function getFallbackStatus(): {
         provider: string;
         model: string;
         reason: string;
+        category: string;
     } | null;
     lastFallback: string | null;
+    lastSuccessful: {
+        provider: string | null;
+        model: string | null;
+    };
+    lastAttempted: {
+        provider: string | null;
+        model: string | null;
+        category: string | null;
+    };
 };
 export {};
 //# sourceMappingURL=api.d.ts.map

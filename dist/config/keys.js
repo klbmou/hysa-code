@@ -17,6 +17,8 @@ export const PROVIDER_CATEGORIES = {
     llm7: 'experimental_free',
     puter: 'experimental_free',
     hysa_ai: 'local_free',
+    anthropic_proxy: 'cloud_free',
+    openai_router: 'cloud_free',
 };
 export const PROVIDER_CATEGORY_LABELS = {
     local_free: 'LOCAL FREE',
@@ -38,6 +40,8 @@ export const PROVIDER_DEFAULTS = {
     llm7: { model: 'qwen2.5-coder-32b-instruct', label: 'LLM7' },
     puter: { model: 'gpt-4o-mini', label: 'Puter AI' },
     hysa_ai: { model: 'hysa-coder-lite', label: 'HYSA AI' },
+    anthropic_proxy: { model: 'claude-3-5-sonnet-latest', label: 'Anthropic Proxy' },
+    openai_router: { model: 'gpt-4o-mini', label: 'OpenAI Router' },
 };
 export const PROVIDER_MODELS = {
     anthropic: ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],
@@ -46,20 +50,21 @@ export const PROVIDER_MODELS = {
     ollama: ['qwen2.5-coder', 'llama3.1', 'deepseek-coder', 'codellama'],
     openrouter: [
         'qwen/qwen3-coder:free',
-        'deepseek/deepseek-chat:free',
-        'deepseek/deepseek-chat',
         'openai/gpt-oss-120b:free',
-        'nvidia/nemotron-nano-12b-v2-vl:free',
-        'z-ai/glm-4.5-air:free',
+        'deepseek/deepseek-chat:free',
         'meta-llama/llama-3.1-8b-instruct:free',
-        'openrouter/free',
-        'qwen/qwen-2.5-coder-32b-instruct',
+        'deepseek/deepseek-chat',
+        'z-ai/glm-4.5-air:free',
         'google/gemini-2.5-flash:free',
+        'qwen/qwen-2.5-coder-32b-instruct',
+        'nvidia/nemotron-nano-12b-v2-vl:free',
         'google/gemini-2.5-flash',
+        'openrouter/free',
+        'mistralai/mistral-nemo:free',
         'qwen/qwen2.5-vl-72b-instruct:free',
         'qwen/qwen-vl-plus',
     ],
-    groq: ['llama3-70b-8192', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
+    groq: ['llama3-70b-8192', 'llama3-8b-8192', 'mixtral-8x7b-32768', 'deepseek-r1-distill-llama-70b'],
     deepseek: ['deepseek-chat', 'deepseek-coder'],
     local_openai: ['local-model'],
     opencode_zen: [
@@ -75,6 +80,8 @@ export const PROVIDER_MODELS = {
     llm7: ['qwen2.5-coder-32b-instruct', 'gpt-4o-mini-2024-07-18', 'deepseek-r1-0528'],
     puter: ['gpt-4o-mini'],
     hysa_ai: ['hysa-coder-lite', 'hysa-coder', 'hysa-fast'],
+    anthropic_proxy: ['claude-3-5-sonnet-latest', 'claude-3-opus-latest', 'claude-3-haiku-latest'],
+    openai_router: ['qw/qwen3-coder-flash', 'qw/qwen3-coder-plus', 'deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'cc/claude-sonnet-4-6'],
 };
 export const PROVIDER_TIERS = {
     anthropic: 'premium_api',
@@ -90,6 +97,8 @@ export const PROVIDER_TIERS = {
     llm7: 'experimental_free',
     puter: 'experimental_free',
     hysa_ai: 'local_free',
+    anthropic_proxy: 'free_api',
+    openai_router: 'free_api',
 };
 export const TIER_LABELS = {
     free_api: { icon: '☁️', label: 'FREE API KEY' },
@@ -111,6 +120,8 @@ export const PROVIDER_DESCRIPTIONS = {
     llm7: '🧪 Experimental: Free OpenAI-compatible endpoint. API key optional. Not guaranteed stable.',
     puter: '🧪 Experimental: Web-based AI. May require browser/session. Not suitable for CLI automation.',
     hysa_ai: 'Your own local/free provider. Uses HYSA Provider server, which uses Ollama. No external paid API required.',
+    anthropic_proxy: 'Connect to any Anthropic-compatible proxy endpoint. Requires base URL. API key optional.',
+    openai_router: 'Connect to any OpenAI-compatible router/proxy (e.g. 9router). Requires base URL. API key optional.',
 };
 export const PROVIDER_SIGNUP_URLS = {
     anthropic: 'https://console.anthropic.com',
@@ -126,11 +137,13 @@ export const PROVIDER_SIGNUP_URLS = {
     llm7: '',
     puter: 'https://puter.com',
     hysa_ai: '',
+    anthropic_proxy: '',
+    openai_router: '',
 };
-export const FREE_API_PROVIDERS = ['opencode_zen', 'openrouter', 'groq', 'gemini', 'deepseek'];
+export const FREE_API_PROVIDERS = ['opencode_zen', 'openrouter', 'groq', 'gemini', 'deepseek', 'anthropic_proxy', 'openai_router'];
 export const PREMIUM_API_PROVIDERS = ['anthropic', 'openai'];
 export const LOCAL_FREE_PROVIDERS = ['ollama', 'local_openai', 'hysa_ai'];
-export const CLOUD_FREE_PROVIDERS = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini'];
+export const CLOUD_FREE_PROVIDERS = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini', 'anthropic_proxy', 'openai_router'];
 export const EXPERIMENTAL_FREE_PROVIDERS = ['pollinations', 'llm7', 'puter'];
 export const COMPACT_PROMPT_PROVIDERS = ['ollama', 'local_openai', 'hysa_ai', 'pollinations', 'llm7', 'puter'];
 export const EXPERIMENTAL_BASE_URLS = {
@@ -142,7 +155,7 @@ export function providerNeedsApiKey(provider) {
     return !providerHasOptionalApiKey(provider) && !isLocalProvider(provider);
 }
 export function providerHasOptionalApiKey(provider) {
-    return provider === 'llm7' || provider === 'pollinations' || provider === 'puter';
+    return provider === 'llm7' || provider === 'pollinations' || provider === 'puter' || provider === 'anthropic_proxy' || provider === 'openai_router';
 }
 function isLocalProvider(provider) {
     return provider === 'ollama' || provider === 'local_openai' || provider === 'hysa_ai';
@@ -172,13 +185,46 @@ export function loadConfig() {
             if (parsed.apiKey) {
                 migrated.apiKeys[parsed.provider] = parsed.apiKey;
             }
+            applyEnvOverrides(migrated);
             saveConfig(migrated);
             return migrated;
         }
-        return parsed;
+        const config = parsed;
+        applyEnvOverrides(config);
+        return config;
     }
     catch {
         return null;
+    }
+}
+/**
+ * Merge environment variable overrides into config.
+ * Env vars take precedence over config file values.
+ */
+function applyEnvOverrides(config) {
+    const baseUrl = process.env.HYSA_ANTHROPIC_PROXY_BASE_URL;
+    if (baseUrl) {
+        config.anthropicProxyBaseUrl = baseUrl.replace(/\/+$/, '');
+    }
+    const apiKey = process.env.HYSA_ANTHROPIC_PROXY_API_KEY;
+    if (apiKey) {
+        config.apiKeys.anthropic_proxy = apiKey.trim();
+    }
+    const model = process.env.HYSA_ANTHROPIC_PROXY_MODEL;
+    if (model) {
+        config.anthropicProxyModel = model.trim();
+    }
+    const routerUrl = process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+    if (routerUrl) {
+        config.openaiRouterBaseUrl = routerUrl.replace(/\/+$/, '');
+    }
+    const routerKey = process.env.HYSA_OPENAI_ROUTER_API_KEY;
+    if (routerKey) {
+        config.apiKeys.openai_router = routerKey.trim();
+    }
+    const routerModel = process.env.HYSA_OPENAI_ROUTER_MODEL;
+    if (routerModel) {
+        config.openaiRouterModel = routerModel.trim();
     }
 }
 export function normalizeApiKey(key) {

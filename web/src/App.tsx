@@ -5,6 +5,7 @@ import RightPanel from './components/RightPanel.js';
 import Composer, { Attachment } from './components/Composer.js';
 import WelcomeScreen from './components/WelcomeScreen.js';
 import MessageBubble from './components/MessageBubble.js';
+import HysaIntro from './components/HysaIntro.js';
 import ToolEvent from './components/ToolEvent.js';
 import DiffCard from './components/DiffCard.js';
 import CommandCard from './components/CommandCard.js';
@@ -45,6 +46,11 @@ type ChatItem = {
 
 type RightTab = 'code' | 'diff' | 'terminal';
 
+function isArabic(text: string): boolean {
+  const arabicRange = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+  return arabicRange.test(text);
+}
+
 let idCounter = 0;
 function nextId(): string { return `item_${++idCounter}`; }
 
@@ -84,12 +90,17 @@ export default function App() {
   const [thinkingWarning, setThinkingWarning] = useState('');
   const [debug, setDebug] = useState(false);
   const [lastRawResponse, setLastRawResponse] = useState<string | null>(null);
+  const [showIntro, setShowIntro] = useState(true);
+  const [streamingId, setStreamingId] = useState<string | null>(null);
+  const [revealingId, setRevealingId] = useState<string | null>(null);
+  const [revealPos, setRevealPos] = useState(0);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const thinkingStartRef = useRef<number>(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const revealTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatItems]);
   useEffect(() => { if (loading) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [loading]);
@@ -178,9 +189,12 @@ export default function App() {
     if (abortRef.current) { try { abortRef.current.abort(); } catch {} abortRef.current = null; }
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (timeoutRef.current) { clearTimeout(timeoutRef.current); timeoutRef.current = null; }
+    if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
     setLoading(false);
     setElapsedSecs(0);
     setThinkingWarning('');
+    setRevealingId(null);
+    setRevealPos(0);
   }, []);
 
   const cancelThinking = useCallback(() => {
@@ -205,6 +219,10 @@ export default function App() {
     console.debug(LOG, 'Attachments:', attachments?.length || 0);
     console.debug(LOG, 'loading:', loading, 'debug:', debug);
     console.debug(LOG, 'chatItems count:', chatItems.length);
+
+    if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
+    setRevealingId(null);
+    setRevealPos(0);
 
     if (input.startsWith('/')) {
       const cmd = input.slice(1).trim().toLowerCase();
@@ -296,7 +314,7 @@ export default function App() {
       // ── Streaming path ──────────────────────────────
       if (useStream) {
         const reader = res.body?.getReader();
-        if (!reader) { setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: 'Stream not available. Try again without streaming.' }]); return; }
+        if (!reader) { setStreamingId(null); setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: 'Stream not available. Try again without streaming.' }]); return; }
 
         const decoder = new TextDecoder();
         let buffer = '';
@@ -308,6 +326,7 @@ export default function App() {
 
         const placeholderItem: ChatItem = { id: nextId(), kind: 'ai_msg', content: '' };
         streamItemId = placeholderItem.id;
+        setStreamingId(placeholderItem.id);
         setChatItems(prev => [...prev, placeholderItem]);
 
         while (true) {
@@ -368,6 +387,7 @@ export default function App() {
           }
         }
 
+        setStreamingId(null);
         if (streamError) {
           setChatItems(prev => prev.map(item =>
             item.id === streamItemId && item.kind === 'ai_msg'
@@ -410,6 +430,7 @@ export default function App() {
             }
           }
         } else {
+          setStreamingId(null);
           setChatItems(prev => prev.map(item =>
             item.id === streamItemId && item.kind === 'ai_msg'
               ? { ...item, content: accumulatedText || '(Incomplete response)' }
@@ -464,7 +485,52 @@ export default function App() {
       }
 
       if (assistantText) {
-        newItems.push({ id: nextId(), kind: 'ai_msg', content: assistantText });
+        const msgId = nextId();
+        newItems.push({ id: msgId, kind: 'ai_msg', content: assistantText });
+        if (!useStream) {
+          if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
+          setRevealingId(msgId);
+          setRevealPos(0);
+          const totalChars = assistantText.length;
+          const hasArabic = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(assistantText);
+          if (hasArabic) {
+            const wordEnds: number[] = [];
+            for (let i = 1; i <= totalChars; i++) {
+              if (i === totalChars || /\s/.test(assistantText[i])) {
+                wordEnds.push(i);
+              }
+            }
+            if (wordEnds.length === 0) wordEnds.push(totalChars);
+            let wi = 0;
+            const msPer = Math.max(35, Math.min(80, Math.round(Math.min(5000, wordEnds.length * 50) / wordEnds.length)));
+            revealTimerRef.current = setInterval(() => {
+              wi++;
+              if (wi >= wordEnds.length) {
+                if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
+                setRevealingId(null);
+                setRevealPos(0);
+                return;
+              }
+              setRevealPos(wordEnds[wi]);
+            }, msPer);
+          } else {
+            const chunkSize = totalChars > 800 ? 15 : totalChars > 400 ? 8 : totalChars > 100 ? 5 : 3;
+            const totalMs = Math.min(5000, Math.round(totalChars * 0.1));
+            const steps = Math.ceil(totalChars / chunkSize);
+            const msPerChunk = Math.max(25, Math.min(65, Math.round(totalMs / steps)));
+            let pos = 0;
+            revealTimerRef.current = setInterval(() => {
+              pos += chunkSize;
+              if (pos >= totalChars) {
+                if (revealTimerRef.current) { clearInterval(revealTimerRef.current); revealTimerRef.current = null; }
+                setRevealingId(null);
+                setRevealPos(0);
+                return;
+              }
+              setRevealPos(pos);
+            }, msPerChunk);
+          }
+        }
       }
 
       if (hasToolCalls) {
@@ -557,11 +623,17 @@ export default function App() {
       />
       <div className="app-body">
         <FileTree files={files} fileCount={fileCount} selectedFile={selectedFile} onSelect={openFile} collapsed={!sidebarOpen} onClose={() => setSidebarOpen(false)} />
-        <div className="chat-area">
-          <div className="chat-column">
-            <div className={`chat-messages ${!hasItems ? 'center-welcome' : ''}`}>
+        <div className="chat-panel">
+          <div className="messages-scroll">
+            <div className={`chat-column${!hasItems ? ' empty' : ''}`}>
               {!hasItems ? (
-                <WelcomeScreen onHint={sendMessage} fileCount={fileCount} status={status} yolo={yolo} />
+                showIntro ? (
+                  <HysaIntro onDone={() => setShowIntro(false)} />
+                ) : (
+                  <div className="center-welcome">
+                    <WelcomeScreen onHint={sendMessage} fileCount={fileCount} status={status} yolo={yolo} />
+                  </div>
+                )
               ) : (
                 <>
                   {chatItems.map((item, idx) => {
@@ -580,17 +652,21 @@ export default function App() {
                       const sourceFiles = prevItem?.kind === 'user_msg' && prevItem.attachments?.length
                         ? prevItem.attachments.map(a => a.name).join(', ')
                         : null;
+                      const isRevealing = item.id === revealingId;
+                      const isStreaming = item.id === streamingId;
+                      const displayContent = isRevealing
+                        ? item.content.slice(0, revealPos)
+                        : item.content;
                       return (
-                        <div key={item.id} className="message-row assistant">
-                          <div className="avatar ai">H</div>
-                          <div className="bubble assistant" dir="auto">
-                            {sourceFiles && <div className="msg-attach-source">Using {sourceFiles}</div>}
-                            {item.content}
-                          </div>
-                          <div className="message-actions">
-                            <button className="msg-action-btn" onClick={() => handleCopyMessage(item.content)} title="Copy">Copy</button>
-                          </div>
-                        </div>
+                        <MessageBubble
+                          key={item.id}
+                          kind="assistant"
+                          content={displayContent}
+                          onCopy={handleCopyMessage}
+                          sourceFiles={sourceFiles || undefined}
+                          streaming={isRevealing || isStreaming}
+                          className={isRevealing || isStreaming ? 'streaming-row' : undefined}
+                        />
                       );
                     }
                     if (item.kind === 'tool_event') {
@@ -609,15 +685,23 @@ export default function App() {
               )}
             </div>
 
-            {loading && (
-              <div className="thinking-bar">
-                <span className="tb-dot-pulse"><span></span><span></span><span></span></span>
-                <span className="tb-text">HYSA is working with {status ? status.provider : '?'} / {status ? status.model : '?'}...</span>
-                <span className="tb-timer">{elapsedSecs}s</span>
-                {thinkingWarning && <span className={`tb-warn ${elapsedSecs >= 25 ? 'tb-slow' : ''}`}>{thinkingWarning}</span>}
-                <button className="tb-cancel" onClick={cancelThinking}>Cancel</button>
-              </div>
-            )}
+            {loading && (() => {
+              const lastUser = [...chatItems].reverse().find(i => i.kind === 'user_msg');
+              const lastUserArabic = lastUser?.kind === 'user_msg' && isArabic(lastUser.content);
+              const thinkingText = lastUserArabic ? 'جارٍ نسج الرد...' : 'Weaving response...';
+              const warnText = lastUserArabic
+                ? elapsedSecs >= 20 ? 'قد يكون المزود بطيئًا أو محدود المعدل. جرّب OpenRouter أو Gemini أو HYSA AI.' : elapsedSecs >= 8 ? 'لا يزال قيد العمل... قد يكون المزود بطيئًا.' : ''
+                : thinkingWarning;
+              return (
+                <div className="thinking-bar">
+                  <span className="tb-pixel-icon">&gt;</span>
+                  <span className="tb-text">{thinkingText}</span>
+                  <span className="tb-timer">{elapsedSecs}s</span>
+                  {warnText && <span className={`tb-warn ${elapsedSecs >= 25 ? 'tb-slow' : ''}`}>{warnText}</span>}
+                  <button className="tb-cancel" onClick={cancelThinking}>Cancel</button>
+                </div>
+              );
+            })()}
 
             {debug && lastRawResponse && (
               <div className="debug-panel">
@@ -628,7 +712,6 @@ export default function App() {
                 <pre className="debug-panel-body">{lastRawResponse}</pre>
               </div>
             )}
-
             <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
           </div>
         </div>

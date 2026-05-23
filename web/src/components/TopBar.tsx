@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import PixelMark from './PixelMark.js';
 
 interface TopBarProps {
   status: { provider: string; model: string; tier: string; git: { branch: string | null; hasChanges: boolean } | null } | null;
@@ -40,6 +41,7 @@ export default function TopBar({ status, sidebarOpen, onToggleSidebar, yolo, onT
             <line x1="3" y1="18" x2="21" y2="18" />
           </svg>
         </button>
+        <PixelMark size={22} className="topbar-mark" />
         <span className="topbar-logo">HYSA</span>
         {status && (
           <div className="topbar-pills">

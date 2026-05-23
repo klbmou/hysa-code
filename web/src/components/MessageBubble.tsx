@@ -6,6 +6,9 @@ interface MessageBubbleProps {
   content: string;
   attachments?: Attachment[];
   onCopy?: (text: string) => void;
+  sourceFiles?: string;
+  streaming?: boolean;
+  className?: string;
 }
 
 function isArabic(text: string): boolean {
@@ -38,7 +41,6 @@ function renderMarkdown(text: string): React.ReactNode[] {
   let remaining = text;
 
   while (remaining.length > 0) {
-    // Code block
     const codeBlockMatch = remaining.match(/```(\w*)\n([\s\S]*?)```/);
     if (codeBlockMatch && codeBlockMatch.index !== undefined) {
       if (codeBlockMatch.index > 0) {
@@ -53,7 +55,6 @@ function renderMarkdown(text: string): React.ReactNode[] {
       continue;
     }
 
-    // Inline code
     const inlineMatch = remaining.match(/`([^`]+)`/);
     if (inlineMatch && inlineMatch.index !== undefined) {
       if (inlineMatch.index > 0) {
@@ -64,7 +65,6 @@ function renderMarkdown(text: string): React.ReactNode[] {
       continue;
     }
 
-    // Bold
     const boldMatch = remaining.match(/\*\*([^*]+)\*\*/);
     if (boldMatch && boldMatch.index !== undefined) {
       if (boldMatch.index > 0) {
@@ -75,7 +75,6 @@ function renderMarkdown(text: string): React.ReactNode[] {
       continue;
     }
 
-    // No more patterns — push remaining
     if (remaining.length > 0) {
       parts.push(<span key={`t-${parts.length}`} dir="auto">{remaining}</span>);
       break;
@@ -149,37 +148,45 @@ function AttachmentCard({ attachment }: { attachment: Attachment }) {
   );
 }
 
-export default function MessageBubble({ kind, content, attachments, onCopy }: MessageBubbleProps) {
+export default function MessageBubble({ kind, content, attachments, onCopy, sourceFiles, streaming, className }: MessageBubbleProps) {
   const hasArabic = isArabic(content);
 
-  return (
-    <div className={`msg-row msg-row-${kind}`}>
-      {kind === 'assistant' && (
-        <div className="msg-avatar">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="4 17 10 11 4 5" />
-            <line x1="12" y1="19" x2="20" y2="19" />
-          </svg>
-        </div>
-      )}
-      <div className={`msg-bubble msg-bubble-${kind} ${hasArabic ? 'msg-arabic' : ''}`}>
-        {kind === 'assistant' ? (
-          <div className="msg-content" dir={hasArabic ? 'rtl' : 'auto'}>
-            {renderMarkdown(content)}
+  if (kind === 'assistant') {
+    return (
+      <div className={`msg-row assistant${className ? ` ${className}` : ''}`}>
+        <div className="assistant-inner">
+          <div className="avatar">
+            <span className="avatar-h">H</span>
           </div>
-        ) : (
-          <div className="msg-content" dir="auto">{content}</div>
-        )}
+          <div className="assistant-block">
+            {sourceFiles && (
+              <div className="msg-attach-source">Using {sourceFiles}</div>
+            )}
+            <div className={`assistant-bubble ${hasArabic ? 'arabic' : ''} ${streaming ? 'streaming' : ''}`}>
+              <div className="assistant-content" dir={hasArabic ? 'rtl' : 'auto'}>
+                {renderMarkdown(content)}
+              </div>
+              {onCopy && content && (
+                <div className="msg-actions">
+                  <button className="msg-action-btn" onClick={() => onCopy(content)} title="Copy message">Copy</button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="msg-row user">
+      <div className="user-inner">
+        <div className="user-bubble">{content}</div>
         {attachments && attachments.length > 0 && (
-          <div className="msg-attach-list">
+          <div className="attachment-list">
             {attachments.map(a => (
               <AttachmentCard key={a.id} attachment={a} />
             ))}
-          </div>
-        )}
-        {kind === 'assistant' && onCopy && content && (
-          <div className="msg-actions">
-            <button className="msg-action-btn" onClick={() => onCopy(content)} title="Copy message">Copy</button>
           </div>
         )}
       </div>

@@ -63,33 +63,27 @@ export function createGeminiClient(apiKey: string, model: string): AIClient {
 
       let content: string;
 
-      try {
-        if (messages.length === 1) {
-          const result = await withTimeout(
-            geminiModel.generateContent({
-              contents: [{ role: 'user', parts: contentToGeminiParts(lastMessage.content) }],
-              systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-            }),
-            30000,
-            signal,
-          );
-          content = result.response.text();
-        } else {
-          const chat = geminiModel.startChat({
-            history,
+      if (messages.length === 1) {
+        const result = await withTimeout(
+          geminiModel.generateContent({
+            contents: [{ role: 'user', parts: contentToGeminiParts(lastMessage.content) }],
             systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-          });
-          const result = await withTimeout(
-            chat.sendMessage(contentToGeminiParts(lastMessage.content)),
-            30000,
-            signal,
-          );
-          content = result.response.text();
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.log('[Gemini] Error:', msg.slice(0, 200));
-        throw err;
+          }),
+          30000,
+          signal,
+        );
+        content = result.response.text();
+      } else {
+        const chat = geminiModel.startChat({
+          history,
+          systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+        });
+        const result = await withTimeout(
+          chat.sendMessage(contentToGeminiParts(lastMessage.content)),
+          30000,
+          signal,
+        );
+        content = result.response.text();
       }
 
       return handleContent(content);
@@ -101,45 +95,39 @@ export function createGeminiClient(apiKey: string, model: string): AIClient {
 
       let fullContent = '';
 
-      try {
-        if (messages.length === 1) {
-          const result = await withTimeout(
-            geminiModel.generateContentStream({
-              contents: [{ role: 'user', parts: contentToGeminiParts(lastMessage.content) }],
-              systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-            }),
-            30000,
-            signal,
-          );
-          for await (const chunk of result.stream) {
-            const delta = chunk.text();
-            if (delta) {
-              fullContent += delta;
-              onEvent({ type: 'token', text: delta });
-            }
-          }
-        } else {
-          const chat = geminiModel.startChat({
-            history,
+      if (messages.length === 1) {
+        const result = await withTimeout(
+          geminiModel.generateContentStream({
+            contents: [{ role: 'user', parts: contentToGeminiParts(lastMessage.content) }],
             systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
-          });
-          const result = await withTimeout(
-            chat.sendMessageStream(contentToGeminiParts(lastMessage.content)),
-            30000,
-            signal,
-          );
-          for await (const chunk of result.stream) {
-            const delta = chunk.text();
-            if (delta) {
-              fullContent += delta;
-              onEvent({ type: 'token', text: delta });
-            }
+          }),
+          30000,
+          signal,
+        );
+        for await (const chunk of result.stream) {
+          const delta = chunk.text();
+          if (delta) {
+            fullContent += delta;
+            onEvent({ type: 'token', text: delta });
           }
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.log('[Gemini] Error:', msg.slice(0, 200));
-        throw err;
+      } else {
+        const chat = geminiModel.startChat({
+          history,
+          systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+        });
+        const result = await withTimeout(
+          chat.sendMessageStream(contentToGeminiParts(lastMessage.content)),
+          30000,
+          signal,
+        );
+        for await (const chunk of result.stream) {
+          const delta = chunk.text();
+          if (delta) {
+            fullContent += delta;
+            onEvent({ type: 'token', text: delta });
+          }
+        }
       }
 
       onEvent({ type: 'done', fullText: stripToolCallBlocks(fullContent), toolCalls: parseToolCalls(fullContent) });

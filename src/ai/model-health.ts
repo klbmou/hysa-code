@@ -37,8 +37,12 @@ import type { ProviderHealthEntry } from '../utils/session.js';
 const healthStore = new Map<string, ProviderHealthRecord>();
 const requestSkipped = new Set<string>();
 
+const HEALTH_TTL_MS = 60000;
+
 let lastError: LastErrorInfo | null = null;
 let lastFallbackUsed: string | null = null;
+let lastSuccessfulProvider: string | null = null;
+let lastSuccessfulModel: string | null = null;
 const fallbackEvents: FallbackEvent[] = [];
 
 function key(provider: string, model: string): string {
@@ -114,7 +118,11 @@ export function markHealth(
 
 export function isUnhealthy(provider: string, model: string): boolean {
   const rec = healthStore.get(key(provider, model));
-  return rec?.status === 'unhealthy';
+  if (!rec) return false;
+  if (rec.status !== 'unhealthy') return false;
+  // Expired record — allow retry
+  if (Date.now() - rec.timestamp > HEALTH_TTL_MS) return false;
+  return true;
 }
 
 export function isSkippedForRequest(provider: string, model: string): boolean {
@@ -185,6 +193,19 @@ export function getLastFallbackUsed(): string | null {
 
 export function setLastFallbackUsed(fb: string | null): void {
   lastFallbackUsed = fb;
+}
+
+export function getLastSuccessfulProvider(): string | null {
+  return lastSuccessfulProvider;
+}
+
+export function getLastSuccessfulModel(): string | null {
+  return lastSuccessfulModel;
+}
+
+export function setLastSuccessfulProvider(provider: string | null, model: string | null): void {
+  lastSuccessfulProvider = provider;
+  lastSuccessfulModel = model;
 }
 
 export function addFallbackEvent(provider: string, model: string, reason: string): void {

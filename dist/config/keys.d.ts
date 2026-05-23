@@ -1,5 +1,5 @@
 import type { AgentMode } from '../agent/types.js';
-export type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'openrouter' | 'groq' | 'deepseek' | 'local_openai' | 'opencode_zen' | 'pollinations' | 'llm7' | 'puter' | 'hysa_ai';
+export type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'openrouter' | 'groq' | 'deepseek' | 'local_openai' | 'opencode_zen' | 'pollinations' | 'llm7' | 'puter' | 'hysa_ai' | 'anthropic_proxy' | 'openai_router';
 export type ProviderCategory = 'local_free' | 'cloud_free' | 'premium_api' | 'experimental_free';
 export interface HysaConfig {
     currentProvider: ProviderType;
@@ -16,11 +16,17 @@ export interface HysaConfig {
         llm7?: string;
         puter?: string;
         hysa_ai?: string;
+        anthropic_proxy?: string;
+        openai_router?: string;
     };
     ollamaBaseUrl: string;
     localOpenAiBaseUrl?: string;
     localOpenAiModel?: string;
     hysaAiBaseUrl?: string;
+    anthropicProxyBaseUrl?: string;
+    anthropicProxyModel?: string;
+    openaiRouterBaseUrl?: string;
+    openaiRouterModel?: string;
     allowExperimentalProviders?: boolean;
     experimentalConfirmed?: boolean;
     agentMode?: AgentMode;

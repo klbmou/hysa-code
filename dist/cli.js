@@ -25,11 +25,35 @@ import { ALL_MODES, MODE_LABELS, MODE_DESCRIPTIONS } from './agent/modes.js';
 import { createTask, getActiveTask } from './agent/tasks.js';
 import { listSymbols, findReferences, searchImports, summarizeFile, explainFunction } from './agent/tools.js';
 import { getAllHealth, toHealthSummary, resetHealth, getLastError, getLastFallbackUsed, loadHealthFromEntries } from './ai/model-health.js';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+function getPackageVersion() {
+    try {
+        const __filename = fileURLToPath(import.meta.url);
+        const __dirname = dirname(__filename);
+        const candidates = [
+            join(__dirname, '..', 'package.json'),
+            join(__dirname, '..', '..', 'package.json'),
+            join(process.cwd(), 'package.json'),
+        ];
+        for (const p of candidates) {
+            try {
+                const pkg = JSON.parse(readFileSync(p, 'utf8'));
+                if (pkg && typeof pkg.version === 'string')
+                    return pkg.version;
+            }
+            catch { }
+        }
+    }
+    catch { }
+    return '0.6.0';
+}
 // ── Setup ────────────────────────────────────────────────
 async function setupFirstRun() {
     console.clear();
     console.log(pc.bold(pc.magenta('┌─────────────────────────────────────────────┐')));
-    console.log(pc.bold(pc.magenta('│        💜 Welcome to HYSA Code v0.2          │')));
+    console.log(pc.bold(pc.magenta(`│        💜 Welcome to HYSA Code v${getPackageVersion()}         │`)));
     console.log(pc.bold(pc.magenta('└─────────────────────────────────────────────┘')));
     console.log();
     const mode = await select({
@@ -87,11 +111,41 @@ async function setupFirstRun() {
             choices: [
                 { name: `OpenCode Zen  — ${PROVIDER_DESCRIPTIONS.opencode_zen}`, value: 'opencode_zen' },
                 { name: `OpenRouter    — ${PROVIDER_DESCRIPTIONS.openrouter}`, value: 'openrouter' },
-                { name: `Groq        — ${PROVIDER_DESCRIPTIONS.groq}`, value: 'groq' },
-                { name: `DeepSeek    — ${PROVIDER_DESCRIPTIONS.deepseek}`, value: 'deepseek' },
-                { name: `Gemini      — ${PROVIDER_DESCRIPTIONS.gemini}`, value: 'gemini' },
+                { name: `Groq          — ${PROVIDER_DESCRIPTIONS.groq}`, value: 'groq' },
+                { name: `DeepSeek      — ${PROVIDER_DESCRIPTIONS.deepseek}`, value: 'deepseek' },
+                { name: `Gemini        — ${PROVIDER_DESCRIPTIONS.gemini}`, value: 'gemini' },
+                { name: `OpenAI Router — external proxy/router (9router, etc.)`, value: 'openai_router' },
             ],
         });
+        if (provider === 'openai_router') {
+            const fromEnv = !!process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+            let baseUrl = process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+            if (!baseUrl) {
+                baseUrl = await input({ message: 'OpenAI router base URL\n  Example: http://localhost:20128/v1', default: 'http://localhost:20128/v1' });
+            }
+            baseUrl = baseUrl.replace(/\/+$/, '');
+            let model = process.env.HYSA_OPENAI_ROUTER_MODEL || PROVIDER_DEFAULTS.openai_router.model;
+            model = await input({ message: 'Model name (as accepted by your router):', default: model });
+            const askKey = await confirm({ message: 'Does your router require an API key?', default: !!process.env.HYSA_OPENAI_ROUTER_API_KEY });
+            let key = '';
+            if (askKey) {
+                key = await password({ message: 'Enter API key for router:', mask: true });
+            }
+            const config = {
+                currentProvider: 'openai_router',
+                currentModel: model,
+                apiKeys: { openai_router: key },
+                openaiRouterBaseUrl: baseUrl,
+                openaiRouterModel: model,
+                ollamaBaseUrl: 'http://localhost:11434',
+            };
+            saveConfig(config);
+            console.log(pc.green(`\n✓ OpenAI Router configured!${fromEnv ? ' (from env vars)' : ''}`));
+            console.log(pc.dim(`  Base URL: ${baseUrl}`));
+            console.log(pc.dim(`  Model:    ${model}`));
+            console.log(pc.dim('  Start chatting with: hysa chat\n'));
+            return config;
+        }
         const rawKey = await password({
             message: `Enter your free ${PROVIDER_DEFAULTS[provider].label} API key\n  Get one: ${PROVIDER_SIGNUP_URLS[provider]}`,
             mask: true,
@@ -266,6 +320,8 @@ const PROVIDER_CHOICES = [
     { name: 'Pollinations AI (Experimental)', value: 'pollinations', category: 'experimental_free', tier: 'experimental_free' },
     { name: 'LLM7 (Experimental)', value: 'llm7', category: 'experimental_free', tier: 'experimental_free' },
     { name: 'Puter AI (Experimental)', value: 'puter', category: 'experimental_free', tier: 'experimental_free' },
+    { name: 'Anthropic Proxy (Cloud Free)', value: 'anthropic_proxy', category: 'cloud_free', tier: 'free_api' },
+    { name: 'OpenAI Router (Cloud Free)', value: 'openai_router', category: 'cloud_free', tier: 'free_api' },
 ];
 async function switchModel(config) {
     // Filter choices: hide experimental unless enabled
@@ -326,6 +382,18 @@ async function switchModel(config) {
                     updatedConfig.apiKeys = { ...config.apiKeys, [provider]: validated.key };
                 }
             }
+        }
+    }
+    if (provider === 'anthropic_proxy' && !config.anthropicProxyBaseUrl) {
+        const baseUrl = await input({ message: 'Anthropic proxy base URL\n  Example: https://proxy.example.com', default: 'https://' });
+        if (baseUrl) {
+            updatedConfig.anthropicProxyBaseUrl = baseUrl.replace(/\/+$/, '');
+        }
+    }
+    if (provider === 'openai_router' && !config.openaiRouterBaseUrl) {
+        const baseUrl = await input({ message: 'OpenAI router base URL\n  Example: http://localhost:20128/v1', default: 'http://localhost:20128/v1' });
+        if (baseUrl) {
+            updatedConfig.openaiRouterBaseUrl = baseUrl.replace(/\/+$/, '');
         }
     }
     updateSettings(updatedConfig);
@@ -876,10 +944,18 @@ async function chatLoop(initialConfig, initialYolo = false) {
         }
         if (trimmed.toLowerCase() === '/fallback test') {
             console.log(pc.cyan('\nTesting configured providers...\n'));
-            const testProviders = ['openrouter', 'gemini', 'deepseek', 'groq', 'opencode_zen'];
+            const testProviders = ['openrouter', 'gemini', 'deepseek', 'groq', 'opencode_zen', 'anthropic_proxy', 'openai_router'];
             for (const prov of testProviders) {
+                if (prov === 'anthropic_proxy' && !config.anthropicProxyBaseUrl) {
+                    console.log(`  ${pc.dim(`[skip] Anthropic Proxy: no base URL configured`)}`);
+                    continue;
+                }
+                if (prov === 'openai_router' && !config.openaiRouterBaseUrl) {
+                    console.log(`  ${pc.dim(`[skip] OpenAI Router: no base URL configured`)}`);
+                    continue;
+                }
                 const key = config.apiKeys[prov];
-                if (!key) {
+                if (!key && !providerHasOptionalApiKey(prov)) {
                     console.log(`  ${pc.dim(`[skip] ${PROVIDER_DEFAULTS[prov]?.label || prov}: no API key`)}`);
                     continue;
                 }
@@ -887,7 +963,7 @@ async function chatLoop(initialConfig, initialYolo = false) {
                 const model = config.currentProvider === prov ? config.currentModel : PROVIDER_DEFAULTS[prov]?.model || '';
                 process.stdout.write(`  ${label} (${model || 'default'})... `);
                 try {
-                    const testClient = createSingleClient(prov, model || 'test', config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+                    const testClient = createSingleClient(prov, model || 'test', config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel, config);
                     if (!testClient) {
                         console.log(pc.red('✗ could not create client'));
                         continue;
@@ -921,7 +997,7 @@ async function chatLoop(initialConfig, initialYolo = false) {
         }
         if (trimmed.toLowerCase() === '/providers') {
             console.log(pc.cyan('\nAvailable Providers:\n'));
-            const allProviders = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini', 'ollama', 'local_openai', 'anthropic', 'openai'];
+            const allProviders = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini', 'ollama', 'local_openai', 'hysa_ai', 'anthropic', 'openai', 'anthropic_proxy', 'openai_router'];
             if (config.allowExperimentalProviders) {
                 allProviders.push('pollinations', 'llm7', 'puter');
             }
@@ -1914,19 +1990,42 @@ export async function start() {
     program
         .name('hysa')
         .description('HYSA Code - AI coding assistant')
-        .version('0.2.0');
+        .version(getPackageVersion());
     program
         .command('chat')
         .description('Start an interactive chat with the AI')
         .option('-y, --yolo', 'Enable YOLO mode (auto-apply edits, skip confirmations for safe commands)')
+        .option('-p, --provider <name>', 'Provider to use (overrides config)')
         .action(async (opts) => {
         let config = getSettings();
-        if (!config) {
+        if (opts.provider) {
+            const provider = opts.provider;
+            config = config || {
+                currentProvider: provider,
+                currentModel: PROVIDER_DEFAULTS[provider]?.model || 'default',
+                apiKeys: {},
+                ollamaBaseUrl: 'http://localhost:11434',
+            };
+            config.currentProvider = provider;
+            config.currentModel = PROVIDER_DEFAULTS[provider]?.model || config.currentModel;
+            if (provider === 'openai_router') {
+                if (process.env.HYSA_OPENAI_ROUTER_BASE_URL)
+                    config.openaiRouterBaseUrl = process.env.HYSA_OPENAI_ROUTER_BASE_URL.replace(/\/+$/, '');
+                if (process.env.HYSA_OPENAI_ROUTER_MODEL) {
+                    config.currentModel = process.env.HYSA_OPENAI_ROUTER_MODEL;
+                    config.openaiRouterModel = process.env.HYSA_OPENAI_ROUTER_MODEL;
+                }
+                if (process.env.HYSA_OPENAI_ROUTER_API_KEY)
+                    config.apiKeys.openai_router = process.env.HYSA_OPENAI_ROUTER_API_KEY.trim();
+            }
+        }
+        else if (!config) {
             config = await setupFirstRun();
         }
         else {
             const hasApiKey = Object.values(config.apiKeys).some(k => k);
-            if (!hasApiKey && config.currentProvider !== 'ollama' && config.currentProvider !== 'local_openai') {
+            const needsKey = providerNeedsApiKey(config.currentProvider);
+            if (!hasApiKey && needsKey) {
                 console.log(pc.yellow('No API keys configured. Running setup...\n'));
                 config = await setupFirstRun();
             }
@@ -1953,6 +2052,12 @@ export async function start() {
             }
             if (config.currentProvider === 'ollama') {
                 console.log(`  Ollama URL: ${config.ollamaBaseUrl}`);
+            }
+            if (config.currentProvider === 'openai_router' && config.openaiRouterBaseUrl) {
+                console.log(`  OpenAI Router URL: ${config.openaiRouterBaseUrl}`);
+            }
+            if (config.currentProvider === 'anthropic_proxy' && config.anthropicProxyBaseUrl) {
+                console.log(`  Anthropic Proxy URL: ${config.anthropicProxyBaseUrl}`);
             }
             console.log();
         }
@@ -2019,6 +2124,18 @@ export async function start() {
                     }
                 }
             }
+            if (provider === 'anthropic_proxy' && !config.anthropicProxyBaseUrl) {
+                const baseUrl = await input({ message: 'Anthropic proxy base URL\n  Example: https://proxy.example.com', default: 'https://' });
+                if (baseUrl) {
+                    updated.anthropicProxyBaseUrl = baseUrl.replace(/\/+$/, '');
+                }
+            }
+            if (provider === 'openai_router' && !config.openaiRouterBaseUrl) {
+                const baseUrl = await input({ message: 'OpenAI router base URL\n  Example: http://localhost:20128/v1', default: 'http://localhost:20128/v1' });
+                if (baseUrl) {
+                    updated.openaiRouterBaseUrl = baseUrl.replace(/\/+$/, '');
+                }
+            }
             updateSettings(updated);
             console.log(pc.green('✓ Configuration updated\n'));
         }
@@ -2031,6 +2148,8 @@ export async function start() {
                 { name: 'Google Gemini (Free API)', value: 'gemini' },
                 { name: 'Anthropic Claude (Premium)', value: 'anthropic' },
                 { name: 'OpenAI GPT (Premium)', value: 'openai' },
+                { name: 'Anthropic Proxy (Cloud Free)', value: 'anthropic_proxy' },
+                { name: 'OpenAI Router (Cloud Free)', value: 'openai_router' },
             ];
             if (config.allowExperimentalProviders) {
                 keyChoices.push({ name: 'Pollinations AI (Experimental)', value: 'pollinations' }, { name: 'LLM7 (Experimental)', value: 'llm7' }, { name: 'Puter AI (Experimental)', value: 'puter' });
@@ -2168,6 +2287,7 @@ export async function start() {
             { id: 'Pollinations AI', tier: 'EXPERIMENTAL FREE', needsKey: 'No*', needsDownload: 'No', notes: '🧪 No key by default, may log prompts' },
             { id: 'LLM7', tier: 'EXPERIMENTAL FREE', needsKey: 'Opt', needsDownload: 'No', notes: '🧪 OpenAI-compatible, optional key' },
             { id: 'Puter AI', tier: 'EXPERIMENTAL FREE', needsKey: 'No', needsDownload: 'No', notes: '🧪 Web/browser based, not CLI suitable' },
+            { id: 'OpenAI Router', tier: 'FREE API KEY', needsKey: 'Opt', needsDownload: 'No', notes: 'OpenAI-compatible router/proxy (9router etc.)' },
         ];
         console.log(pc.cyan('\nAvailable AI Providers:\n'));
         console.log(`  ${pc.bold('Provider'.padEnd(22))} ${pc.bold('Tier'.padEnd(18))} ${pc.bold('Key'.padEnd(10))} ${pc.bold('Download'.padEnd(12))} ${pc.bold('Notes')}`);

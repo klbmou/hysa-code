@@ -68,14 +68,13 @@ if (!config) {
   process.exit(1);
 }
 
+const origConfig = JSON.parse(JSON.stringify(config));
 const origProvider = config.currentProvider;
 const origModel = config.currentModel;
 
 // Restore at exit
 process.on('exit', () => {
-  config.currentProvider = origProvider;
-  config.currentModel = origModel;
-  saveConfig(config);
+  saveConfig(origConfig);
 });
 
 (async () => {
@@ -443,8 +442,726 @@ process.on('exit', () => {
     console.log(`  ✗ Error: ${err.message.slice(0, 200)}`);
   }
 
-  // ===== TEST 7: Web UI =====
-  section('TEST 7: Web UI — API endpoint test');
+  // ===== TEST 6a: Anthropic Proxy — Not Configured =====
+  section('TEST 6a: Anthropic Proxy — not configured (clean skip)');
+  console.log('  Testing: anthropic_proxy without base URL should skip cleanly');
+  let savedBaseUrl6a;
+  try {
+    savedBaseUrl6a = config.anthropicProxyBaseUrl;
+    delete config.anthropicProxyBaseUrl;
+
+    clearFallbackEvents();
+    resetHealth();
+    const client = createClient(config);
+    const result = await client.sendMessage(
+      [{ role: 'user', content: 'say hi briefly' }],
+      'You are a helpful assistant.'
+    );
+
+    const fbEvents = getFallbackEvents();
+    const proxySkipped = fbEvents.some(e => e.provider === 'anthropic_proxy' || e.reason.includes('Anthropic Proxy'));
+    const hasContent = !!result.message;
+
+    console.log(`  Response: ${result.message?.slice(0, 100) || '(empty)'}`);
+    console.log(`  Fallback events: ${fbEvents.length}`);
+    for (const e of fbEvents) {
+      console.log(`    [${e.provider}] ${e.reason.slice(0, 100)}`);
+    }
+    console.log(`  ${hasContent ? '✓ fallback succeeded with other provider' : '✗ no content'}`);
+    console.log(`  ${proxySkipped ? '✓ anthropic_proxy was in fallback path (skipped)' : 'ℹ anthropic_proxy not in fallback path (skipped before trying)'}`);
+  } catch (err) {
+    console.log(`  ! Got error: ${err.message.slice(0, 150)}`);
+  } finally {
+    config.anthropicProxyBaseUrl = savedBaseUrl6a;
+    config.currentProvider = origProvider;
+    config.currentModel = origModel;
+  }
+
+  // ===== TEST 6b: Anthropic Proxy — Mock Server =====
+  section('TEST 6b: Anthropic Proxy — mock server endpoint');
+  console.log('  Testing: anthropic_proxy configured with a mock server endpoint');
+  try {
+    // Start a tiny mock server
+    const http = await import('node:http');
+    const mockResponses = [];
+    let mockServer = null;
+
+    const startMockServer = () => new Promise((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        mockResponses.push({ method: req.method, url: req.url, headers: req.headers });
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+          mockResponses[mockResponses.length - 1].body = body;
+          if (req.url === '/v1/messages') {
+            const parsed = JSON.parse(body);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              id: 'msg_mock',
+              type: 'message',
+              role: 'assistant',
+              content: [
+                { type: 'text', text: `Mock response to: ${parsed.messages?.[parsed.messages.length - 1]?.content || 'empty'}` }
+              ],
+              model: parsed.model || 'mock-model',
+              stop_reason: 'end_turn',
+              usage: { input_tokens: 10, output_tokens: 5 }
+            }));
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ data: [{ id: 'mock-model' }] }));
+          }
+        });
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        mockServer = server;
+        resolve(`http://127.0.0.1:${addr.port}`);
+      });
+      server.on('error', reject);
+    });
+
+    const mockBaseUrl = await startMockServer();
+    console.log(`  Mock server started at: ${mockBaseUrl}`);
+
+    // Create a client pointing to mock server
+    const { createAnthropicProxyClient } = await import('./dist/ai/anthropic-proxy.js');
+    const mockClient = createAnthropicProxyClient(mockBaseUrl, 'test-key-123', 'claude-sonnet-4-20250514');
+
+    const result = await mockClient.sendMessage(
+      [{ role: 'user', content: 'Hello mock server' }],
+      'System prompt here'
+    );
+
+    console.log(`  Response: "${result.message}"`);
+    console.log(`  Tool calls: ${result.toolCalls?.length || 0}`);
+
+    // Verify headers
+    const lastReq = mockResponses[mockResponses.length - 1];
+    const hasXApiKey = lastReq?.headers?.['x-api-key'] === 'test-key-123';
+    const hasAuth = lastReq?.headers?.['authorization'] === 'Bearer test-key-123';
+    const hasAnthropicVersion = lastReq?.headers?.['anthropic-version'] === '2023-06-01';
+    console.log(`  x-api-key header: ${hasXApiKey ? '✓' : '✗'}`);
+    console.log(`  authorization header: ${hasAuth ? '✓' : '✗'}`);
+    console.log(`  anthropic-version header: ${hasAnthropicVersion ? '✓' : '✗'}`);
+
+    const allHeadersOk = hasXApiKey && hasAuth && hasAnthropicVersion;
+    console.log(`  ${result.message?.includes('Hello mock server') ? '✓ Correct response content' : '✗ Unexpected content'}`);
+    console.log(`  ${allHeadersOk ? '✓ All required headers sent' : '✗ Missing some headers'}`);
+    console.log(`  ${result.message ? '✓ anthropic_proxy mock server test PASSED' : '✗ FAILED'}`);
+
+    mockServer.close();
+    console.log('  Mock server stopped.');
+  } catch (err) {
+    console.log(`  ✗ Error: ${err.message}`);
+  }
+
+  // ===== TEST 6c: Anthropic Proxy — Streaming with Mock Server =====
+  section('TEST 6c: Anthropic Proxy — streaming path');
+  console.log('  Testing: anthropic_proxy SSE streaming endpoint');
+  try {
+    const http = await import('node:http');
+    let streamServer = null;
+
+    const startStreamServer = () => new Promise((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        if (req.url === '/v1/messages') {
+          const bodyParts = [];
+          req.on('data', c => bodyParts.push(c));
+          req.on('end', () => {
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+            });
+            res.write(`event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n`);
+            res.write(`event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello from "}}\n\n`);
+            res.write(`event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"streaming mock!"}}\n\n`);
+            res.write(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
+            res.end();
+          });
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ data: [] }));
+        }
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        streamServer = server;
+        resolve(`http://127.0.0.1:${addr.port}`);
+      });
+      server.on('error', reject);
+    });
+
+    const streamBaseUrl = await startStreamServer();
+    console.log(`  Stream server started at: ${streamBaseUrl}`);
+
+    const { createAnthropicProxyClient } = await import('./dist/ai/anthropic-proxy.js');
+    const streamClient = createAnthropicProxyClient(streamBaseUrl, 'stream-key', 'claude-sonnet-4-20250514');
+
+    const streamedChunks = [];
+    const result = await streamClient.sendMessageStream(
+      [{ role: 'user', content: 'Stream test' }],
+      'You are a bot',
+      (event) => {
+        if (event.type === 'token') {
+          streamedChunks.push(event.text);
+        }
+      }
+    );
+
+    const fullText = streamedChunks.join('');
+    console.log(`  Streamed chunks: ${JSON.stringify(streamedChunks)}`);
+    console.log(`  Full streamed text: "${fullText}"`);
+    console.log(`  Result message: "${result.message}"`);
+    console.log(`  Stream matches result: ${fullText === result.message ? '✓' : '✗'}`);
+    console.log(`  ${fullText.includes('Hello from streaming') ? '✓ Streaming works correctly' : '✗ Streaming failed'}`);
+
+    streamServer.close();
+    console.log('  Stream server stopped.');
+  } catch (err) {
+    console.log(`  ✗ Error: ${err.message}`);
+  }
+
+  // ===== TEST 6d: Anthropic Proxy — Fallback Chain =====
+  section('TEST 6d: Anthropic Proxy — fallback from rate-limited primary');
+  console.log('  Testing: primary fails, anthropic_proxy in fallback chain succeeds');
+  let savedDsKey;
+  let savedProxyBase;
+  let savedAllKeys;
+  let savedExpFlag;
+  let fbMockServer = null;
+  let fbMockBaseUrl = '';
+  try {
+    const http = await import('node:http');
+
+    const startFbServer = () => new Promise((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        if (req.url === '/v1/messages') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            id: 'msg_fallback',
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'text', text: 'Fallback proxy response: all good!' }],
+            model: 'claude-sonnet-4-20250514',
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ data: [{ id: 'test-model' }] }));
+        }
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        fbMockServer = server;
+        resolve(`http://127.0.0.1:${addr.port}`);
+      });
+      server.on('error', reject);
+    });
+
+    fbMockBaseUrl = await startFbServer();
+    console.log(`  Fallback mock server at: ${fbMockBaseUrl}`);
+
+    // Save all keys, then clear everything except anthropic_proxy fallback
+    // This forces all intermediate providers to fail so proxy is reached
+    savedDsKey = config.apiKeys.deepseek;
+    const savedAllKeys = { ...config.apiKeys };
+    for (const k of Object.keys(config.apiKeys)) {
+      if (k !== 'anthropic_proxy') {
+        config.apiKeys[k] = '';
+      }
+    }
+
+    // Use deepseek as primary (will fail with empty key)
+    config.currentProvider = 'deepseek';
+    config.currentModel = 'deepseek-chat';
+    config.apiKeys.deepseek = '';
+
+    // Disable experimental to prevent keyless providers from succeeding
+    savedExpFlag = config.allowExperimentalProviders;
+    config.allowExperimentalProviders = false;
+
+    // Configure anthropic_proxy as the only working fallback
+    savedProxyBase = config.anthropicProxyBaseUrl;
+    config.anthropicProxyBaseUrl = fbMockBaseUrl;
+    config.apiKeys.anthropic_proxy = 'mock-key';
+
+    resetHealth();
+    clearFallbackEvents();
+
+    const sysPrompt = buildSystemPrompt({
+      type: projectInfo.type,
+      entryPoints: projectInfo.entryPoints || [],
+      configFiles: projectInfo.configFiles || [],
+      fileCount: projectInfo.fileCount,
+    }, undefined, false, 'deepseek', 'auto');
+
+    const fbStart = Date.now();
+    let fbResult;
+
+    try {
+      const client = createClient(config);
+      fbResult = await client.sendMessage(
+        [{ role: 'user', content: 'say hi briefly' }],
+        sysPrompt
+      );
+    } catch (err) {
+      const dur = ((Date.now() - fbStart) / 1000).toFixed(1);
+      const fbEvents = getFallbackEvents();
+      console.log(`  Failed after ${dur}s`);
+      console.log(`  Error: ${err.message.slice(0, 300)}`);
+      console.log(`  Fallback events: ${fbEvents.length}`);
+      for (const e of fbEvents) {
+        console.log(`    ~ ${e.reason}`);
+      }
+      throw err;
+    }
+
+    const dur = ((Date.now() - fbStart) / 1000).toFixed(1);
+    const fbEvents = getFallbackEvents();
+
+    hr();
+    console.log(`  Response time: ${dur}s`);
+    console.log(`  Has message: ${!!fbResult.message}`);
+    if (fbResult.message) {
+      console.log(`  Response: ${fbResult.message.slice(0, 200)}`);
+    }
+    console.log(`  Fallback events: ${fbEvents.length}`);
+    for (const e of fbEvents) {
+      console.log(`    ~ ${e.reason}`);
+    }
+
+    const proxyUsed = fbEvents.some(e => e.reason.includes('Anthropic Proxy') && e.reason.includes('Switched'));
+    const gotContent = fbResult?.message?.includes('Fallback proxy response');
+    console.log(`  ${proxyUsed ? '✓ anthropic_proxy was used as fallback' : '✗ anthropic_proxy not in fallback chain'}`);
+    console.log(`  ${gotContent ? '✓ Got expected response from proxy' : '✗ Unexpected response'}`);
+    console.log(`  ${proxyUsed && gotContent ? '✓ Fallback to anthropic_proxy WORKS' : '⚠ Fallback test issues'}`);
+  } catch (err) {
+    console.log(`  ✗ Error: ${err.message}`);
+  } finally {
+    // Restore all keys
+    if (savedAllKeys) {
+      config.apiKeys = savedAllKeys;
+    }
+    config.anthropicProxyBaseUrl = savedProxyBase;
+    if (savedExpFlag !== undefined) config.allowExperimentalProviders = savedExpFlag;
+    config.currentProvider = origProvider;
+    config.currentModel = origModel;
+    if (fbMockServer) {
+      fbMockServer.close();
+      console.log('  Fallback mock server stopped.');
+    }
+  }
+
+  // ===== TEST 6e: Anthropic Proxy — Failure Debug Info =====
+  section('TEST 6e: Anthropic Proxy — failure debug, no secret leakage');
+  console.log('  Testing: anthropic_proxy failure produces friendly error without leaking secrets');
+  try {
+    const http = await import('node:http');
+    let errServer = null;
+
+    const startErrServer = () => new Promise((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: { message: 'Rate limit exceeded for proxy provider. Please try again later.' }
+        }));
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        errServer = server;
+        resolve(`http://127.0.0.1:${addr.port}`);
+      });
+      server.on('error', reject);
+    });
+
+    const errBaseUrl = await startErrServer();
+    console.log(`  Error mock server at: ${errBaseUrl}`);
+
+    const { createAnthropicProxyClient } = await import('./dist/ai/anthropic-proxy.js');
+    const errClient = createAnthropicProxyClient(errBaseUrl, 'secret-key-abc123', 'claude-sonnet-4-20250514');
+
+    let caughtError = null;
+    try {
+      await errClient.sendMessage(
+        [{ role: 'user', content: 'test' }],
+        'system prompt'
+      );
+    } catch (err) {
+      caughtError = err;
+    }
+
+    if (caughtError) {
+      const msg = caughtError.message || '';
+      console.log(`  Error message: "${msg.slice(0, 200)}"`);
+      const hasSecret = msg.includes('secret-key-abc123') || msg.includes('test-key');
+      const hasFriendlyInfo = msg.includes('429') || msg.includes('rate limit') || msg.includes('Rate limit');
+      console.log(`  ${!hasSecret ? '✓ No secret leaked in error message' : '✗ SECRET LEAKED!'}`);
+      console.log(`  ${hasFriendlyInfo ? '✓ Contains status/friendly info' : '⚠ May lack friendly info'}`);
+      console.log(`  ${!hasSecret && hasFriendlyInfo ? '✓ Error debug is safe and informative' : '⚠ Error handling needs review'}`);
+    } else {
+      console.log('  ✗ Expected error but got none');
+    }
+
+    errServer.close();
+    console.log('  Error server stopped.');
+  } catch (err) {
+    console.log(`  ✗ Error: ${err.message}`);
+  }
+
+  // ===== TEST 7a: OpenAI Router — Not Configured =====
+  section('TEST 7a: OpenAI Router — not configured (clean skip)');
+  console.log('  Testing: openai_router without base URL should skip cleanly');
+  let savedRouterBase7a;
+  try {
+    savedRouterBase7a = config.openaiRouterBaseUrl;
+
+    // Verify openai_router is NOT in fallback candidates when base URL is missing
+    const { getFallbackCandidates } = await import('./dist/ai/client.js');
+    const candidatesNoUrl = getFallbackCandidates(config.currentProvider, { ...config, openaiRouterBaseUrl: undefined });
+    const routerInCandidatesNoUrl = candidatesNoUrl.some(c => c.provider === 'openai_router');
+    console.log(`  openai_router in fallback candidates without base URL: ${routerInCandidatesNoUrl} (expected: false)`);
+
+    // Verify openai_router IS in fallback candidates when base URL is set
+    const candidatesWithUrl = getFallbackCandidates(config.currentProvider, { ...config, openaiRouterBaseUrl: 'http://mock:1234/v1' });
+    const routerInCandidatesWithUrl = candidatesWithUrl.some(c => c.provider === 'openai_router');
+    console.log(`  openai_router in fallback candidates WITH base URL: ${routerInCandidatesWithUrl} (expected: true)`);
+
+    const noUrlPass = !routerInCandidatesNoUrl;
+    const withUrlPass = routerInCandidatesWithUrl;
+    console.log(`  ${noUrlPass ? '✓ openai_router not in fallback path when no base URL' : '✗ FAILED: should not appear without base URL'}`);
+    console.log(`  ${withUrlPass ? '✓ openai_router in fallback path when base URL set' : '✗ FAILED: should appear with base URL'}`);
+    console.log(`  ${noUrlPass && withUrlPass ? '✓ Fallback gating works correctly' : '⚠ Fallback gating issues'}`);
+  } catch (err) {
+    console.log(`  ✗ Error: ${err.message.slice(0, 200)}`);
+  } finally {
+    config.openaiRouterBaseUrl = savedRouterBase7a;
+    config.currentProvider = origProvider;
+    config.currentModel = origModel;
+  }
+
+  // ===== TEST 7b: OpenAI Router — Mock Server =====
+  section('TEST 7b: OpenAI Router — mock server endpoint');
+  console.log('  Testing: openai_router configured with a mock server endpoint');
+  try {
+    const http = await import('node:http');
+    const mockResponses7b = [];
+    let mockServer7b = null;
+
+    const startMock7b = () => new Promise((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        mockResponses7b.push({ method: req.method, url: req.url, headers: req.headers });
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+          mockResponses7b[mockResponses7b.length - 1].body = body;
+          if (req.url === '/chat/completions') {
+            const parsed = JSON.parse(body);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              id: 'chatcmpl-mock',
+              object: 'chat.completion',
+              choices: [{
+                index: 0,
+                message: {
+                  role: 'assistant',
+                  content: `Router reply: ${parsed.messages?.[parsed.messages.length - 1]?.content || 'empty'}`
+                },
+                finish_reason: 'stop'
+              }],
+              model: parsed.model || 'mock-model',
+              usage: { prompt_tokens: 10, completion_tokens: 5 }
+            }));
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ data: [{ id: 'mock-model' }] }));
+          }
+        });
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        mockServer7b = server;
+        resolve(`http://127.0.0.1:${addr.port}`);
+      });
+      server.on('error', reject);
+    });
+
+    const mockBase7b = await startMock7b();
+    console.log(`  Mock server at: ${mockBase7b}`);
+
+    const { createOpenAICompatibleClient } = await import('./dist/ai/openai-compatible.js');
+    const mockClient = createOpenAICompatibleClient(mockBase7b, 'router-key-789', 'gpt-4o-mini');
+
+    const result = await mockClient.sendMessage(
+      [{ role: 'user', content: 'Hello router' }],
+      'System prompt'
+    );
+
+    console.log(`  Response: "${result.message}"`);
+    console.log(`  Tool calls: ${result.toolCalls?.length || 0}`);
+
+    const lastReq = mockResponses7b[mockResponses7b.length - 1];
+    const hasAuth = lastReq?.headers?.['authorization'] === 'Bearer router-key-789';
+    const hasContentType = lastReq?.headers?.['content-type'] === 'application/json';
+    console.log(`  authorization header: ${hasAuth ? '✓' : '✗'}`);
+    console.log(`  content-type header: ${hasContentType ? '✓' : '✗'}`);
+
+    const allOk = hasAuth && hasContentType && result.message?.includes('Hello router');
+    console.log(`  ${result.message?.includes('Hello router') ? '✓ Correct response content' : '✗ Unexpected content'}`);
+    console.log(`  ${allOk ? '✓ openai_router mock server test PASSED' : '✗ FAILED'}`);
+
+    mockServer7b.close();
+    console.log('  Mock server stopped.');
+  } catch (err) {
+    console.log(`  ✗ Error: ${err.message}`);
+  }
+
+  // ===== TEST 7c: OpenAI Router — Streaming with Mock Server =====
+  section('TEST 7c: OpenAI Router — streaming path');
+  console.log('  Testing: openai_router SSE streaming endpoint');
+  try {
+    const http = await import('node:http');
+    let streamServer7c = null;
+
+    const startStream7c = () => new Promise((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        if (req.url === '/chat/completions') {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+          });
+          res.write(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n`);
+          res.write(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello from "},"finish_reason":null}]}\n\n`);
+          res.write(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"streaming router!"},"finish_reason":null}]}\n\n`);
+          res.write(`data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n`);
+          res.write(`data: [DONE]\n\n`);
+          res.end();
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ data: [] }));
+        }
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        streamServer7c = server;
+        resolve(`http://127.0.0.1:${addr.port}`);
+      });
+      server.on('error', reject);
+    });
+
+    const streamBase7c = await startStream7c();
+    console.log(`  Stream server at: ${streamBase7c}`);
+
+    const { createOpenAICompatibleClient } = await import('./dist/ai/openai-compatible.js');
+    const streamClient = createOpenAICompatibleClient(streamBase7c, 'stream-key', 'gpt-4o-mini');
+
+    const chunks7c = [];
+    const result = await streamClient.sendMessageStream(
+      [{ role: 'user', content: 'Stream test' }],
+      'You are a bot',
+      (event) => {
+        if (event.type === 'token') {
+          chunks7c.push(event.text);
+        }
+      }
+    );
+
+    const fullText = chunks7c.join('');
+    console.log(`  Streamed chunks: ${JSON.stringify(chunks7c)}`);
+    console.log(`  Full text: "${fullText}"`);
+    console.log(`  Result message: "${result.message}"`);
+    console.log(`  ${fullText.includes('Hello from streaming') ? '✓ Streaming works correctly' : '✗ Streaming failed'}`);
+
+    streamServer7c.close();
+    console.log('  Stream server stopped.');
+  } catch (err) {
+    console.log(`  ✗ Error: ${err.message}`);
+  }
+
+  // ===== TEST 7d: OpenAI Router — Fallback Chain =====
+  section('TEST 7d: OpenAI Router — fallback from rate-limited primary');
+  console.log('  Testing: primary fails, openai_router in fallback chain succeeds');
+  let savedKeys7d;
+  let savedRouterBase7d;
+  let savedExpFlag7d;
+  let fbMockServer7d = null;
+  let fbMockBase7d = '';
+  try {
+    const http = await import('node:http');
+
+    const startFb7d = () => new Promise((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        if (req.url === '/chat/completions') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            id: 'chatcmpl-fallback',
+            object: 'chat.completion',
+            choices: [{
+              index: 0,
+              message: { role: 'assistant', content: 'Fallback router response: success!' },
+              finish_reason: 'stop'
+            }],
+            model: 'gpt-4o-mini',
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ data: [{ id: 'test-model' }] }));
+        }
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        fbMockServer7d = server;
+        resolve(`http://127.0.0.1:${addr.port}`);
+      });
+      server.on('error', reject);
+    });
+
+    fbMockBase7d = await startFb7d();
+    console.log(`  Fallback mock server at: ${fbMockBase7d}`);
+
+    // Save and clear all keys so only openai_router works as fallback
+    savedKeys7d = { ...config.apiKeys };
+    for (const k of Object.keys(config.apiKeys)) {
+      config.apiKeys[k] = '';
+    }
+
+    config.currentProvider = 'deepseek';
+    config.currentModel = 'deepseek-chat';
+    config.apiKeys.deepseek = '';
+
+    savedExpFlag7d = config.allowExperimentalProviders;
+    config.allowExperimentalProviders = false;
+
+    // Configure openai_router as the only working fallback
+    savedRouterBase7d = config.openaiRouterBaseUrl;
+    config.openaiRouterBaseUrl = fbMockBase7d;
+    config.apiKeys.openai_router = 'mock-router-key';
+
+    resetHealth();
+    clearFallbackEvents();
+
+    const sysPrompt = buildSystemPrompt({
+      type: projectInfo.type,
+      entryPoints: projectInfo.entryPoints || [],
+      configFiles: projectInfo.configFiles || [],
+      fileCount: projectInfo.fileCount,
+    }, undefined, false, 'deepseek', 'auto');
+
+    const fbStart = Date.now();
+    let fbResult;
+
+    try {
+      const client = createClient(config);
+      fbResult = await client.sendMessage(
+        [{ role: 'user', content: 'say hi briefly' }],
+        sysPrompt
+      );
+    } catch (err) {
+      const dur = ((Date.now() - fbStart) / 1000).toFixed(1);
+      const fbEvents = getFallbackEvents();
+      console.log(`  Failed after ${dur}s`);
+      console.log(`  Error: ${err.message.slice(0, 300)}`);
+      console.log(`  Fallback events: ${fbEvents.length}`);
+      for (const e of fbEvents) {
+        console.log(`    ~ ${e.reason}`);
+      }
+      throw err;
+    }
+
+    const dur = ((Date.now() - fbStart) / 1000).toFixed(1);
+    const fbEvents = getFallbackEvents();
+
+    hr();
+    console.log(`  Response time: ${dur}s`);
+    console.log(`  Has message: ${!!fbResult.message}`);
+    if (fbResult.message) {
+      console.log(`  Response: ${fbResult.message.slice(0, 200)}`);
+    }
+    console.log(`  Fallback events: ${fbEvents.length}`);
+    for (const e of fbEvents) {
+      console.log(`    ~ ${e.reason}`);
+    }
+
+    const routerUsed = fbEvents.some(e => e.reason.includes('OpenAI Router') && e.reason.includes('Switched'));
+    const gotContent = fbResult?.message?.includes('Fallback router response');
+    console.log(`  ${routerUsed ? '✓ openai_router was used as fallback' : '✗ openai_router not used'}`);
+    console.log(`  ${gotContent ? '✓ Got expected response from router' : '✗ Unexpected response'}`);
+    console.log(`  ${routerUsed && gotContent ? '✓ Fallback to openai_router WORKS' : '⚠ Fallback test issues'}`);
+  } catch (err) {
+    console.log(`  ✗ Error: ${err.message}`);
+  } finally {
+    if (savedKeys7d) {
+      config.apiKeys = savedKeys7d;
+    }
+    config.openaiRouterBaseUrl = savedRouterBase7d;
+    if (savedExpFlag7d !== undefined) config.allowExperimentalProviders = savedExpFlag7d;
+    config.currentProvider = origProvider;
+    config.currentModel = origModel;
+    if (fbMockServer7d) {
+      fbMockServer7d.close();
+      console.log('  Fallback mock server stopped.');
+    }
+  }
+
+  // ===== TEST 7e: OpenAI Router — Failure Debug Info =====
+  section('TEST 7e: OpenAI Router — failure debug, no secret leakage');
+  console.log('  Testing: openai_router failure produces friendly error without leaking secrets');
+  try {
+    const http = await import('node:http');
+    let errServer7e = null;
+
+    const startErr7e = () => new Promise((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        res.writeHead(429, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: { message: 'Rate limit exceeded. Please slow down.' }
+        }));
+      });
+      server.listen(0, '127.0.0.1', () => {
+        const addr = server.address();
+        errServer7e = server;
+        resolve(`http://127.0.0.1:${addr.port}`);
+      });
+      server.on('error', reject);
+    });
+
+    const errBase7e = await startErr7e();
+    console.log(`  Error mock server at: ${errBase7e}`);
+
+    const { createOpenAICompatibleClient } = await import('./dist/ai/openai-compatible.js');
+    const errClient = createOpenAICompatibleClient(errBase7e, 'secret-router-key-xyz', 'gpt-4o-mini');
+
+    let caughtError = null;
+    try {
+      await errClient.sendMessage(
+        [{ role: 'user', content: 'test' }],
+        'system prompt'
+      );
+    } catch (err) {
+      caughtError = err;
+    }
+
+    if (caughtError) {
+      const msg = caughtError.message || '';
+      console.log(`  Error message: "${msg.slice(0, 200)}"`);
+      const hasSecret = msg.includes('secret-router-key-xyz') || msg.includes('router-key');
+      const hasFriendlyInfo = msg.includes('429') || msg.includes('rate limit');
+      console.log(`  ${!hasSecret ? '✓ No secret leaked in error message' : '✗ SECRET LEAKED!'}`);
+      console.log(`  ${hasFriendlyInfo ? '✓ Contains status/friendly info' : '⚠ May lack friendly info'}`);
+      console.log(`  ${!hasSecret && hasFriendlyInfo ? '✓ Error debug is safe and informative' : '⚠ Error handling needs review'}`);
+    } else {
+      console.log('  ✗ Expected error but got none');
+    }
+
+    errServer7e.close();
+    console.log('  Error server stopped.');
+  } catch (err) {
+    console.log(`  ✗ Error: ${err.message}`);
+  }
+
+  // ===== TEST 8: Web UI =====
+  section('TEST 8: Web UI — API endpoint test');
   console.log('  Web UI test via /api/chat endpoint');
   console.log('  Starting web server on port 8787...');
 
@@ -710,7 +1427,17 @@ process.on('exit', () => {
   console.log(`  Test 4a (File discovery): pure logic, no API call`);
   console.log(`  Test 5 (Fallback):        deepseek → fallback chain`);
   console.log(`  Test 6 (Experimental):    pollinations/openai (compact prompt)`);
-  console.log(`  Test 7 (Web UI):          http://localhost:8787 (includes vision provider check)`);
+  console.log(`  Test 6a (Proxy no cfg):   anthropic_proxy skipped cleanly when not configured`);
+  console.log(`  Test 6b (Proxy mock):     anthropic_proxy mock server message succeeds`);
+  console.log(`  Test 6c (Proxy stream):   anthropic_proxy SSE streaming works`);
+  console.log(`  Test 6d (Proxy fallback): primary rate-limited → anthropic_proxy fallback succeeds`);
+  console.log(`  Test 6e (Proxy fail):     anthropic_proxy error is friendly, no secret leak`);
+  console.log(`  Test 7a (Router no cfg):  openai_router skipped cleanly when not configured`);
+  console.log(`  Test 7b (Router mock):    openai_router mock server message succeeds`);
+  console.log(`  Test 7c (Router stream):  openai_router SSE streaming works`);
+  console.log(`  Test 7d (Router fallback): primary rate-limited → openai_router fallback succeeds`);
+  console.log(`  Test 7e (Router fail):    openai_router error is friendly, no secret leak`);
+  console.log(`  Test 8 (Web UI):          http://localhost:8787 (includes vision provider check)`);
   console.log();
   console.log(`  Config backed up: original = ${origProvider}/${origModel}`);
 

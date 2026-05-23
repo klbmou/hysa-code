@@ -7,10 +7,11 @@ import { getGitInfo } from '../utils/git.js';
 import { createClient, createSingleClient, isOnlyGreeting, categorizeError } from '../ai/client.js';
 import { buildSystemPrompt, resolvePromptMode } from '../prompts/system.js';
 import { getYolo, setYolo } from '../utils/session.js';
-import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents } from '../ai/model-health.js';
+import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents, getLastSuccessfulProvider, getLastSuccessfulModel, getAllHealth } from '../ai/model-health.js';
 import { detectSecrets } from '../utils/secrets.js';
 import { estimateTokens } from '../context/tokens.js';
 const LOG = '[HYSA Chat]';
+let apiRequestCounter = 0;
 // ── Language detection ──────────────────────────────────
 const ARABIC_PATTERN = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
 function isArabic(text) {
@@ -59,7 +60,7 @@ function withTimeout(promise, ms) {
 const workingDir = resolve('.');
 // Known vision-capable models per provider (for supportsVision check)
 const VISION_CAPABLE_MODELS = {
-    gemini: ['gemini-2.5-flash', 'gemini-1.5-flash'],
+    gemini: ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'],
     openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'],
     anthropic: ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022'],
     openrouter: ['google/gemini-2.5-flash', 'qwen/qwen2.5-vl-72b-instruct:free'],
@@ -290,7 +291,12 @@ export async function handleChatStream(req, writeEvent) {
         writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: 'No messages provided.', toolCalls: [] })}\n\n`);
         return;
     }
-    console.log(LOG, `handleChatStream called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
+    const reqId = ++apiRequestCounter;
+    console.log(LOG, `[req:${reqId}] handleChatStream called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
+    if (config.debug) {
+        console.log(LOG, `[req:${reqId}] Provider: ${PROVIDER_DEFAULTS[prov]?.label || prov}, Model: ${config.currentModel}`);
+        console.log(LOG, `[req:${reqId}] Tier: ${PROVIDER_TIERS[prov]}, Keys: openrouter=${!!config.apiKeys.openrouter}, gemini=${!!config.apiKeys.gemini}, deepseek=${!!config.apiKeys.deepseek}, opencode_zen=${!!config.apiKeys.opencode_zen}, groq=${!!config.apiKeys.groq}, anthropic_proxy=${!!config.apiKeys.anthropic_proxy}, openai_router=${!!config.apiKeys.openai_router}`);
+    }
     try {
         const hasImages = hasImageAttachments(req.attachments);
         const visionAvailable = supportsVision(prov, config.currentModel);
@@ -325,7 +331,7 @@ export async function handleChatStream(req, writeEvent) {
                     const timeoutMs = 10000;
                     try {
                         console.log(LOG, `Trying vision provider: ${c.label}`);
-                        const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+                        const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel, config);
                         if (client.sendMessageStream) {
                             const response = await withTimeout(client.sendMessageStream(fbMessages, fbSysPrompt, (event) => {
                                 if (event.type === 'token') {
@@ -451,7 +457,20 @@ export async function handleChatStream(req, writeEvent) {
         console.log(LOG, `Stream failed: ${rawMsg}`);
         const userLastMsg = req.messages.filter(m => m.role === 'user').pop()?.content || '';
         const lang = getResponseLanguage(userLastMsg);
-        const friendlyMsg = getFriendlyErrorMessage(lang, rawMsg, !!config?.debug, config?.currentProvider ? PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider : undefined);
+        const fbEvents = getFallbackEvents();
+        let friendlyMsg;
+        if (rawMsg.includes('All free providers')) {
+            friendlyMsg = lang === 'arabic'
+                ? 'جميع المزودات المجانية مشغولة أو وصلت للحد المسموح حاليًا. جرّب بعد قليل أو استخدم مزود مدفوع.'
+                : 'All free providers are currently busy or rate-limited. Try again shortly or configure a paid/stable provider.';
+        }
+        else {
+            friendlyMsg = getFriendlyErrorMessage(lang, rawMsg, !!config?.debug, config?.currentProvider ? PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider : undefined);
+        }
+        if (config?.debug && fbEvents.length > 0) {
+            const triedLines = fbEvents.map(e => `  • ${e.reason}`).join('\n');
+            friendlyMsg += `\n\nTried:\n${triedLines}`;
+        }
         writeEvent(`data: ${JSON.stringify({ type: 'token', text: friendlyMsg })}\n\n`);
         writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: friendlyMsg, toolCalls: [] })}\n\n`);
     }
@@ -467,7 +486,12 @@ export async function handleChat(req) {
         console.log(LOG, 'Missing or empty messages array in request body');
         return { message: '', toolCalls: [], error: 'Missing or empty messages array in request body' };
     }
-    console.log(LOG, `handleChat called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
+    const reqId = ++apiRequestCounter;
+    console.log(LOG, `[req:${reqId}] handleChat called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
+    if (config.debug) {
+        console.log(LOG, `[req:${reqId}] Provider: ${PROVIDER_DEFAULTS[prov]?.label || prov}, Model: ${config.currentModel}`);
+        console.log(LOG, `[req:${reqId}] Tier: ${PROVIDER_TIERS[prov]}, Keys: openrouter=${!!config.apiKeys.openrouter}, gemini=${!!config.apiKeys.gemini}, deepseek=${!!config.apiKeys.deepseek}, opencode_zen=${!!config.apiKeys.opencode_zen}, groq=${!!config.apiKeys.groq}, anthropic_proxy=${!!config.apiKeys.anthropic_proxy}, openai_router=${!!config.apiKeys.openai_router}`);
+    }
     try {
         const hasImages = hasImageAttachments(req.attachments);
         const visionAvailable = supportsVision(prov, config.currentModel);
@@ -502,7 +526,7 @@ export async function handleChat(req) {
                     const timeoutMs = 10000;
                     try {
                         console.log(LOG, `Trying vision provider: ${c.label}`);
-                        const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+                        const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel, config);
                         const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
                         if (result.message) {
                             console.log(LOG, `Vision fallback succeeded with ${c.label}`);
@@ -628,6 +652,8 @@ export async function handleChat(req) {
         console.log(LOG, 'Provider response received successfully');
         const fbEvents = getFallbackEvents();
         const fallbackEvents = fbEvents.map(e => e.reason);
+        const actualProvider = getLastSuccessfulProvider();
+        const actualModel = getLastSuccessfulModel();
         return {
             message: response.message,
             toolCalls: response.toolCalls.map(tc => ({
@@ -635,20 +661,43 @@ export async function handleChat(req) {
                 params: tc.params,
             })),
             fallbackEvents: fallbackEvents.length > 0 ? fallbackEvents : undefined,
-            provider: PROVIDER_DEFAULTS[prov]?.label || prov,
-            model: config.currentModel,
+            provider: actualProvider ? (PROVIDER_DEFAULTS[actualProvider]?.label || actualProvider) : (PROVIDER_DEFAULTS[prov]?.label || prov),
+            model: actualModel || config.currentModel,
         };
     }
     catch (err) {
         const e = err;
         const rawMsg = e.message || 'Unknown provider error';
-        console.log(LOG, `Provider failed: ${rawMsg}`);
+        console.log(LOG, `[req:${reqId}] Provider failed: ${rawMsg}`);
         const userLastMsg = req.messages.filter(m => m.role === 'user').pop()?.content || '';
         const lang = getResponseLanguage(userLastMsg);
-        const friendlyMsg = getFriendlyErrorMessage(lang, rawMsg, !!config.debug, PROVIDER_DEFAULTS[prov]?.label || prov);
+        const lastErr = getLastError();
+        const lastFb = getLastFallbackUsed();
+        const fbEvents = getFallbackEvents();
+        // If ALL free providers failed, use the clean "all busy" message
+        const allFailedRaw = rawMsg.includes('All free providers');
+        let friendlyMsg;
+        if (allFailedRaw) {
+            if (lang === 'arabic') {
+                friendlyMsg = 'جميع المزودات المجانية مشغولة أو وصلت للحد المسموح حاليًا. جرّب بعد قليل أو استخدم مزود مدفوع.';
+            }
+            else {
+                friendlyMsg = 'All free providers are currently busy or rate-limited. Try again shortly or configure a paid/stable provider.';
+            }
+        }
+        else {
+            friendlyMsg = getFriendlyErrorMessage(lang, rawMsg, !!config.debug, PROVIDER_DEFAULTS[prov]?.label || prov);
+        }
+        if (config.debug && fbEvents.length > 0) {
+            const triedLines = fbEvents.map(e => `  • ${e.reason}`).join('\n');
+            friendlyMsg += `\n\nTried:\n${triedLines}`;
+        }
         return {
             message: friendlyMsg,
             toolCalls: [],
+            fallbackEvents: fbEvents.length > 0 ? fbEvents.map(e => e.reason) : undefined,
+            provider: lastFb || PROVIDER_DEFAULTS[prov]?.label || prov,
+            model: lastErr?.model || config.currentModel,
         };
     }
 }
@@ -686,10 +735,41 @@ export function setYoloStatus(enabled) {
 export function getFallbackStatus() {
     const summary = toHealthSummary();
     const lastErr = getLastError();
+    const health = getAllHealth();
+    let lastAttemptedProvider = null;
+    let lastAttemptedModel = null;
+    let lastAttemptedCategory = null;
+    // Find the most recently attempted entry: lastError or the latest health timestamp
+    if (lastErr) {
+        lastAttemptedProvider = lastErr.provider;
+        lastAttemptedModel = lastErr.model;
+        lastAttemptedCategory = lastErr.category;
+    }
+    else {
+        let latestTs = 0;
+        for (const [k, rec] of health) {
+            if (rec.lastFailureTime && rec.lastFailureTime > latestTs) {
+                latestTs = rec.lastFailureTime;
+                const sep = k.lastIndexOf(':');
+                lastAttemptedProvider = k.substring(0, sep);
+                lastAttemptedModel = k.substring(sep + 1);
+                lastAttemptedCategory = rec.category;
+            }
+        }
+    }
     return {
         unhealthy: summary,
-        lastError: lastErr ? { provider: lastErr.provider, model: lastErr.model, reason: lastErr.reason } : null,
+        lastError: lastErr ? { provider: lastErr.provider, model: lastErr.model, reason: lastErr.reason, category: lastErr.category } : null,
         lastFallback: getLastFallbackUsed(),
+        lastSuccessful: {
+            provider: getLastSuccessfulProvider(),
+            model: getLastSuccessfulModel(),
+        },
+        lastAttempted: {
+            provider: lastAttemptedProvider,
+            model: lastAttemptedModel,
+            category: lastAttemptedCategory,
+        },
     };
 }
 //# sourceMappingURL=api.js.map

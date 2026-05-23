@@ -9,14 +9,18 @@ import { createDeepSeekClient } from './deepseek.js';
 import { createOpenAICompatibleClient, checkOpenAICompatibleAPI } from './openai-compatible.js';
 import { createOpenCodeZenClient } from './opencode-zen.js';
 import { createHysaAIClient } from './hysa-ai.js';
-import { markHealth, isUnhealthy, isSkippedForRequest, setLastFallbackUsed, clearRequestSkips, addFallbackEvent, clearFallbackEvents } from './model-health.js';
+import { createAnthropicProxyClient } from './anthropic-proxy.js';
+import { markHealth, isUnhealthy, isSkippedForRequest, getHealthRecord, getFallbackEvents, setLastFallbackUsed, setLastSuccessfulProvider, clearRequestSkips, addFallbackEvent, clearFallbackEvents } from './model-health.js';
 import { recordRequest, recordError } from '../utils/session.js';
 const CHAT_TIMEOUT_MS = 30000;
 const FALLBACK_ATTEMPT_TIMEOUT_MS = 12000;
-const EXPERIMENTAL_TIMEOUT_MS = 8000;
+const EXPERIMENTAL_TIMEOUT_MS = 4000;
+const EXPERIMENTAL_RETRY_TIMEOUT_MS = 2000;
 const LOCAL_TIMEOUT_MS = 15000;
 const MAX_TOTAL_TIME_MS = 60000;
-const MAX_FALLBACK_PROVIDERS = 4;
+const MAX_FALLBACK_MODELS = 10;
+const MAX_FALLBACK_PROVIDERS = 10;
+let requestCounter = 0;
 function getProviderTimeout(provider, isPrimary) {
     const tier = PROVIDER_TIERS[provider];
     if (tier === 'experimental_free')
@@ -97,7 +101,7 @@ function isRetryableError(msg) {
     const cat = categorizeError(msg);
     return cat === 'rate_limit' || cat === 'timeout' || cat === 'network' || cat === 'model_unavailable' || cat === 'quota';
 }
-function getFallbackCandidates(current, config) {
+export function getFallbackCandidates(current, config) {
     const tier = PROVIDER_TIERS[current];
     const candidates = [];
     const added = new Set();
@@ -116,6 +120,13 @@ function getFallbackCandidates(current, config) {
         add('openrouter', 'qwen/qwen3-coder:free');
         add('openrouter', 'deepseek/deepseek-chat:free');
         add('openrouter', 'openai/gpt-oss-120b:free');
+        if (config.openaiRouterBaseUrl) {
+            if (config.openaiRouterModel)
+                add('openai_router', config.openaiRouterModel);
+            for (const m of PROVIDER_MODELS.openai_router) {
+                add('openai_router', m);
+            }
+        }
         if (current !== 'gemini')
             add('gemini');
         if (current !== 'deepseek')
@@ -127,6 +138,10 @@ function getFallbackCandidates(current, config) {
         // Experimental only if allowed
         if (config.allowExperimentalProviders) {
             add('pollinations');
+        }
+        // Anthropic proxy fallback if configured
+        if (config.anthropicProxyBaseUrl) {
+            add('anthropic_proxy');
         }
     }
     // B. Local free fallback
@@ -187,9 +202,14 @@ function getFallbackCandidates(current, config) {
 function shouldSkipProvider(provider, model) {
     if (isSkippedForRequest(provider, model))
         return true;
-    const rec = isUnhealthy(provider, model);
-    if (rec)
-        return true;
+    const rec = getHealthRecord(provider, model);
+    if (rec && rec.status === 'unhealthy') {
+        // Only skip session-unhealthy providers for permanent failures (invalid key).
+        // Transient failures (rate_limit, timeout, model_unavailable) are retried on each request.
+        const permanent = rec.category === 'invalid_key' || rec.category === 'quota';
+        if (permanent)
+            return true;
+    }
     return false;
 }
 // ── Extract debug info ──────────────────────────────
@@ -220,15 +240,15 @@ function extractDebugInfo(err, provider, model, config, elapsed, timeoutMs, atte
     return lines.join('\n');
 }
 // ── Client creation ──────────────────────────────────
-function tryCreateClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBaseUrl, localOpenAiModel) {
+function tryCreateClient(provider, model, config) {
     try {
-        return createSingleClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBaseUrl, localOpenAiModel);
+        return createSingleClient(provider, model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel, config);
     }
     catch {
         return null;
     }
 }
-export function createSingleClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBaseUrl, localOpenAiModel) {
+export function createSingleClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBaseUrl, localOpenAiModel, config) {
     switch (provider) {
         case 'anthropic': {
             const key = apiKeys.anthropic;
@@ -278,6 +298,20 @@ export function createSingleClient(provider, model, apiKeys, ollamaBaseUrl, loca
         case 'hysa_ai': {
             return createHysaAIClient(apiKeys.hysa_ai, model, 'http://localhost:3002/v1');
         }
+        case 'anthropic_proxy': {
+            const proxyUrl = config?.anthropicProxyBaseUrl;
+            if (!proxyUrl)
+                throw new Error('Anthropic proxy base URL not configured. Set HYSA_ANTHROPIC_PROXY_BASE_URL.');
+            const proxyModel = config?.anthropicProxyModel || model;
+            return createAnthropicProxyClient(proxyUrl, apiKeys.anthropic_proxy, proxyModel);
+        }
+        case 'openai_router': {
+            const routerUrl = config?.openaiRouterBaseUrl;
+            if (!routerUrl)
+                throw new Error('OpenAI router base URL not configured. Set HYSA_OPENAI_ROUTER_BASE_URL.');
+            const routerModel = config?.openaiRouterModel || model;
+            return createOpenAICompatibleClient(routerUrl, apiKeys.openai_router, routerModel);
+        }
         default:
             throw new Error(`Unsupported provider: ${provider}`);
     }
@@ -290,15 +324,20 @@ function createFallbackClient(primary, config) {
             return sendMessageFallback(messages, systemPrompt, signal);
         },
         async sendMessageStream(messages, systemPrompt, onEvent, signal) {
+            const streamReqId = ++requestCounter;
             const startTime = Date.now();
             clearFallbackEvents();
             const primaryModel = config.currentModel;
             const primaryTimeout = getProviderTimeout(primary, true);
+            if (config.debug)
+                console.log(`[req:${streamReqId}] sendMessageStream starting: ${primary} / ${primaryModel}`);
             if (!shouldSkipProvider(primary, primaryModel)) {
-                const client = tryCreateClient(primary, primaryModel, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+                const client = tryCreateClient(primary, primaryModel, config);
                 if (client?.sendMessageStream) {
                     const provLabel = PROVIDER_DEFAULTS[primary]?.label || primary;
                     addFallbackEvent(primary, primaryModel, `Streaming ${provLabel} / ${primaryModel}...`);
+                    if (config.debug)
+                        console.log(`[req:${streamReqId}] Streaming ${provLabel} / ${primaryModel}...`);
                     const ac = new AbortController();
                     const timer = setTimeout(() => ac.abort(), primaryTimeout);
                     if (signal) {
@@ -345,30 +384,54 @@ function createFallbackClient(primary, config) {
     };
     // Shared fallback logic used by both sendMessage and sendMessageStream fallback path
     async function sendMessageFallback(messages, systemPrompt, signal) {
+        const reqId = ++requestCounter;
         const startTime = Date.now();
-        clearFallbackEvents();
         let lastError = null;
         let lastProvider = primary;
         let totalAttempts = 0;
         const skippedReasons = [];
         const attemptLog = [];
+        let openRouterGlobal429 = false;
+        if (debug) {
+            const candidates = getFallbackCandidates(primary, config);
+            console.log(`[req:${reqId}] Starting fallback chain`);
+            console.log(`[req:${reqId}] Primary: ${primary} / ${config.currentModel}`);
+            console.log(`[req:${reqId}] Fallback candidates:`);
+            for (const c of candidates) {
+                console.log(`[req:${reqId}]   ${c.provider} / ${c.model}`);
+            }
+        }
         const tryProvider = async (provider, model, timeoutMs, attemptLabel) => {
-            if (shouldSkipProvider(provider, model)) {
-                const reason = isSkippedForRequest(provider, model) ? 'already failed this request' : isUnhealthy(provider, model) ? 'marked unhealthy' : 'unknown';
-                skippedReasons.push(`  [skip] ${attemptLabel}: ${PROVIDER_DEFAULTS[provider]?.label || provider} / ${model} (${reason})`);
+            if (provider === 'openrouter' && openRouterGlobal429) {
                 if (debug)
-                    console.log(`  [debug] ${skippedReasons[skippedReasons.length - 1]}`);
+                    console.log(`[req:${reqId}] [skip] ${attemptLabel}: OpenRouter global 429 detected, skipping all OR models`);
+                skippedReasons.push(`  [skip] ${attemptLabel}: OpenRouter global 429, skipping all OR models`);
                 return null;
             }
-            const client = tryCreateClient(provider, model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+            if (shouldSkipProvider(provider, model)) {
+                const reason = isSkippedForRequest(provider, model) ? 'already failed this request' : isUnhealthy(provider, model) ? 'marked unhealthy' : 'unknown';
+                const skipMsg = `[skip] ${attemptLabel}: ${PROVIDER_DEFAULTS[provider]?.label || provider} / ${model} (${reason})`;
+                skippedReasons.push(`  ${skipMsg}`);
+                if (debug)
+                    console.log(`[req:${reqId}] ${skipMsg}`);
+                return null;
+            }
+            const client = tryCreateClient(provider, model, config);
             if (!client) {
-                skippedReasons.push(`  [skip] ${attemptLabel}: ${provider} / ${model} (could not create client)`);
+                const skipMsg = `[skip] ${attemptLabel}: ${provider} / ${model} (could not create client)`;
+                skippedReasons.push(`  ${skipMsg}`);
+                if (debug)
+                    console.log(`[req:${reqId}] ${skipMsg}`);
                 return null;
             }
             const provLabel = PROVIDER_DEFAULTS[provider]?.label || provider;
             addFallbackEvent(provider, model, `Trying ${provLabel} / ${model}...`);
-            if (!debug)
+            if (debug) {
+                console.log(`[req:${reqId}] Trying ${provLabel} / ${model} (timeout: ${timeoutMs / 1000}s)`);
+            }
+            else {
                 console.log(`  Trying ${provLabel} / ${model}...`);
+            }
             const ac = new AbortController();
             const timer = setTimeout(() => ac.abort(), timeoutMs);
             if (signal) {
@@ -377,7 +440,7 @@ function createFallbackClient(primary, config) {
             const tryOnce = async () => {
                 totalAttempts++;
                 if (debug) {
-                    console.log(`  [debug] ${attemptLabel}: ${provLabel} / ${model} (timeout: ${timeoutMs / 1000}s)`);
+                    console.log(`[req:${reqId}] ${attemptLabel}: ${provLabel} / ${model} (timeout: ${timeoutMs / 1000}s)`);
                 }
                 return await client.sendMessage(messages, systemPrompt, ac.signal);
             };
@@ -392,6 +455,15 @@ function createFallbackClient(primary, config) {
                     const result = await tryOnce();
                     if (!result.message?.trim() && (!result.toolCalls || result.toolCalls.length === 0)) {
                         const isExperimental = !!EXPERIMENTAL_BASE_URLS[provider];
+                        if (isExperimental && retries === 0) {
+                            addFallbackEvent(provider, model, `${provLabel} empty, retrying...`);
+                            if (debug)
+                                console.log(`[req:${reqId}] ${provLabel} empty response, retrying once`);
+                            clearTimeout(timer);
+                            const rt = setTimeout(() => ac.abort(), EXPERIMENTAL_RETRY_TIMEOUT_MS);
+                            retries++; // count this as a retry
+                            continue;
+                        }
                         const hint = isExperimental ? ' Experimental providers are not guaranteed stable.' : '';
                         addFallbackEvent(provider, model, `${provLabel} returned empty response`);
                         throw new Error(`${provLabel} returned an empty response.${hint}`);
@@ -399,6 +471,7 @@ function createFallbackClient(primary, config) {
                     const duration = Date.now() - attemptStart;
                     markHealth(provider, model, 'healthy', 'success', 'unknown', duration);
                     recordRequest(duration);
+                    setLastSuccessfulProvider(provider, model);
                     return result;
                 }
                 catch (err) {
@@ -410,24 +483,56 @@ function createFallbackClient(primary, config) {
                     const attemptDuration = Date.now() - attemptStart;
                     if (cat === 'timeout') {
                         addFallbackEvent(provider, model, `${provLabel} timed out (${timeoutMs / 1000}s)`);
-                        if (!debug)
+                        if (debug) {
+                            console.log(`[req:${reqId}] ${provLabel} timed out (${timeoutMs / 1000}s)`);
+                        }
+                        else {
                             console.log('  Timed out. Trying next...');
+                        }
                     }
                     else if (cat === 'rate_limit') {
+                        // If OpenRouter returns 429 on the primary, assume global rate limit — skip remaining OR models
+                        if (provider === 'openrouter' && attemptLabel === 'Primary') {
+                            openRouterGlobal429 = true;
+                            if (debug)
+                                console.log(`[req:${reqId}] OpenRouter global 429 detected — will skip remaining OR models`);
+                        }
                         addFallbackEvent(provider, model, `${provLabel} rate-limited`);
-                        if (!debug)
+                        if (debug) {
+                            console.log(`[req:${reqId}] ${provLabel} rate-limited`);
+                        }
+                        else {
                             console.log('  Rate limited. Trying next...');
+                        }
+                    }
+                    else if (cat === 'model_unavailable') {
+                        addFallbackEvent(provider, model, `${provLabel} unavailable`);
+                        if (debug) {
+                            console.log(`[req:${reqId}] ${provLabel} unavailable`);
+                        }
+                        else {
+                            console.log('  Unavailable. Trying next...');
+                        }
+                    }
+                    else if (cat === 'invalid_key') {
+                        addFallbackEvent(provider, model, `${provLabel} invalid key`);
+                        if (debug) {
+                            console.log(`[req:${reqId}] ${provLabel} invalid key`);
+                        }
+                        else {
+                            console.log('  Invalid key. Trying next...');
+                        }
                     }
                     markHealth(provider, model, 'unhealthy', friendlyError(errMsg, provider), cat, attemptDuration);
                     recordError(errMsg, provider, model);
                     if (debug) {
-                        console.log(`  [debug] ${attemptLabel} failed (retry ${retries}/${maxRetries}) after ${((Date.now() - attemptStart) / 1000).toFixed(1)}s:`);
+                        console.log(`[req:${reqId}] ${attemptLabel} failed (retry ${retries}/${maxRetries}) after ${((Date.now() - attemptStart) / 1000).toFixed(1)}s:`);
                         console.log(extractDebugInfo(err, provider, model, config, elapsed, timeoutMs, totalAttempts));
                     }
                     if (retries <= maxRetries && isRetryableError(errMsg)) {
                         const delay = Math.min(1000 * Math.pow(2, retries - 1), 4000);
                         if (debug)
-                            console.log(`  [debug] Retrying ${attemptLabel} in ${delay}ms...`);
+                            console.log(`[req:${reqId}] Retrying ${attemptLabel} in ${delay}ms...`);
                         await new Promise(r => setTimeout(r, delay));
                         continue;
                     }
@@ -443,20 +548,30 @@ function createFallbackClient(primary, config) {
         const primaryModel = config.currentModel;
         const primaryTimeout = getProviderTimeout(primary, true);
         if (debug)
-            console.log(`  [debug] Trying primary: ${primary} / ${primaryModel} (timeout: ${primaryTimeout / 1000}s)`);
+            console.log(`[req:${reqId}] Trying primary: ${primary} / ${primaryModel} (timeout: ${primaryTimeout / 1000}s)`);
         let result = await tryProvider(primary, primaryModel, primaryTimeout, 'Primary');
         if (result)
             return result;
         // Check total time
         if (Date.now() - startTime >= MAX_TOTAL_TIME_MS) {
-            throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts);
+            throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts, reqId);
         }
-        // Model-level fallback for OpenRouter — limit to avoid slow fallback chains
-        const MAX_FALLBACK_MODELS = 3;
+        // Model-level fallback for OpenRouter — try many text models before giving up
         if (primary === 'openrouter') {
+            if (debug && openRouterGlobal429) {
+                console.log(`[req:${reqId}] OpenRouter globally rate-limited, skipping all model-level fallback`);
+            }
             const triedModels = new Set([primaryModel]);
             const orderedModels = PROVIDER_MODELS.openrouter.filter(m => m !== primaryModel).slice(0, MAX_FALLBACK_MODELS);
+            if (debug && !openRouterGlobal429) {
+                console.log(`[req:${reqId}] Model-level fallback with ${orderedModels.length} OR candidates`);
+            }
             for (const altModel of orderedModels) {
+                if (openRouterGlobal429) {
+                    if (debug)
+                        console.log(`[req:${reqId}] OpenRouter global 429 — skipping model fallback ${altModel}`);
+                    break;
+                }
                 if (triedModels.has(altModel))
                     continue;
                 triedModels.add(altModel);
@@ -464,11 +579,11 @@ function createFallbackClient(primary, config) {
                     break;
                 if (shouldSkipProvider(primary, altModel)) {
                     if (debug)
-                        console.log(`  [debug] Skipping unhealthy model: ${altModel}`);
+                        console.log(`[req:${reqId}] Skipping unhealthy model: ${altModel}`);
                     continue;
                 }
                 if (debug)
-                    console.log(`  [debug] Model fallback to ${altModel}`);
+                    console.log(`[req:${reqId}] Model fallback to ${altModel}`);
                 result = await tryProvider(primary, altModel, getProviderTimeout(primary, false), 'Model fallback');
                 if (result) {
                     console.log(`  OK Switched to ${altModel} on ${PROVIDER_DEFAULTS[primary]?.label || primary}.`);
@@ -480,10 +595,16 @@ function createFallbackClient(primary, config) {
         }
         // Check total time
         if (Date.now() - startTime >= MAX_TOTAL_TIME_MS) {
-            throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts);
+            throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts, reqId);
         }
         // Provider-level fallback — grouped by provider, counting provider groups not model variants
         const flatCandidates = getFallbackCandidates(primary, config);
+        if (debug) {
+            console.log(`[req:${reqId}] Provider-level fallback candidates:`);
+            for (const c of flatCandidates) {
+                console.log(`[req:${reqId}]   ${c.provider} / ${c.model}`);
+            }
+        }
         const providerGroups = new Map();
         for (const c of flatCandidates) {
             const existing = providerGroups.get(c.provider);
@@ -504,31 +625,36 @@ function createFallbackClient(primary, config) {
             if (Date.now() - startTime >= MAX_TOTAL_TIME_MS)
                 break;
             const provLabel = PROVIDER_DEFAULTS[group.provider]?.label || group.provider;
-            // Skip entire provider group if all its healthy models are also unhealthy
-            const allSkipped = group.models.every(m => shouldSkipProvider(group.provider, m));
+            // Skip entire provider group if global 429 OR all models are unhealthy
+            const isGlobalIssue = group.provider === 'openrouter' && openRouterGlobal429;
+            const allSkipped = isGlobalIssue || group.models.every(m => shouldSkipProvider(group.provider, m));
             if (allSkipped) {
-                debugCandidateInfo.push(`  [skip] ${provLabel} (all models unhealthy or already failed)`);
+                const info = `[skip] ${provLabel} (all models unhealthy or already failed)`;
+                debugCandidateInfo.push(info);
                 if (debug)
-                    console.log(`  [debug] ${debugCandidateInfo[debugCandidateInfo.length - 1]}`);
+                    console.log(`[req:${reqId}] ${info}`);
                 providerFallbackCount++;
                 continue;
             }
             addFallbackEvent(group.provider, '', `Trying ${provLabel}...`);
-            if (!debug)
-                console.log(`  Trying ${provLabel}...`);
             if (debug) {
-                console.log(`  [debug] Provider fallback ${providerFallbackCount + 1}/${MAX_FALLBACK_PROVIDERS}: ${provLabel} (${group.models.length} models)`);
+                console.log(`[req:${reqId}] Trying ${provLabel}...`);
+            }
+            else {
+                console.log(`  Trying ${provLabel}...`);
             }
             let groupSucceeded = false;
             for (const model of group.models) {
                 if (shouldSkipProvider(group.provider, model)) {
                     if (debug)
-                        console.log(`  [debug]  skipping model: ${model} (unhealthy)`);
+                        console.log(`[req:${reqId}]  skipping model: ${model} (unhealthy)`);
                     continue;
                 }
                 if (Date.now() - startTime >= MAX_TOTAL_TIME_MS)
                     break;
                 const fbTimeout = getProviderTimeout(group.provider, false);
+                if (debug)
+                    console.log(`[req:${reqId}]  trying: ${group.provider}/${model} (timeout: ${fbTimeout / 1000}s)`);
                 const modelResult = await tryProvider(group.provider, model, fbTimeout, `Fallback ${providerFallbackCount + 1}`);
                 if (modelResult) {
                     const label = PROVIDER_DEFAULTS[group.provider]?.label || group.provider;
@@ -537,7 +663,7 @@ function createFallbackClient(primary, config) {
                     addFallbackEvent(group.provider, model, `Switched to ${label} / ${model}`);
                     if (debug) {
                         const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                        console.log(`  [debug] Fallback succeeded after ${totalElapsed}s, ${totalAttempts} attempts.`);
+                        console.log(`[req:${reqId}] Fallback succeeded after ${totalElapsed}s, ${totalAttempts} attempts.`);
                     }
                     result = modelResult;
                     groupSucceeded = true;
@@ -555,30 +681,25 @@ function createFallbackClient(primary, config) {
         // All fallbacks exhausted
         if (debug && lastError) {
             const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-            console.log(`  [debug] All providers failed after ${totalElapsed}s, ${totalAttempts} attempts.`);
+            console.log(`[req:${reqId}] All providers failed after ${totalElapsed}s, ${totalAttempts} attempts.`);
             console.log(extractDebugInfo(lastError, lastProvider, lastProvider === primary ? primaryModel : '', config, totalElapsed, getProviderTimeout(lastProvider, lastProvider === primary), totalAttempts));
-            if (debugCandidateInfo.length > 0) {
-                console.log(`  [debug] Skipped candidates:`);
-                for (const si of debugCandidateInfo)
-                    console.log(si);
-            }
-            if (skippedReasons.length > 0) {
-                console.log(`  [debug] Skipped during retry:`);
-                for (const sr of skippedReasons)
-                    console.log(sr);
+            console.log(`[req:${reqId}] Tried:`);
+            const fbEvents = getFallbackEvents();
+            for (const e of fbEvents) {
+                console.log(`[req:${reqId}]   ${e.reason}`);
             }
         }
-        const primaryLabel = PROVIDER_DEFAULTS[primary]?.label || primary;
+        const lastProvLabel = PROVIDER_DEFAULTS[lastProvider]?.label || lastProvider;
         const errMsg = lastError
-            ? friendlyError(lastError.message, primary)
-            : `${primaryLabel} is unavailable. No fallback providers configured.`;
-        throw new Error(`${errMsg}\n  All fallback providers failed. Run hysa doctor to check your configuration.`);
+            ? friendlyError(lastError.message, lastProvider)
+            : `${lastProvLabel} is unavailable. No fallback providers configured.`;
+        throw new Error(`All free providers are currently busy or rate-limited. Try again shortly or configure a paid/stable provider.\n${errMsg}`);
     }
 }
-function throwAllFailedError(lastError, primary, primaryModel, startTime, skipped, totalAttempts) {
+function throwAllFailedError(lastError, primary, primaryModel, startTime, skipped, totalAttempts, reqId) {
     const el = ((Date.now() - startTime) / 1000).toFixed(0);
     const label = PROVIDER_DEFAULTS[primary]?.label || primary;
-    throw new Error(`${label} is unavailable after ${el}s (${totalAttempts} attempts). All retries and fallbacks exhausted.\n  Run hysa doctor to check your provider configuration.`);
+    throw new Error(`All free providers are currently busy or rate-limited. Try again shortly or configure a paid/stable provider.\n${label} exhausted after ${el}s (${totalAttempts} attempts).`);
 }
 // ── Greeting guard ──────────────────────────────────
 const GREETINGS = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'السلام', 'صباح', 'مساء', 'مرحبا', 'اهلا', 'اه', 'اوك'];
@@ -669,7 +790,7 @@ export function createClient(config, signal) {
     if (tier === 'free_api' || tier === 'premium_api') {
         return applyGreetingGuard(createFallbackClient(provider, config));
     }
-    const client = createSingleClient(provider, config.currentModel, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel);
+    const client = createSingleClient(provider, config.currentModel, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel, config);
     const wrapped = {
         async sendMessage(messages, systemPrompt) {
             // Pre-flight: check local server is reachable before sending
