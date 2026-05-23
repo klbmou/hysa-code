@@ -4,6 +4,7 @@ import FileTree from './components/FileTree.js';
 import RightPanel from './components/RightPanel.js';
 import Composer, { Attachment } from './components/Composer.js';
 import WelcomeScreen from './components/WelcomeScreen.js';
+import MessageBubble from './components/MessageBubble.js';
 import ToolEvent from './components/ToolEvent.js';
 import DiffCard from './components/DiffCard.js';
 import CommandCard from './components/CommandCard.js';
@@ -305,7 +306,6 @@ export default function App() {
         let finalToolCalls: any[] | null = null;
         let streamItemId: string | null = null;
 
-        // Create a placeholder AI message that will be updated
         const placeholderItem: ChatItem = { id: nextId(), kind: 'ai_msg', content: '' };
         streamItemId = placeholderItem.id;
         setChatItems(prev => [...prev, placeholderItem]);
@@ -348,7 +348,6 @@ export default function App() {
           }
         }
 
-        // Process remaining buffer
         if (buffer.trim()) {
           const trimmed = buffer.trim();
           if (trimmed.startsWith('data: ')) {
@@ -369,7 +368,6 @@ export default function App() {
           }
         }
 
-        // Finalize the streaming message
         if (streamError) {
           setChatItems(prev => prev.map(item =>
             item.id === streamItemId && item.kind === 'ai_msg'
@@ -383,7 +381,6 @@ export default function App() {
               : item
           ));
 
-          // Handle tool calls from stream response
           if (finalToolCalls && finalToolCalls.length > 0) {
             const toolItems: ChatItem[] = [];
             for (const tc of finalToolCalls) {
@@ -413,7 +410,6 @@ export default function App() {
             }
           }
         } else {
-          // Stream ended without done/error — likely incomplete
           setChatItems(prev => prev.map(item =>
             item.id === streamItemId && item.kind === 'ai_msg'
               ? { ...item, content: accumulatedText || '(Incomplete response)' }
@@ -423,7 +419,7 @@ export default function App() {
         return;
       }
 
-      // ── Non-streaming path (tool tasks, fallback) ──
+      // ── Non-streaming path ──────────────────────────
       let rawText: string;
       try {
         rawText = await res.text();
@@ -445,7 +441,6 @@ export default function App() {
       const hasToolCalls = data.toolCalls && data.toolCalls.length > 0;
 
       if (data.error && !assistantText && !hasToolCalls) {
-        // Server returned a raw error (unexpected) — render as ai_msg bubble
         const newItems: ChatItem[] = [];
         newItems.push({ id: nextId(), kind: 'ai_msg', content: debug ? `Error: ${data.error}` : 'An unexpected error occurred. Try again shortly.' });
         if (debug && data.debugError) {
@@ -520,7 +515,6 @@ export default function App() {
         return;
       }
 
-      // Friendly fallback for unexpected errors (network down, etc.)
       const fallbackMsg = 'An unexpected error occurred. Try again shortly or switch providers.';
       const newItems: ChatItem[] = [];
       newItems.push({ id: nextId(), kind: 'ai_msg', content: fallbackMsg });
@@ -548,99 +542,53 @@ export default function App() {
 
   return (
     <div className="app">
-      <TopBar status={status} sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen(!sidebarOpen)} yolo={yolo} onToggleYolo={toggleYolo} />
+      <TopBar
+        status={status}
+        sidebarOpen={sidebarOpen}
+        onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
+        yolo={yolo}
+        onToggleYolo={toggleYolo}
+        debug={debug}
+        onToggleDebug={() => setDebug(!debug)}
+        onClearChat={clearChat}
+        onFilesPage={() => { window.location.hash = '#/files'; }}
+        onLanding={() => { window.location.hash = '#/'; }}
+        hasItems={hasItems}
+      />
       <div className="app-body">
         <FileTree files={files} fileCount={fileCount} selectedFile={selectedFile} onSelect={openFile} collapsed={!sidebarOpen} onClose={() => setSidebarOpen(false)} />
         <div className="chat-area">
-          <div className="chat-area-glow" />
           <div className="chat-column">
-            <div className="session-controls">
-              <button className={`session-btn ${yolo ? 'yolo' : 'safe'}`} onClick={toggleYolo}>
-                <span className={`session-dot ${yolo ? 'yolo' : 'safe'}`} />
-                {yolo ? 'YOLO' : 'Safe'}
-              </button>
-              <button className="session-btn" onClick={clearChat} disabled={!hasItems}>Clear chat</button>
-              <button className="session-btn" onClick={() => { window.location.hash = '#/'; }}>Landing</button>
-              <button className="session-btn" onClick={() => { window.location.hash = '#/files'; }}>Files page</button>
-              <button className={`session-btn ${debug ? 'active' : ''}`} onClick={() => setDebug(!debug)} title="Toggle debug mode">
-                {debug ? 'Debug ON' : 'Debug'}
-              </button>
-              <span className="session-provider">{status ? `${status.provider}` : 'Loading...'}</span>
-            </div>
-
             <div className={`chat-messages ${!hasItems ? 'center-welcome' : ''}`}>
               {!hasItems ? (
                 <WelcomeScreen onHint={sendMessage} fileCount={fileCount} status={status} yolo={yolo} />
               ) : (
                 <>
-                  {chatItems.map((item) => {
+                  {chatItems.map((item, idx) => {
                     if (item.kind === 'user_msg') {
                       return (
-                        <div key={item.id} className="message-row user">
-                          <div className="user-msg-container">
-                            <div className="bubble user">
-                              {item.content && <div dir="auto">{item.content}</div>}
-                            </div>
-                            {item.attachments && item.attachments.length > 0 && (
-                              <div className="msg-attachments">
-                                {item.attachments.map(a => {
-                                  let note = '';
-                                  if (a.kind === 'image') {
-                                    note = 'Image · ready for analysis';
-                                    if (status && !status.visionCapable) {
-                                      note = 'Image · will try vision-capable provider';
-                                    }
-                                  } else if (a.kind === 'pdf' && a.pdfStatus === 'ready') note = 'PDF · ready for analysis';
-                                  else if (a.kind === 'pdf' && (a.pdfStatus === 'scanned_pdf' || a.pdfStatus === 'failed')) note = 'This PDF may be scanned or image-based. OCR is not enabled yet.';
-                                  else if (a.kind === 'pdf' && a.pdfStatus === 'too_large') note = 'PDF too large for text extraction';
-                                  else if (a.kind === 'pdf') note = 'PDF · ready for analysis';
-                                  else if (a.kind === 'docx') note = 'Reading not enabled';
-                                  return (
-                                    <div key={a.id} className={`msg-attachment msg-attachment-${a.kind}`}>
-                                      {a.kind === 'image' && a.previewUrl ? (
-                                        <>
-                                          <img src={a.previewUrl} alt={a.name} className="msg-attach-img" />
-                                          <div className="msg-attach-image-content">
-                                            <span className="msg-attach-name">{a.name}</span>
-                                            <span className="msg-attach-size">{formatBytes(a.size)}</span>
-                                          </div>
-                                        </>
-                                      ) : a.kind === 'text' ? (
-                                        <span className="msg-attach-badge" style={{ color: ATTACH_EXT_COLOR[a.ext] || 'var(--text-dim)' }}>
-                                          {ATTACH_EXT_LABEL[a.ext] || a.ext.slice(1).toUpperCase()}
-                                        </span>
-                                      ) : (
-                                        <span className="msg-attach-badge">{a.kind === 'pdf' ? 'PDF' : 'DOCX'}</span>
-                                      )}
-                                      {a.kind !== 'image' && (
-                                        <div className="msg-attach-info">
-                                          <span className="msg-attach-name">{a.name}</span>
-                                          <span className="msg-attach-size">
-                                            {formatBytes(a.size)}
-                                            {a.kind === 'pdf' && a.pdfCharCount ? ` · ${a.pdfCharCount.toLocaleString()} chars` : ''}
-                                          </span>
-                                        </div>
-                                      )}
-                                      {note && <span className="msg-attach-note">{note}</span>}
-                                      {a.kind === 'pdf' && a.pdfTruncated && (
-                                        <span className="msg-attach-truncated">PDF text was truncated for analysis.</span>
-                                      )}
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        </div>
+                        <MessageBubble
+                          key={item.id}
+                          kind="user"
+                          content={item.content}
+                          attachments={item.attachments}
+                        />
                       );
                     }
                     if (item.kind === 'ai_msg') {
+                      const prevItem = idx > 0 ? chatItems[idx - 1] : null;
+                      const sourceFiles = prevItem?.kind === 'user_msg' && prevItem.attachments?.length
+                        ? prevItem.attachments.map(a => a.name).join(', ')
+                        : null;
                       return (
                         <div key={item.id} className="message-row assistant">
                           <div className="avatar ai">H</div>
-                          <div className="bubble assistant" dir="auto">{item.content}</div>
+                          <div className="bubble assistant" dir="auto">
+                            {sourceFiles && <div className="msg-attach-source">Using {sourceFiles}</div>}
+                            {item.content}
+                          </div>
                           <div className="message-actions">
-                            <button className="msg-action-btn" onClick={() => handleCopyMessage(item.content)} title="Copy">[Copy]</button>
+                            <button className="msg-action-btn" onClick={() => handleCopyMessage(item.content)} title="Copy">Copy</button>
                           </div>
                         </div>
                       );
@@ -681,12 +629,6 @@ export default function App() {
               </div>
             )}
 
-            {selectedFile && (
-              <div className="composer-using-file">
-                <span className="composer-using-file-icon">📄</span>
-                <span>Using <strong>{selectedFile.split('/').pop()}</strong></span>
-              </div>
-            )}
             <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
           </div>
         </div>
@@ -703,23 +645,3 @@ function isRateLimited(text: string): boolean {
   const lower = text.toLowerCase();
   return lower.includes('rate') || lower.includes('limit') || lower.includes('quota') || lower.includes('429') || lower.includes('overloaded');
 }
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-const ATTACH_EXT_LABEL: Record<string, string> = {
-  '.txt': 'TXT', '.md': 'MD', '.json': 'JSON', '.js': 'JS', '.ts': 'TS',
-  '.tsx': 'TSX', '.jsx': 'JSX', '.css': 'CSS', '.html': 'HTML',
-  '.png': 'IMG', '.jpg': 'IMG', '.jpeg': 'IMG', '.webp': 'IMG',
-  '.pdf': 'PDF', '.docx': 'DOCX',
-};
-
-const ATTACH_EXT_COLOR: Record<string, string> = {
-  '.txt': '#8888a0', '.md': '#a855f7', '.json': '#f59e0b', '.js': '#f7df1e',
-  '.ts': '#3178c6', '.tsx': '#3178c6', '.jsx': '#61dafb', '.css': '#3b82f6',
-  '.html': '#ef4444', '.png': '#22c55e', '.jpg': '#22c55e', '.jpeg': '#22c55e',
-  '.webp': '#22c55e', '.pdf': '#ef4444', '.docx': '#3b82f6',
-};

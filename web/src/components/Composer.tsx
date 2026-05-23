@@ -34,21 +34,27 @@ const SIZE_LIMITS: Record<string, number> = {
   docx: 10 * 1024 * 1024,
 };
 
-const QUICK_ACTIONS = [
-  { label: 'Read files', action: 'Read the project files and explain the structure' },
-  { label: 'Fix bug', action: 'Find and fix bugs in the codebase' },
-  { label: 'Generate tests', action: 'Generate unit tests for the codebase' },
-  { label: 'Improve UI', action: 'Review and improve the UI components' },
-  { label: 'Refactor', action: 'Refactor the codebase for better maintainability' },
-  { label: 'Run check', action: 'Run the project check command and report results' },
+const CODING_SUGGESTIONS = [
+  { label: 'Explain project', action: 'Read the project files and explain the architecture and structure.' },
+  { label: 'Fix bug', action: 'Find and fix bugs in the codebase.' },
+  { label: 'Generate tests', action: 'Generate unit tests for the project.' },
+  { label: 'Improve UI', action: 'Review and improve UI components.' },
+  { label: 'Refactor', action: 'Refactor the codebase for better maintainability.' },
+  { label: 'Run check', action: 'Run the project check command and report results.' },
 ];
 
-const DOC_ACTIONS = [
-  { label: 'Summarize', action: 'Summarize this document' },
-  { label: 'Explain', action: 'Explain this document in simple terms' },
-  { label: 'Extract key points', action: 'Extract key points from this document' },
-  { label: 'Translate', action: 'Translate this document to English' },
-  { label: 'Describe image', action: 'Describe what you see in this image' },
+const DOC_SUGGESTIONS = [
+  { label: 'Summarize', action: 'Summarize this document.' },
+  { label: 'Explain', action: 'Explain this document in simple terms.' },
+  { label: 'Extract key points', action: 'Extract key points from this document.' },
+  { label: 'Translate', action: 'Translate this document to English.' },
+];
+
+const IMAGE_SUGGESTIONS = [
+  { label: 'Describe', action: 'Describe what you see in this image.' },
+  { label: 'Extract text', action: 'Extract any text visible in this image.' },
+  { label: 'Explain', action: 'Explain the content of this image.' },
+  { label: 'Translate', action: 'Translate any text in this image.' },
 ];
 
 let idCounter = 0;
@@ -95,14 +101,23 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
   const [value, setValue] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [showSuggestions, setShowSuggestions] = useState(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sentCountRef = useRef(0);
 
   useEffect(() => {
     if (!loading && textareaRef.current) {
       textareaRef.current.focus();
     }
   }, [loading]);
+
+  // Hide suggestions after 2 sends
+  useEffect(() => {
+    if (sentCountRef.current >= 2) {
+      setShowSuggestions(false);
+    }
+  }, [sentCountRef.current]);
 
   const addFiles = useCallback(async (fileList: FileList) => {
     setAttachError(null);
@@ -182,6 +197,7 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
     setValue('');
     setAttachments([]);
     setAttachError(null);
+    sentCountRef.current += 1;
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -191,14 +207,17 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
     }
   };
 
-  const handleQuickAction = (action: string) => {
+  const handleSuggestion = (action: string) => {
     setValue(action);
     if (textareaRef.current) textareaRef.current.focus();
   };
 
+  const hasImages = attachments.some(a => a.kind === 'image');
+  const hasDocs = attachments.some(a => a.kind === 'pdf' || a.kind === 'text');
+  const suggestions = hasImages ? IMAGE_SUGGESTIONS : hasDocs ? DOC_SUGGESTIONS : CODING_SUGGESTIONS;
+
   return (
-    <div className="composer-wrapper">
-      <div className="composer-inner">
+    <div className="composer">
       <input
         ref={fileInputRef}
         type="file"
@@ -208,32 +227,22 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
         style={{ display: 'none' }}
       />
 
-      {!loading && (
-        <div className="composer-actions">
-          {(attachments.length > 0 ? DOC_ACTIONS : QUICK_ACTIONS).map(qa => (
-            <button key={qa.label} className="composer-action-btn" onClick={() => handleQuickAction(qa.action)}>
-              {qa.label}
+      {!loading && showSuggestions && (
+        <div className="composer-suggestions">
+          {suggestions.slice(0, 4).map(s => (
+            <button key={s.label} className="composer-suggestion-btn" onClick={() => handleSuggestion(s.action)}>
+              {s.label}
             </button>
           ))}
         </div>
       )}
 
-      <div className="composer-model-pill">
-        <span className="model-tag">
-          {status ? `${status.provider} / ${status.model}` : 'Loading...'}
-        </span>
-      </div>
-
       {attachError && <div className="composer-attach-error">{attachError}</div>}
-
-      {attachments.some(a => a.kind === 'image') && status && !status.visionCapable && (
-        <div className="composer-vision-warn">Current provider does not support images. Will try a vision-capable provider.</div>
-      )}
 
       {attachments.length > 0 && (
         <div className="composer-attachments">
           {attachments.map(a => (
-            <div key={a.id} className={`attach-chip attach-chip-${a.kind}`}>
+            <div key={a.id} className="attach-chip">
               {a.kind === 'image' && a.previewUrl ? (
                 <img src={a.previewUrl} alt="" className="attach-chip-img" />
               ) : (
@@ -243,62 +252,66 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
               )}
               <div className="attach-chip-body">
                 <span className="attach-chip-name">{a.name}</span>
-                <span className="attach-chip-size">
-                  {a.kind === 'image' && (a.previewUrl ? 'Image · ready for analysis' : 'Image')}
-                  {a.pdfStatus === 'extracting' && 'extracting...'}
-                  {a.pdfStatus === 'ready' && `PDF text extracted · ${a.pdfCharCount?.toLocaleString()} chars`}
-                  {a.pdfStatus === 'too_large' && 'too large'}
-                  {a.pdfStatus === 'failed' && 'extraction failed'}
-                  {a.pdfStatus === 'scanned_pdf' && 'scanned/image-based PDF'}
+                <span className="attach-chip-status">
+                  {a.kind === 'image' && 'Image'}
+                  {a.pdfStatus === 'ready' && `${a.pdfCharCount?.toLocaleString()} chars`}
+                  {a.pdfStatus === 'extracting' && 'Extracting...'}
+                  {a.pdfStatus === 'too_large' && 'Too large'}
+                  {a.pdfStatus === 'failed' && 'Failed'}
+                  {a.pdfStatus === 'scanned_pdf' && 'Scanned'}
                   {!a.pdfStatus && a.kind !== 'image' && formatSize(a.size)}
                 </span>
               </div>
-              <button className="attach-chip-remove" onClick={() => removeAttachment(a.id)} title="Remove">×</button>
+              <button className="attach-chip-remove" onClick={() => removeAttachment(a.id)}>×</button>
             </div>
           ))}
         </div>
       )}
 
-      <div className={`composer-box${value.trim() ? ' has-text' : ''}${loading ? ' loading' : ''}`}>
-        <textarea
-          ref={textareaRef}
-          className="composer-textarea"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Ask HYSA about code, files, PDFs, images, or anything..."
-          dir="auto"
-          disabled={loading}
-        />
-        <div className="composer-bottom">
-          {loading ? (
-            <div className="composer-loading">
-              {onCancel && (
-                <button className="thinking-cancel" onClick={onCancel}>Cancel</button>
-              )}
-            </div>
-          ) : (
-            <>
-              <button
-                className="composer-attach-btn"
-                onClick={() => fileInputRef.current?.click()}
-                title="Attach file"
-                disabled={loading}
-              >
-                +
-              </button>
-              <div className="composer-info">Enter to send / Shift+Enter for newline</div>
-            </>
-          )}
+      <div className={`composer-box${loading ? ' loading' : ''}`}>
+        <div className="composer-input-row">
+          <textarea
+            ref={textareaRef}
+            className="composer-textarea"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Ask about code, files, PDFs, images, or anything..."
+            dir="auto"
+            disabled={loading}
+            rows={1}
+          />
           <button
-            className={`composer-send${value.trim() ? ' has-text' : ''}`}
+            className="composer-attach-btn"
+            onClick={() => fileInputRef.current?.click()}
+            title="Attach file"
+            disabled={loading}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
+        </div>
+        <div className="composer-bottom">
+          <div className="composer-left">
+            {loading && onCancel && (
+              <button className="composer-cancel-btn" onClick={onCancel}>Cancel</button>
+            )}
+            {!loading && (
+              <span className="composer-hint">Enter to send · Shift+Enter for newline</span>
+            )}
+          </div>
+          <button
+            className="composer-send-btn"
             onClick={handleSend}
             disabled={loading || (!value.trim() && attachments.length === 0)}
           >
-            Send
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13" />
+              <polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
           </button>
         </div>
-      </div>
       </div>
     </div>
   );
