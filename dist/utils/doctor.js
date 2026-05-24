@@ -1,11 +1,15 @@
 import pc from 'picocolors';
-import { loadConfig, PROVIDER_SIGNUP_URLS, PROVIDER_DEFAULTS, PROVIDER_TIERS, TIER_LABELS, FREE_API_PROVIDERS, EXPERIMENTAL_FREE_PROVIDERS, EXPERIMENTAL_BASE_URLS, validateApiKey } from '../config/keys.js';
+import { loadConfig, PROVIDER_SIGNUP_URLS, PROVIDER_DEFAULTS, PROVIDER_TIERS, TIER_LABELS, FREE_API_PROVIDERS, EXPERIMENTAL_FREE_PROVIDERS, EXPERIMENTAL_BASE_URLS, validateApiKey, providerHasOptionalApiKey, isLocalFallbackEnabled } from '../config/keys.js';
 import { detectBestProvider, detectedProviderLabel } from '../config/provider-detect.js';
 import { checkOpenCodeZenAPI } from '../ai/opencode-zen.js';
 import { checkAnthropicProxyAPI } from '../ai/anthropic-proxy.js';
 import { checkOpenAICompatibleAPI } from '../ai/openai-compatible.js';
+import { getLastError, getModelsInCooldown, getProviderCooldowns, getRateLimitedModels } from '../ai/model-health.js';
+import { getProviderUsability, getSuggestedFallbackAction } from '../ai/provider-policy.js';
+import { listOllamaModels } from '../ai/ollama.js';
 import { getWebSearchConfig, getSearchDiagnostics } from '../tools/web-search.js';
-import { checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig } from '../tools/browser.js';
+import { checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig, cliBrowserStatus, getDaemonConfig } from '../tools/browser.js';
+import { getBrainStatus } from '../brain/store.js';
 const DOCTOR_TIMEOUT_MS = 15000;
 async function withTimeout(promise, timeoutMs) {
     const timeoutPromise = new Promise((_, reject) => {
@@ -20,6 +24,42 @@ async function checkInternet() {
     }
     catch {
         return { name: 'Internet', status: 'error', message: 'No internet connection' };
+    }
+}
+async function getDoctorRuntimeModels(config) {
+    try {
+        const models = await listOllamaModels(config.ollamaBaseUrl || 'http://localhost:11434', 1500);
+        return { ollama: models };
+    }
+    catch {
+        return { ollama: [] };
+    }
+}
+function pushProviderUsability(results, provider, config, runtimeModels) {
+    const usability = getProviderUsability(provider, config, runtimeModels);
+    const label = PROVIDER_DEFAULTS[provider]?.label || provider;
+    const cooldowns = getModelsInCooldown(provider);
+    const providerCooldowns = getProviderCooldowns(provider);
+    const rateLimited = getRateLimitedModels(provider);
+    const allModelsRateLimited = usability.usableModels.length === 0 && rateLimited.length > 0;
+    results.push({
+        name: `${label} Reachable`,
+        status: usability.configured ? 'ok' : 'warn',
+        message: usability.configured ? 'Configured/reachable check passed separately' : usability.reason,
+    });
+    results.push({
+        name: `${label} Usable`,
+        status: usability.usable ? 'ok' : allModelsRateLimited ? 'error' : 'warn',
+        message: usability.usable
+            ? `${usability.usableModels.length} usable model(s)`
+            : `${usability.reason}${cooldowns.length > 0 || providerCooldowns.length > 0 ? ' (cooldowns active)' : ''}`,
+    });
+    if (rateLimited.length > 0) {
+        results.push({
+            name: `${label} Rate Limits`,
+            status: allModelsRateLimited ? 'error' : 'warn',
+            message: `${rateLimited.length} model(s) recently rate-limited: ${rateLimited.slice(0, 3).map(m => m.model).join(', ')}`,
+        });
     }
 }
 async function checkOllama(baseUrl) {
@@ -406,6 +446,7 @@ async function checkAnthropicProxyDetailed(config, debug) {
 }
 async function checkOpenAIRouterDetailed(config, debug) {
     const results = [];
+    const runtimeModels = await getDoctorRuntimeModels(config);
     const baseUrl = config.openaiRouterBaseUrl;
     if (!baseUrl) {
         results.push({ name: 'Base URL', status: 'error', message: 'Not configured. Set HYSA_OPENAI_ROUTER_BASE_URL.' });
@@ -435,6 +476,7 @@ async function checkOpenAIRouterDetailed(config, debug) {
     else {
         results.push({ name: 'API Key', status: 'warn', message: 'Not configured (optional)' });
     }
+    pushProviderUsability(results, 'openai_router', config, runtimeModels);
     return results;
 }
 async function checkChatCompletionForModel(provider, baseURL, apiKey, model, debug) {
@@ -664,10 +706,19 @@ export async function runDoctor(debug = false, provider) {
     const results = [];
     results.push(await checkInternet());
     if (config) {
+        const runtimeModels = await getDoctorRuntimeModels(config);
+        const localFallbackEnabled = isLocalFallbackEnabled(config);
         results.push({ name: 'Config', status: 'ok', message: '~/.hysa/config.json found' });
         if (config.currentProvider === 'ollama' || config.ollamaBaseUrl) {
             results.push(await checkOllama(config.ollamaBaseUrl));
         }
+        results.push({
+            name: 'Local Fallback',
+            status: localFallbackEnabled ? 'ok' : 'warn',
+            message: localFallbackEnabled
+                ? 'Enabled via HYSA_ENABLE_LOCAL_FALLBACK=true'
+                : 'Disabled by default. Set HYSA_ENABLE_LOCAL_FALLBACK=true to allow Ollama fallback.',
+        });
         const localOpenAiUrl = config.localOpenAiBaseUrl || 'http://localhost:1234/v1';
         if (config.currentProvider === 'local_openai') {
             results.push(await checkLocalOpenAI(localOpenAiUrl));
@@ -702,7 +753,7 @@ export async function runDoctor(debug = false, provider) {
         const currentLabel = PROVIDER_DEFAULTS[current]?.label || current;
         const currentTier = PROVIDER_TIERS[current];
         const currentTierLabel = currentTier ? TIER_LABELS[currentTier]?.label || '' : '';
-        const hasKey = current === 'ollama' || current === 'local_openai' || current === 'hysa_ai' || !!config.apiKeys[current];
+        const hasKey = current === 'ollama' || current === 'local_openai' || current === 'hysa_ai' || providerHasOptionalApiKey(current) || !!config.apiKeys[current];
         results.push({
             name: 'Current Provider',
             status: hasKey ? 'ok' : 'error',
@@ -756,9 +807,21 @@ export async function runDoctor(debug = false, provider) {
             else {
                 results.push({ name: 'Router Key', status: 'warn', message: 'Not configured (optional)' });
             }
+            pushProviderUsability(results, 'openai_router', config, runtimeModels);
         }
         else {
             results.push({ name: 'OpenAI Router', status: 'warn', message: 'Not configured. Set HYSA_OPENAI_ROUTER_BASE_URL.' });
+        }
+        const lastChatError = getLastError();
+        if (lastChatError) {
+            const action = lastChatError.provider === 'ollama'
+                ? 'Ollama is reachable, but the last local model failed. Pull or select a chat-capable coding model.'
+                : getSuggestedFallbackAction(lastChatError.provider, config, lastChatError.reason, runtimeModels);
+            results.push({
+                name: 'Last Chat Error',
+                status: lastChatError.category === 'invalid_key' ? 'error' : 'warn',
+                message: `${lastChatError.provider}/${lastChatError.model}: ${lastChatError.category}. ${action}`,
+            });
         }
         // Web search status
         const wsConfig = getWebSearchConfig();
@@ -783,11 +846,22 @@ export async function runDoctor(debug = false, provider) {
         const pwInstalled = await checkPlaywrightInstalled();
         const crInstalled = await checkChromiumInstalled();
         const browserCfg = getBrowserConfig();
+        const daemonCfg = getDaemonConfig();
+        const daemonStatus = await cliBrowserStatus();
         results.push({ name: 'Playwright', status: pwInstalled ? 'ok' : 'warn', message: pwInstalled ? 'Package installed' : 'Not installed. Run: npm install playwright' });
         results.push({ name: 'Chromium', status: crInstalled === true ? 'ok' : 'warn', message: crInstalled === true ? 'Installed' : crInstalled === 'unknown' ? 'Unknown (check with: npx playwright install chromium)' : 'Not found. Run: npx playwright install chromium' });
         results.push({ name: 'Browser Mode', status: 'ok', message: browserCfg.headless ? 'Headless' : 'Visible (HYSA_BROWSER_HEADLESS=false)' });
         results.push({ name: 'Screenshots', status: 'ok', message: browserCfg.screenshotDir });
+        results.push({ name: 'Daemon', status: daemonCfg.enabled ? 'ok' : 'warn', message: daemonCfg.enabled ? (daemonStatus.active ? `Active (PID ${daemonStatus.pid}, port ${daemonStatus.port})` : 'Enabled, no active session') : 'Disabled (HYSA_BROWSER_DAEMON_ENABLED=false)' });
         results.push({ name: 'Browser API', status: 'warn', message: process.env.HYSA_BROWSER_API_ENABLED === 'true' ? 'Enabled (HYSA_BROWSER_API_ENABLED=true)' : 'CLI only (set HYSA_BROWSER_API_ENABLED=true for Web API)' });
+        // Brain system status
+        const brainStatus = await getBrainStatus();
+        if (brainStatus.exists) {
+            results.push({ name: 'Brain System', status: 'ok', message: `.hysa/brain ready (${brainStatus.eventCount} events, ${brainStatus.knownSystems.length} systems)` });
+        }
+        else {
+            results.push({ name: 'Brain System', status: 'warn', message: 'Not initialized. Run: hysa brain init' });
+        }
     }
     else {
         results.push({ name: 'Config', status: 'error', message: 'No config found. Running auto-detection...' });
@@ -812,8 +886,12 @@ export async function runDoctor(debug = false, provider) {
         }
     }
     const hasError = results.some(r => r.status === 'error');
+    const hasWarn = results.some(r => r.status === 'warn');
     if (hasError) {
         console.log(pc.yellow('\n  Some issues found. Run "hysa config" to review your setup.\n'));
+    }
+    else if (hasWarn) {
+        console.log(pc.yellow('\n  Warnings found. HYSA can run, but review the warnings above.\n'));
     }
     else {
         console.log(pc.green('\n  All checks passed! HYSA Code is ready to use.\n'));

@@ -177,6 +177,37 @@ export async function searchWeb(query, options) {
             throw new Error('No web search provider configured.');
     }
 }
+// ── Capability question detection ────────────────────────────
+// Returns true if the user is asking about HYSA's web search capability
+// (as opposed to asking to perform a search).
+export function isCapabilityQuestion(text) {
+    const trimmed = text.trim();
+    const patterns = [
+        // English patterns
+        /^(?:can\s+you\s+(?:search|browse|look\s+things?\s+up|access|find|check))\b/i,
+        /^(?:do\s+you\s+(?:have\s+(?:internet\s+)?access|support\s+web\s+search))/i,
+        /^(?:are\s+you\s+(?:able\s+to\s+search|connected\s+to\s+the\s+internet))/i,
+        /^(?:you\s+can\s+search|you\s+have\s+(?:internet\s+)?access)/i,
+        /^(?:what\s+(?:search|browser|crawl))/i,
+        // Arabic patterns
+        /^هل\s+(?:يمكنك|تستطيع|لديك\s+القدرة\s+على)\s+(?:البحث|التصفح|الوصول\s+إلى\s+الإنترنت|الدخول\s+على\s+الإنترنت)/i,
+        /^هل\s+لديك\s+(?:إمكانية|قدرة|خاصية)\s+(?:البحث|التصفح)/i,
+        /^هل\s+لديك\s+اتصال\s+(?:بالإنترنت|بالانترنت)/i,
+        /^هل\s+أنت\s+متصل/i,
+    ];
+    return patterns.some(p => p.test(trimmed));
+}
+export function getCapabilityResponse(text, isReliable) {
+    const hasArabic = /[\u0600-\u06FF]/.test(text);
+    if (isReliable) {
+        return hasArabic
+            ? 'نعم، أستطيع البحث في الإنترنت عند الحاجة باستخدام أداة البحث المفعّلة. يمكنني أيضاً تصفح المواقع وتحميل المهارات المتخصصة.'
+            : 'Yes, I can search the web when needed using the built-in search tool. I can also browse websites and load specialized skills.';
+    }
+    return hasArabic
+        ? 'البحث في الإنترنت غير مضبوط بشكل موثوق. فعّل TAVILY_API_KEY أو SERPER_API_KEY أو BRAVE_SEARCH_API_KEY.'
+        : 'Web search is not reliably configured. To enable web search, set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.';
+}
 export function formatSearchResults(query, results) {
     if (results.length === 0)
         return `No search results found for: ${query}`;

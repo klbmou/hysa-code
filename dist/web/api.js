@@ -9,7 +9,7 @@ import { buildSystemPrompt, resolvePromptMode } from '../prompts/system.js';
 import { getYolo, setYolo } from '../utils/session.js';
 import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents, getLastSuccessfulProvider, getLastSuccessfulModel, getAllHealth } from '../ai/model-health.js';
 import { detectSecrets } from '../utils/secrets.js';
-import { searchWeb, formatSearchResults, getSearchDiagnostics } from '../tools/web-search.js';
+import { searchWeb, formatSearchResults, getSearchDiagnostics, isCapabilityQuestion, getCapabilityResponse } from '../tools/web-search.js';
 import { shouldSearchEntity } from '../tools/entity-detector.js';
 import { estimateTokens } from '../context/tokens.js';
 const LOG = '[HYSA Chat]';
@@ -435,6 +435,17 @@ export async function handleChatStream(req, writeEvent) {
             content: m.content,
         }));
         injectLanguageInstruction(messages);
+        // ── Capability question detection ────────────────
+        const capLastMsg = messages[messages.length - 1];
+        const capContent = typeof capLastMsg?.content === 'string' ? capLastMsg.content : '';
+        if (capContent && isCapabilityQuestion(capContent)) {
+            const wsDiag = getSearchDiagnostics();
+            const response = getCapabilityResponse(capContent, wsDiag.isReliable);
+            console.log(LOG, `[req:${reqId}] Capability question, returning direct response`);
+            writeEvent(`data: ${JSON.stringify({ type: 'token', text: response })}\n\n`);
+            writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response, toolCalls: [] })}\n\n`);
+            return;
+        }
         const lastUserMsgRaw = visionMessages.filter(m => m.role === 'user').pop()?.content || '';
         const lastUserMsgStr = typeof lastUserMsgRaw === 'string' ? lastUserMsgRaw : '';
         const isSimpleQ = isSimpleQuestion(lastUserMsgStr);
@@ -622,6 +633,15 @@ export async function handleChat(req) {
             content: m.content,
         }));
         injectLanguageInstruction(messages);
+        // ── Capability question detection ────────────────
+        const capLastMsg = messages[messages.length - 1];
+        const capContent = typeof capLastMsg?.content === 'string' ? capLastMsg.content : '';
+        if (capContent && isCapabilityQuestion(capContent)) {
+            const wsDiag = getSearchDiagnostics();
+            const response = getCapabilityResponse(capContent, wsDiag.isReliable);
+            console.log(LOG, `[req:${reqId}] Capability question, returning direct response`);
+            return { message: response, toolCalls: [] };
+        }
         // ── Per-query prompt mode resolution ────────────────
         const lastUserMsgRaw = visionMessages.filter(m => m.role === 'user').pop()?.content || '';
         const lastUserMsg = typeof lastUserMsgRaw === 'string' ? lastUserMsgRaw : '';
@@ -668,9 +688,16 @@ export async function handleChat(req) {
             /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
             /^(?:where\s+can\s+(?:I|we)\s+(?:watch|find|get)\s+)/i,
             /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
+            /^(?:ابحث\s+(?:لي\s+)?عن\s+)(.+)/i,
+            /^(?:اعطني|أعطني)\s+(?:مصادر|معلومة)\s+(?:عن|حول)\s+(.+)/i,
+            /^(?:مصادر)\s+(?:عن|حول)\s+(.+)/i,
             /^(?:آخر\s+أخبار\s+)(.+)/i,
             /^(?:هل\s+هذا\s+صحيح\s+(?:الآن|حاليا|حالياً)?)/i,
             /^(?:ما\s+هو\s+(?:آخر|أحدث)\s+)/i,
+            /^(?:من\s+أين\s+أتيت\s+)/i,
+            /^(?:هل\s+هذه\s+المعلومة\s+محدثة)/i,
+            /^(?:هل\s+عندك\s+معلومات\s+(?:عن|حول)\s+)(.+)/i,
+            /^(?:دور\s+(?:لي\s+)?(?:على\s+)?)(.+)/i,
         ];
         let searchQuery = null;
         for (const p of searchPatterns) {

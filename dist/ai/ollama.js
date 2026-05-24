@@ -14,6 +14,17 @@ export async function checkOllama(baseUrl) {
         };
     }
 }
+export async function listOllamaModels(baseUrl, timeoutMs = 3000) {
+    const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) {
+        throw new Error(`Ollama returned status ${res.status}`);
+    }
+    const data = await res.json();
+    const names = (data.models ?? [])
+        .map(model => model.name || model.model || '')
+        .filter((name) => !!name.trim());
+    return [...new Set(names)];
+}
 export function createOllamaClient(baseUrl, model) {
     const buildMessages = (messages, systemPrompt) => [
         { role: 'system', content: systemPrompt },

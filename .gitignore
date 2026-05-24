@@ -26,4 +26,7 @@ stdout.txt
 stderr.txt
 
 github/
-.hysa/skills/test-skill/
+.hysa/
+.openclaw/
+dist/download.exe
+web/dist/download.exe

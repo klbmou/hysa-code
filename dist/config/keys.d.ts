@@ -29,6 +29,7 @@ export interface HysaConfig {
     openaiRouterModel?: string;
     allowExperimentalProviders?: boolean;
     experimentalConfirmed?: boolean;
+    enableLocalFallback?: boolean;
     agentMode?: AgentMode;
     debug?: boolean;
     lightMode?: boolean;
@@ -58,6 +59,7 @@ export declare const COMPACT_PROMPT_PROVIDERS: ProviderType[];
 export declare const EXPERIMENTAL_BASE_URLS: Partial<Record<ProviderType, string>>;
 export declare function providerNeedsApiKey(provider: ProviderType): boolean;
 export declare function providerHasOptionalApiKey(provider: ProviderType): boolean;
+export declare function isLocalFallbackEnabled(config?: Pick<HysaConfig, 'enableLocalFallback'> | null): boolean;
 export declare function providerRequiresKey(provider: ProviderType): boolean;
 export declare function loadConfig(): HysaConfig | null;
 export declare function getDefaultProviderFromEnv(): string | null;

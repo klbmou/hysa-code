@@ -4,7 +4,7 @@ import pc from 'picocolors';
 import { execSync } from 'node:child_process';
 import { resolve, relative } from 'node:path';
 
-import { loadConfig, saveConfig, PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_CATEGORIES, PROVIDER_CATEGORY_LABELS, PROVIDER_DESCRIPTIONS, PROVIDER_SIGNUP_URLS, TIER_LABELS, PROVIDER_TIERS, FREE_API_PROVIDERS, LOCAL_FREE_PROVIDERS, PREMIUM_API_PROVIDERS, EXPERIMENTAL_FREE_PROVIDERS, providerNeedsApiKey, providerHasOptionalApiKey, validateApiKey, getDefaultProviderFromEnv } from './config/keys.js';
+import { loadConfig, saveConfig, PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_CATEGORIES, PROVIDER_CATEGORY_LABELS, PROVIDER_DESCRIPTIONS, PROVIDER_SIGNUP_URLS, TIER_LABELS, PROVIDER_TIERS, FREE_API_PROVIDERS, LOCAL_FREE_PROVIDERS, PREMIUM_API_PROVIDERS, EXPERIMENTAL_FREE_PROVIDERS, providerNeedsApiKey, providerHasOptionalApiKey, validateApiKey, getDefaultProviderFromEnv, isLocalFallbackEnabled } from './config/keys.js';
 import { detectBestProvider, buildConfigFromDetection, detectedProviderLabel } from './config/provider-detect.js';
 import type { ProviderType, ProviderCategory, ProviderTier, HysaConfig } from './config/keys.js';
 import { runDoctor } from './utils/doctor.js';
@@ -13,6 +13,8 @@ import type { OpenRouterModel } from './ai/openrouter-models.js';
 import { getSettings, updateSettings, updateAgentMode } from './config/settings.js';
 import { createClient, isOnlyGreeting, getCasualResponse, createSingleClient } from './ai/client.js';
 import type { AIClient, Message, ToolCall, AIResponse, ToolType, StreamEvent } from './ai/types.js';
+import { classifyTask } from './ai/task-classifier.js';
+import { shouldInjectProjectContext, getAvailableFallbackProviders, getSuggestedFallbackAction } from './ai/provider-policy.js';
 import { buildProjectTree, getProjectInfo, invalidateCache } from './context/builder.js';
 import type { ProjectInfo } from './context/builder.js';
 import { rankFiles } from './context/ranker.js';
@@ -27,8 +29,8 @@ import { detectSecrets } from './utils/secrets.js';
 import { getGitInfo, getCommitSuggestion } from './utils/git.js';
 import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo, getProviderHealth, saveProviderHealth, clearProviderHealth, getLastProviderError, getUsage, recordPromptMode } from './utils/session.js';
 import { grepSearch, findFiles } from './utils/searcher.js';
-import { searchWeb, formatSearchResults, getWebSearchConfig, getSearchDiagnostics } from './tools/web-search.js';
-import { browserOpen, browserScreenshot, browserText, browserSnapshot, browserClick, browserType, browserClose, getBrowserStatus, checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig } from './tools/browser.js';
+import { searchWeb, formatSearchResults, getWebSearchConfig, getSearchDiagnostics, isCapabilityQuestion, getCapabilityResponse } from './tools/web-search.js';
+import { browserOpen, browserScreenshot, browserText, browserSnapshot, browserClick, browserType, browserClose, getBrowserStatus, checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig, cliBrowserOpen, cliBrowserScreenshot, cliBrowserText, cliBrowserSnapshot, cliBrowserClick, cliBrowserType, cliBrowserClose, cliBrowserStatus, getDaemonConfig } from './tools/browser.js';
 import type { BrowserSessionInfo } from './tools/browser.js';
 import { shouldSearchEntity } from './tools/entity-detector.js';
 import { classifyCommand } from './utils/commands.js';
@@ -36,8 +38,10 @@ import type { AgentMode } from './agent/types.js';
 import { ALL_MODES, MODE_LABELS, MODE_DESCRIPTIONS } from './agent/modes.js';
 import { createTask, updateTask, loadTasks, getActiveTask } from './agent/tasks.js';
 import { listSymbols, findReferences, searchImports, summarizeFile, explainFunction } from './agent/tools.js';
-import { getAllHealth, toHealthSummary, resetHealth, getLastError, getLastFallbackUsed, healthKey, loadHealthFromEntries, toHealthEntries } from './ai/model-health.js';
+import { getAllHealth, toHealthSummary, resetHealth, getLastError, getLastFallbackUsed, getModelsInCooldown, getProviderCooldowns, getRateLimitedModels, getFallbackEvents, healthKey, loadHealthFromEntries, toHealthEntries } from './ai/model-health.js';
 import type { ErrorCategory } from './ai/model-health.js';
+import { listOllamaModels } from './ai/ollama.js';
+import { initBrainFiles, getBrainStatus, readRecentEvents, readProjectMap, appendBrainEvent, appendLesson, appendDecision, writeProjectMap, generateProjectMap } from './brain/index.js';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -312,6 +316,10 @@ function showHelp(agentMode?: AgentMode): void {
   console.log(pc.cyan('  /yolo              Toggle YOLO mode (auto-apply edits)'));
   console.log(pc.cyan('  /light             Toggle Light mode (short prompts, fast responses)'));
   console.log(pc.cyan('  /latency           Test provider latency'));
+  console.log(pc.cyan('  /brain status      Show brain status'));
+  console.log(pc.cyan('  /brain recent      Show recent brain events'));
+  console.log(pc.cyan('  /brain map         Update project map'));
+  console.log(pc.cyan('  /brain note <text> Add a note to brain'));
 
   if (agentMode && agentMode !== 'chat') {
     console.log(pc.dim(`\n  Active mode: ${MODE_LABELS[agentMode]}`));
@@ -840,6 +848,110 @@ function isSimpleQuestion(text: string): boolean {
   return true;
 }
 
+function formatRemaining(ms: number): string {
+  if (ms <= 0) return 'expired';
+  const sec = Math.ceil(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  return `${Math.ceil(sec / 60)}m`;
+}
+
+async function getOllamaModelsForStatus(config: HysaConfig | null): Promise<string[]> {
+  if (!config?.ollamaBaseUrl) return [];
+  try {
+    return await listOllamaModels(config.ollamaBaseUrl, 1500);
+  } catch {
+    return [];
+  }
+}
+
+async function printFallbackStatus(config: HysaConfig | null): Promise<void> {
+  const lastErr = getLastError();
+  const lastFb = getLastFallbackUsed();
+  const rateLimited = getRateLimitedModels();
+  const cooldownModels = getModelsInCooldown();
+  const providerCooldowns = getProviderCooldowns();
+  const fallbackEvents = getFallbackEvents().slice(-8);
+  const ollamaModels = await getOllamaModelsForStatus(config);
+  const localFallbackEnabled = config ? isLocalFallbackEnabled(config) : false;
+  const runtimeModels = config ? { ollama: ollamaModels } : undefined;
+  const fallbackProviders = config ? getAvailableFallbackProviders(config, runtimeModels) : [];
+
+  console.log(pc.bold(pc.magenta('\nFallback Status\n')));
+  if (config) {
+    console.log(`  Current provider: ${PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider}`);
+    console.log(`  Current model:    ${config.currentModel}`);
+  } else {
+    console.log(`  Current provider: not configured`);
+    console.log(`  Current model:    not configured`);
+  }
+  console.log(`  Local fallback:   ${localFallbackEnabled ? 'enabled' : 'disabled'}`);
+  if (!localFallbackEnabled) {
+    console.log(`  To enable:        set HYSA_ENABLE_LOCAL_FALLBACK=true`);
+  }
+
+  console.log(`  Last fallback:    ${lastFb || 'None'}`);
+  if (lastErr) {
+    console.log(`  Last chat error:  ${lastErr.provider}/${lastErr.model} - ${lastErr.category}`);
+    console.log(`                    ${lastErr.reason.slice(0, 220)}`);
+    console.log(`                    ${new Date(lastErr.timestamp).toLocaleString()}`);
+  } else {
+    console.log(`  Last chat error:  None`);
+  }
+
+  console.log(`\n  Rate-limited models:`);
+  if (rateLimited.length === 0) {
+    console.log(pc.dim('    None recorded'));
+  } else {
+    for (const entry of rateLimited.slice(0, 12)) {
+      console.log(`    ${entry.provider}/${entry.model} (${entry.failedCount}x)`);
+    }
+  }
+
+  console.log(`\n  Models in cooldown:`);
+  if (cooldownModels.length === 0 && providerCooldowns.length === 0) {
+    console.log(pc.dim('    None'));
+  } else {
+    for (const cd of providerCooldowns) {
+      console.log(`    ${cd.provider} provider cooldown - ${formatRemaining(cd.remainingMs)} (${cd.reason})`);
+    }
+    for (const cd of cooldownModels.slice(0, 12)) {
+      console.log(`    ${cd.provider}/${cd.model} - ${formatRemaining(cd.remainingMs)} (${cd.category})`);
+    }
+  }
+
+  console.log(`\n  Available fallback providers:`);
+  if (fallbackProviders.length === 0) {
+    console.log(pc.dim('    None currently usable'));
+  } else {
+    for (const fb of fallbackProviders.slice(0, 6)) {
+      const label = PROVIDER_DEFAULTS[fb.provider]?.label || fb.provider;
+      const models = fb.usableModels.slice(0, 3).join(', ');
+      console.log(`    ${label}${models ? ` - ${models}` : ''}`);
+    }
+  }
+
+  if (ollamaModels.length > 0) {
+    console.log(`\n  Ollama local models (informational): ${ollamaModels.slice(0, 6).join(', ')}${ollamaModels.length > 6 ? '...' : ''}`);
+  } else if (config?.ollamaBaseUrl) {
+    console.log(`\n  Ollama local models (informational): not running or no models found`);
+  }
+
+  const recommended = lastErr?.provider === 'ollama'
+    ? 'Ollama is reachable, but the last local model failed. Pull or select a chat-capable coding model, for example: ollama pull qwen2.5-coder:1.5b.'
+    : config
+      ? getSuggestedFallbackAction(lastErr?.provider || config.currentProvider, config, lastErr?.reason, runtimeModels)
+      : 'Run hysa config to set up a provider.';
+  console.log(`\n  Recommended action: ${recommended}`);
+
+  if (fallbackEvents.length > 0) {
+    console.log(pc.dim('\n  Recent fallback events:'));
+    for (const event of fallbackEvents) {
+      console.log(pc.dim(`    ${event.provider}${event.model ? `/${event.model}` : ''}: ${event.reason}`));
+    }
+  }
+  console.log();
+}
+
 async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise<void> {
   let config = initialConfig;
   let yoloMode = initialYolo;
@@ -913,6 +1025,27 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     fileCount: projectInfo.fileCount,
     tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
   }, currentAgentMode, lightActive, config.currentProvider, config.promptMode || 'auto');
+
+  // ── Brain context injection (compact, max 800 tokens) ──
+  let brainContext = '';
+  try {
+    const pm = await readProjectMap();
+    if (pm) {
+      const sysStr = pm.knownSystems.length > 0 ? `Known systems: ${pm.knownSystems.join(', ')}` : '';
+      const modStr = Object.keys(pm.modules).length > 0
+        ? `Modules: ${Object.entries(pm.modules).map(([k, v]) => `${k} (${v.files.length} files, ${v.purpose.slice(0, 40)})`).join('; ')}`
+        : '';
+      const cmdStr = Object.keys(pm.commands).length > 0
+        ? `Commands: ${Object.keys(pm.commands).join(', ')}`
+        : '';
+      const parts = [sysStr, modStr, cmdStr].filter(Boolean);
+      if (parts.length > 0) {
+        brainContext = `\n[Project Memory]\n${parts.join('\n')}\n`;
+        if (brainContext.length > 3200) brainContext = brainContext.slice(0, 3200) + '\n...(truncated)';
+        systemPrompt += brainContext;
+      }
+    }
+  } catch { /* brain not available — skip */ }
 
   let retryContent: string | null = null;
 
@@ -1046,8 +1179,10 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     // ── Fallback commands ────────────────────────────
 
     if (trimmed.toLowerCase() === '/fallback status') {
+      await printFallbackStatus(config);
+      continue;
       const summary = toHealthSummary();
-      const lastErr = getLastError();
+      const lastErr = getLastError()!;
       const lastFb = getLastFallbackUsed();
       console.log(pc.cyan('\nFallback Status:'));
       if (summary.length === 0) {
@@ -1114,6 +1249,8 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     // Fallback shorthand aliases
     const fbTrim = trimmed.toLowerCase();
     if (fbTrim === '/fallback') {
+      await printFallbackStatus(config);
+      continue;
       // Show status as default
       const summary = toHealthSummary();
       console.log(pc.cyan('\nFallback Status:'));
@@ -1152,7 +1289,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     }
 
     if (trimmed.toLowerCase() === '/usage') {
-      const lastErr = getLastError();
+      const lastErr = getLastError()!;
       const lastFb = getLastFallbackUsed();
       const tokens = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
       const prov = config.currentProvider;
@@ -1178,6 +1315,21 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     }
 
     if (trimmed.toLowerCase() === '/models') {
+      if (config.currentProvider === 'ollama') {
+        const modSpin = new Spinner();
+        modSpin.start('Fetching Ollama local models...');
+        try {
+          const models = await listOllamaModels(config.ollamaBaseUrl);
+          modSpin.succeed(`Found ${models.length} local model${models.length !== 1 ? 's' : ''}`);
+          console.log();
+          for (const model of models) console.log(`  ${model}`);
+          console.log();
+        } catch (err: unknown) {
+          modSpin.fail('Failed');
+          console.log(pc.red(`  ${(err as Error).message}\n`));
+        }
+        continue;
+      }
       if (config.currentProvider !== 'openrouter') {
         console.log(pc.yellow('\n  /models is only available when using OpenRouter.\n'));
         continue;
@@ -1651,6 +1803,58 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       continue;
     }
 
+    // ── /brain commands ─────────────────────────────
+
+    if (trimmed.toLowerCase() === '/brain status') {
+      const status = await getBrainStatus();
+      if (!status.exists) {
+        console.log(pc.yellow('\n  Brain not initialized. Run: hysa brain init\n'));
+        continue;
+      }
+      console.log(pc.bold(pc.magenta('\n🧠 Project Brain\n')));
+      console.log(`  Events:     ${status.eventCount}`);
+      console.log(`  Map date:   ${status.projectMapDate || 'never'}`);
+      console.log(`  Systems:    ${status.knownSystems.length > 0 ? status.knownSystems.join(', ') : 'none'}`);
+      console.log();
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/brain recent') {
+      const events = await readRecentEvents(10);
+      if (events.length === 0) {
+        console.log(pc.dim('\n  No events yet.\n'));
+        continue;
+      }
+      console.log(pc.bold(pc.magenta('\n🧠 Recent Brain Events\n')));
+      for (const e of events) {
+        const date = new Date(e.timestamp).toLocaleString();
+        console.log(`  ${pc.dim(date)} ${pc.cyan(e.kind.padEnd(20))} ${e.title}`);
+        if (e.summary) console.log(`  ${pc.dim('  →')} ${e.summary.slice(0, 100)}`);
+      }
+      console.log();
+      continue;
+    }
+
+    if (trimmed.toLowerCase() === '/brain map') {
+      try {
+        const map = await generateProjectMap(process.cwd());
+        await writeProjectMap(map);
+        console.log(pc.green(`\n✓ Project map updated (${map.knownSystems.length} systems)\n`));
+      } catch (err: unknown) {
+        console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+      }
+      continue;
+    }
+
+    if (trimmed.startsWith('/brain note ')) {
+      const text = trimmed.slice('/brain note '.length).trim();
+      if (text) {
+        await appendBrainEvent({ kind: 'manual_note', title: text.slice(0, 80), summary: text, tags: ['manual'] });
+        console.log(pc.green('✓ Note saved.\n'));
+      }
+      continue;
+    }
+
     function checkPendingEditProtected(): boolean {
       if (pendingEdit && isProtectedFilePath(pendingEdit.filePath)) {
         if (config.debug) console.log(pc.dim(`  [debug] blocked protected file pending edit: ${pendingEdit.filePath}`));
@@ -1804,20 +2008,32 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     // Track the task in session
     addTask(trimmed);
 
+    // ── Capability question detection ──────────────
+    if (isCapabilityQuestion(trimmed)) {
+      const wsDiag = getSearchDiagnostics();
+      const answer = getCapabilityResponse(trimmed, wsDiag.isReliable);
+      console.log(`\n  ${answer}\n`);
+      previousUserMessage = trimmed;
+      continue;
+    }
+
     // ── Detect question type and rebuild prompt ─────
-    const isSimpleQ = isSimpleQuestion(trimmed);
+    const taskKind = classifyTask([{ role: 'user', content: trimmed }]);
+    const injectProjectContext = shouldInjectProjectContext(trimmed, taskKind);
+    const isSimpleQ = isSimpleQuestion(trimmed) || taskKind === 'simple_chat';
     const resolvedMode = resolvePromptMode(
       config.promptMode || 'auto',
       config.currentProvider,
-      isSimpleQ,
+      isSimpleQ || !injectProjectContext,
     );
-    systemPrompt = buildSystemPrompt({
+    const promptProjectInfo = injectProjectContext ? {
       type: projectInfo.type,
       entryPoints: projectInfo.entryPoints,
       configFiles: projectInfo.configFiles,
       fileCount: projectInfo.fileCount,
       tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
-    }, currentAgentMode, lightActive, config.currentProvider, resolvedMode);
+    } : undefined;
+    systemPrompt = buildSystemPrompt(promptProjectInfo, currentAgentMode, lightActive, config.currentProvider, resolvedMode);
     recordPromptMode(resolvedMode);
 
     // ── Web search intent detection ────────────────
@@ -1835,9 +2051,16 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       /^(?:who\s+(?:is|are|was|were)\s+the\s+(?:current|latest|new)\s+)/i,
       /^(?:how\s+(?:much|many)\s+(?:is|are|does)\s+)/i,
       /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
+      /^(?:ابحث\s+(?:لي\s+)?عن\s+)(.+)/i,
+      /^(?:اعطني|أعطني)\s+(?:مصادر|معلومة)\s+(?:عن|حول)\s+(.+)/i,
+      /^(?:مصادر)\s+(?:عن|حول)\s+(.+)/i,
       /^(?:آخر\s+أخبار\s+)(.+)/i,
       /^(?:هل\s+هذا\s+صحيح\s+(?:الآن|حاليا|حالياً)?)/i,
       /^(?:ما\s+هو\s+(?:آخر|أحدث)\s+)/i,
+      /^(?:من\s+أين\s+أتيت\s+)/i,
+      /^(?:هل\s+هذه\s+المعلومة\s+محدثة)/i,
+      /^(?:هل\s+عندك\s+معلومات\s+(?:عن|حول)\s+)(.+)/i,
+      /^(?:دور\s+(?:لي\s+)?(?:على\s+)?)(.+)/i,
     ];
     let searchQuery: string | null = null;
     for (const p of searchPatterns) {
@@ -1879,7 +2102,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     }
 
     // ── Entity detection for unknown names/handles ─────
-    if (!searchQuery) {
+    if (!searchQuery && taskKind !== 'simple_chat') {
       const entityResult = shouldSearchEntity(trimmed, previousUserMessage);
       if (entityResult.shouldSearch && entityResult.query) {
         searchQuery = entityResult.query;
@@ -1927,7 +2150,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     let allMessages: Message[];
     let wasTruncated = false;
 
-    if (lightActive || isExplicitSearchCmd) {
+    if (lightActive || isExplicitSearchCmd || !injectProjectContext) {
       // Light mode or explicit search: skip file context, aggressive truncation
       const { messages: safeMessages } = truncateMessages([...messages], 2000);
       allMessages = [
@@ -2660,8 +2883,32 @@ export async function start(): Promise<void> {
     .argument('<provider>', 'Provider name (e.g. openrouter)')
     .option('--free', 'Show only free models')
     .action(async (provider: string, opts: { free?: boolean }) => {
+      const normalizedProvider = provider.replace(/-/g, '_');
+      if (normalizedProvider === 'ollama') {
+        const hysaConfig = loadConfig();
+        const baseUrl = hysaConfig?.ollamaBaseUrl || 'http://localhost:11434';
+        const spinner = new Spinner();
+        spinner.start('Fetching Ollama local models...');
+        try {
+          const models = await listOllamaModels(baseUrl);
+          spinner.succeed(`Found ${models.length} local model${models.length !== 1 ? 's' : ''}`);
+          console.log();
+          if (models.length === 0) {
+            console.log(pc.yellow('  No Ollama models found. Pull one with: ollama pull qwen2.5-coder\n'));
+          } else {
+            for (const model of models) console.log(`  ${model}`);
+            console.log();
+          }
+        } catch (err: unknown) {
+          spinner.fail('Failed to fetch Ollama models');
+          console.log(pc.red(`  ${(err as Error).message}`));
+          console.log(pc.dim('  Start Ollama with: ollama serve\n'));
+        }
+        return;
+      }
+
       if (provider !== 'openrouter') {
-        console.log(pc.yellow(`\n  Model listing is only available for openrouter.\n`));
+        console.log(pc.yellow(`\n  Model listing is available for openrouter and ollama.\n`));
         return;
       }
 
@@ -2748,15 +2995,17 @@ export async function start(): Promise<void> {
     .command('fallback')
     .description('Show fallback provider status')
     .argument('[action]', 'status or reset', 'status')
-    .action((action: string) => {
+    .action(async (action: string) => {
       if (action === 'reset') {
         resetHealth();
         console.log(pc.green('\n  Provider health has been reset.\n'));
         return;
       }
-      const config = loadConfig();
+      const config = loadConfig() as HysaConfig;
+      await printFallbackStatus(config);
+      return;
       const healthData = getAllHealth();
-      const lastErr = getLastError();
+      const lastErr = getLastError()!;
       const lastFb = getLastFallbackUsed();
 
       console.log(pc.bold(pc.magenta('\n📊 Fallback Status\n')));
@@ -2818,7 +3067,7 @@ export async function start(): Promise<void> {
     .description('Open a URL in the browser')
     .argument('<url>', 'URL to open (http/https only)')
     .action(async (url: string) => {
-      const result = await browserOpen(url);
+      const result = await cliBrowserOpen(url);
       if (result.ok) {
         console.log(`\n  ${pc.green('✓')} ${result.message}\n`);
       } else {
@@ -2831,7 +3080,7 @@ export async function start(): Promise<void> {
     .option('--full-page', 'Capture full page (not just viewport)')
     .option('--path <path>', 'Custom save path (inside .hysa/screenshots/)')
     .action(async (opts: { fullPage?: boolean; path?: string }) => {
-      const result = await browserScreenshot({ fullPage: opts.fullPage, path: opts.path });
+      const result = await cliBrowserScreenshot({ fullPage: opts.fullPage, path: opts.path });
       if (result.ok) {
         console.log(`\n  ${pc.green('✓')} ${result.message}\n`);
       } else {
@@ -2842,7 +3091,7 @@ export async function start(): Promise<void> {
     .command('text')
     .description('Get visible text content from the current page')
     .action(async () => {
-      const result = await browserText();
+      const result = await cliBrowserText();
       if (result.ok) {
         console.log(`\n  ${pc.green('✓')} ${result.message}`);
         if (result.text) {
@@ -2859,7 +3108,7 @@ export async function start(): Promise<void> {
     .command('snapshot')
     .description('Get an accessibility/ARIA snapshot of the current page')
     .action(async () => {
-      const result = await browserSnapshot();
+      const result = await cliBrowserSnapshot();
       if (result.ok) {
         console.log(`\n  ${pc.green('✓')} ${result.message}`);
         if (result.snapshot) {
@@ -2877,7 +3126,7 @@ export async function start(): Promise<void> {
     .description('Click an element by CSS selector or text')
     .argument('<target>', 'CSS selector or text to click')
     .action(async (target: string) => {
-      const result = await browserClick(target);
+      const result = await cliBrowserClick(target);
       if (result.ok) {
         console.log(`\n  ${pc.green('✓')} ${result.message}\n`);
       } else {
@@ -2890,7 +3139,7 @@ export async function start(): Promise<void> {
     .argument('<target>', 'CSS selector or placeholder text')
     .argument('<value>', 'Text to type')
     .action(async (target: string, value: string) => {
-      const result = await browserType(target, value);
+      const result = await cliBrowserType(target, value);
       if (result.ok) {
         console.log(`\n  ${pc.green('✓')} ${result.message}\n`);
       } else {
@@ -2901,10 +3150,11 @@ export async function start(): Promise<void> {
     .command('status')
     .description('Show browser session status')
     .action(async () => {
-      const status = await getBrowserStatus();
+      const status = await cliBrowserStatus();
       const cfg = getBrowserConfig();
       const pwOk = await checkPlaywrightInstalled();
       const crOk = await checkChromiumInstalled();
+      const daemonCfg = getDaemonConfig();
       console.log(`\n  Browser status:`);
       console.log(`    Active: ${status.active ? pc.green('yes') : pc.red('no')}`);
       if (status.active) {
@@ -2912,17 +3162,22 @@ export async function start(): Promise<void> {
         console.log(`    Title: ${status.title || '(none)'}`);
         console.log(`    Engine: ${status.browser || '(unknown)'}`);
       }
+      if (status.daemon) {
+        console.log(`    Daemon PID: ${status.pid}`);
+        console.log(`    Daemon port: ${status.port}`);
+      }
       console.log(`    Playwright installed: ${pwOk ? pc.green('yes') : pc.red('no')}`);
       console.log(`    Chromium installed: ${crOk === true ? pc.green('yes') : crOk === 'unknown' ? pc.yellow('unknown') : pc.red('no')}`);
       console.log(`    Headless: ${cfg.headless ? pc.green('true') : pc.yellow('false')}`);
       console.log(`    Screenshot dir: ${cfg.screenshotDir}`);
+      console.log(`    Daemon support: ${daemonCfg.enabled ? pc.green('enabled') : pc.yellow('disabled')}`);
       console.log(`    Timeout: ${cfg.timeoutMs}ms\n`);
     });
   browserCmd
     .command('close')
     .description('Close the browser session')
     .action(async () => {
-      const result = await browserClose();
+      const result = await cliBrowserClose();
       if (result.ok) {
         console.log(`\n  ${pc.green('✓')} ${result.message}\n`);
       } else {
@@ -2949,6 +3204,132 @@ export async function start(): Promise<void> {
       if (usage.lastError) console.log(`  Last error: ${usage.lastError}`);
       console.log(pc.dim('\n  Note: Quota/rate limits are provider-side, not related to context tokens.\n'));
     });
+
+    // ── Brain Commands ──────────────────────────────────
+
+    const brainCmd = program.command('brain').description('Project brain — local project memory and experience logging');
+
+    brainCmd
+      .command('init')
+      .description('Initialize .hysa/brain files')
+      .action(async () => {
+        try {
+          await initBrainFiles();
+          console.log(pc.green('\n✓ Brain initialized at .hysa/brain/\n'));
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    brainCmd
+      .command('map')
+      .description('Generate/update project-map.json')
+      .action(async () => {
+        try {
+          const map = await generateProjectMap(process.cwd());
+          await writeProjectMap(map);
+          const sys = map.knownSystems.length > 0 ? map.knownSystems.join(', ') : 'none detected';
+          console.log(pc.green(`\n✓ Project map updated (${map.knownSystems.length} systems: ${sys})\n`));
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    brainCmd
+      .command('status')
+      .description('Show brain status')
+      .action(async () => {
+        try {
+          const status = await getBrainStatus();
+          if (!status.exists) {
+            console.log(pc.yellow('\n⚠ Brain not initialized. Run: hysa brain init\n'));
+            return;
+          }
+          console.log(pc.bold(pc.magenta('\n🧠 Project Brain Status\n')));
+          console.log(`  Directory:  .hysa/brain/`);
+          console.log(`  Events:     ${status.eventCount}`);
+          console.log(`  Map date:   ${status.projectMapDate || 'never'}`);
+          console.log(`  Systems:    ${status.knownSystems.length > 0 ? status.knownSystems.join(', ') : 'none'}`);
+          console.log();
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    brainCmd
+      .command('recent')
+      .description('Show last 10 brain events')
+      .action(async () => {
+        try {
+          const events = await readRecentEvents(10);
+          if (events.length === 0) {
+            console.log(pc.dim('\n  No events yet.\n'));
+            return;
+          }
+          console.log(pc.bold(pc.magenta('\n🧠 Recent Brain Events\n')));
+          for (const e of events) {
+            const date = new Date(e.timestamp).toLocaleString();
+            console.log(`  ${pc.dim(date)} ${pc.cyan(e.kind.padEnd(20))} ${e.title}`);
+            if (e.summary) console.log(`  ${pc.dim('  →')} ${e.summary.slice(0, 120)}`);
+            console.log();
+          }
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    brainCmd
+      .command('note')
+      .description('Add a manual note to brain')
+      .argument('[text]', 'Note text')
+      .action(async (text?: string) => {
+        try {
+          if (!text) {
+            const { input } = await import('@inquirer/prompts');
+            text = await input({ message: 'Note:' });
+          }
+          if (!text) { console.log(pc.yellow('No note provided.\n')); return; }
+          await appendBrainEvent({
+            kind: 'manual_note',
+            title: text.slice(0, 80),
+            summary: text,
+            tags: ['manual'],
+          });
+          console.log(pc.green('✓ Note saved.\n'));
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    brainCmd
+      .command('lesson')
+      .description('Add a lesson learned')
+      .argument('<title>', 'Lesson title')
+      .argument('<text>', 'Lesson content')
+      .action(async (title: string, text: string) => {
+        try {
+          await appendBrainEvent({ kind: 'lesson', title, summary: text, tags: ['lesson'] });
+          await appendLesson(title, text, ['lesson']);
+          console.log(pc.green('✓ Lesson saved.\n'));
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    brainCmd
+      .command('decision')
+      .description('Add a design decision')
+      .argument('<title>', 'Decision title')
+      .argument('<text>', 'Decision content')
+      .action(async (title: string, text: string) => {
+        try {
+          await appendBrainEvent({ kind: 'decision', title, summary: text, tags: ['decision'] });
+          await appendDecision(title, text, ['decision']);
+          console.log(pc.green('✓ Decision saved.\n'));
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
 
     program
     .command('web')

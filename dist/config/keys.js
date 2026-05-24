@@ -81,7 +81,7 @@ export const PROVIDER_MODELS = {
     puter: ['gpt-4o-mini'],
     hysa_ai: ['hysa-coder-lite', 'hysa-coder', 'hysa-fast'],
     anthropic_proxy: ['claude-3-5-sonnet-latest', 'claude-3-opus-latest', 'claude-3-haiku-latest'],
-    openai_router: ['oc/deepseek-v4-flash-free', 'oc/nemotron-3-super-free', 'qw/qwen3-coder-flash', 'qw/qwen3-coder-plus', 'deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'cc/claude-sonnet-4-6'],
+    openai_router: ['qw/qwen3-coder-flash', 'oc/deepseek-v4-flash-free', 'qw/qwen3-coder-plus', 'oc/nemotron-3-super-free', 'deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'cc/claude-sonnet-4-6'],
 };
 export const PROVIDER_TIERS = {
     anthropic: 'premium_api',
@@ -160,6 +160,16 @@ export function providerHasOptionalApiKey(provider) {
 function isLocalProvider(provider) {
     return provider === 'ollama' || provider === 'local_openai' || provider === 'hysa_ai';
 }
+export function isLocalFallbackEnabled(config) {
+    const raw = process.env.HYSA_ENABLE_LOCAL_FALLBACK;
+    if (raw !== undefined) {
+        return parseBooleanFlag(raw);
+    }
+    return config?.enableLocalFallback === true;
+}
+function parseBooleanFlag(value) {
+    return /^(1|true|yes|on)$/i.test(value.trim());
+}
 export function providerRequiresKey(provider) {
     return providerNeedsApiKey(provider) && !isLocalProvider(provider);
 }
@@ -225,6 +235,9 @@ function applyEnvOverrides(config) {
     const routerModel = process.env.HYSA_OPENAI_ROUTER_MODEL;
     if (routerModel) {
         config.openaiRouterModel = routerModel.trim();
+    }
+    if (process.env.HYSA_ENABLE_LOCAL_FALLBACK !== undefined) {
+        config.enableLocalFallback = isLocalFallbackEnabled(config);
     }
 }
 export function getDefaultProviderFromEnv() {

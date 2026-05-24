@@ -16,6 +16,19 @@ export async function checkOllama(baseUrl: string): Promise<{ ok: boolean; messa
   }
 }
 
+export async function listOllamaModels(baseUrl: string, timeoutMs = 3000): Promise<string[]> {
+  const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) {
+    throw new Error(`Ollama returned status ${res.status}`);
+  }
+
+  const data = await res.json() as { models?: { name?: string; model?: string }[] };
+  const names = (data.models ?? [])
+    .map(model => model.name || model.model || '')
+    .filter((name): name is string => !!name.trim());
+  return [...new Set(names)];
+}
+
 export function createOllamaClient(baseUrl: string, model: string): AIClient {
   const buildMessages = (messages: Message[], systemPrompt: string) => [
     { role: 'system', content: systemPrompt },

@@ -16,22 +16,26 @@ export function resolvePromptMode(promptMode = 'auto', provider, isSimple) {
 // ── Minimal prompt (simple questions) ────────────────
 export function buildMinimalSystemPrompt() {
     return [
-        `You are HYSA Code, a coding assistant.`,
+        `You are HYSA Code, a coding assistant with web search and browsing capabilities.`,
         `Answer the user's question clearly and concisely.`,
         `Do not use tools unless the user explicitly asks you to read, edit, or run something.`,
         `Keep your response brief.`,
+        `If the user asks about your capabilities or whether you can search, confirm that you have web search tools.`,
     ].join('\n');
 }
 // ── Compact prompt (local / experimental providers) ──
 export function buildCompactSystemPrompt(projectInfo) {
     const parts = [];
-    parts.push(`You are HYSA Code, a coding assistant.`);
+    parts.push(`You are HYSA Code, a coding assistant with web search and browsing capabilities.`);
     if (projectInfo) {
         parts.push(`\nProject: ${projectInfo.type}`);
         if (projectInfo.entryPoints.length > 0) {
             parts.push(`Files: ${projectInfo.entryPoints.join(', ')}`);
         }
     }
+    parts.push(`\n## Capabilities`);
+    parts.push(`HYSA has web search tools to find current information when needed.`);
+    parts.push(`If the user asks about your capabilities, confirm you have search and browsing tools.`);
     parts.push(`
 Tools: read_file, edit_file, execute_command
 
@@ -63,6 +67,13 @@ function buildFullSystemPrompt(projectInfo, agentMode) {
         }
         parts.push(`Total files: ${projectInfo.fileCount}`);
     }
+    parts.push(`\n## Capabilities`);
+    parts.push(`HYSA has the following tools and capabilities:`);
+    parts.push(`- Web Search: When configured, HYSA can search the web for current information using the Research Agent.`);
+    parts.push(`- Browser: HYSA can open, navigate, and interact with web pages via /browser commands.`);
+    parts.push(`- Skills: HYSA can load specialized skills via @skill and /skill commands.`);
+    parts.push(`If a user asks about your capabilities, confirm that you have web search, browsing, and skills tools.`);
+    parts.push(`Do not claim you cannot access the internet or search the web when these tools are available.`);
     parts.push(`\n## Language Matching`);
     parts.push(`Always respond in the same language as the user's latest message.`);
     parts.push(`If the user writes in Arabic, respond in Arabic. If English, respond in English.`);

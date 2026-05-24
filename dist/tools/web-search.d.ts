@@ -26,5 +26,7 @@ export declare function getWebSearchConfig(): WebSearchConfig;
 export declare function searchWeb(query: string, options?: {
     maxResults?: number;
 }): Promise<SearchResult[]>;
+export declare function isCapabilityQuestion(text: string): boolean;
+export declare function getCapabilityResponse(text: string, isReliable: boolean): string;
 export declare function formatSearchResults(query: string, results: SearchResult[]): string;
 //# sourceMappingURL=web-search.d.ts.map

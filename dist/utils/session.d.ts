@@ -15,9 +15,41 @@ export interface ProviderHealthEntry {
     failureReason?: string;
     rateLimited?: boolean;
     timedOut?: boolean;
+    cooldownUntil?: number;
+    cooldownReason?: string;
     averageResponseTimeMs?: number;
     requestCount?: number;
     totalResponseTimeMs?: number;
+}
+export interface ProviderCooldownEntry {
+    provider: string;
+    reason: string;
+    category: string;
+    timestamp: number;
+    cooldownUntil: number;
+    failedCount?: number;
+}
+export interface LastChatErrorEntry {
+    provider: string;
+    model: string;
+    category: string;
+    reason: string;
+    timestamp: number;
+}
+export interface FallbackEventEntry {
+    provider: string;
+    model: string;
+    reason: string;
+    timestamp: number;
+}
+export interface ChatRuntimeState {
+    lastError?: LastChatErrorEntry | null;
+    lastFallbackUsed?: string | null;
+    lastSuccessfulProvider?: string | null;
+    lastSuccessfulModel?: string | null;
+    providerCooldowns?: ProviderCooldownEntry[];
+    fallbackEvents?: FallbackEventEntry[];
+    updatedAt?: number;
 }
 export interface SessionUsage {
     lastRequestDuration?: number;
@@ -38,6 +70,7 @@ export interface SessionData {
     sessionCount: number;
     yolo?: boolean;
     providerHealth?: ProviderHealthEntry[];
+    chatState?: ChatRuntimeState;
     usage?: SessionUsage;
 }
 export declare function loadSession(): SessionData;
@@ -52,6 +85,9 @@ export declare function getProviderHealth(): ProviderHealthEntry[];
 export declare function saveProviderHealth(entries: ProviderHealthEntry[]): void;
 export declare function clearProviderHealth(): void;
 export declare function getLastProviderError(): string | null;
+export declare function getChatRuntimeState(): ChatRuntimeState;
+export declare function saveChatRuntimeState(state: ChatRuntimeState): void;
+export declare function clearChatRuntimeState(): void;
 export declare function saveUsage(data: SessionUsage): void;
 export declare function getUsage(): SessionUsage;
 export declare function recordRequest(durationMs: number, tokens?: number): void;

@@ -1,16 +1,10 @@
-import { PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_TIERS, PREMIUM_API_PROVIDERS, PROVIDER_SIGNUP_URLS, EXPERIMENTAL_BASE_URLS } from '../config/keys.js';
-import { createAnthropicClient } from './anthropic.js';
-import { createOpenAIClient } from './openai.js';
-import { createGeminiClient } from './gemini.js';
-import { createOllamaClient, checkOllama } from './ollama.js';
-import { createOpenRouterClient } from './openrouter.js';
-import { createGroqClient } from './groq.js';
-import { createDeepSeekClient } from './deepseek.js';
-import { createOpenAICompatibleClient, checkOpenAICompatibleAPI } from './openai-compatible.js';
-import { createOpenCodeZenClient } from './opencode-zen.js';
-import { createHysaAIClient } from './hysa-ai.js';
-import { createAnthropicProxyClient } from './anthropic-proxy.js';
-import { markHealth, isUnhealthy, isSkippedForRequest, getHealthRecord, getFallbackEvents, setLastFallbackUsed, setLastSuccessfulProvider, clearRequestSkips, addFallbackEvent, clearFallbackEvents } from './model-health.js';
+import { PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_TIERS, PREMIUM_API_PROVIDERS, PROVIDER_SIGNUP_URLS, EXPERIMENTAL_BASE_URLS, isLocalFallbackEnabled } from '../config/keys.js';
+import { createSingleClient } from './client-factory.js';
+import { createSmartRouter } from './smart-router.js';
+import { checkOllama } from './ollama.js';
+import { checkOpenAICompatibleAPI } from './openai-compatible.js';
+import { markHealth, markModelCooldown, markProviderCooldown, isOnCooldown, isProviderOnCooldown, isUnhealthy, isSkippedForRequest, getHealthRecord, getFallbackEvents, setLastFallbackUsed, setLastSuccessfulProvider, clearRequestSkips, addFallbackEvent, clearFallbackEvents } from './model-health.js';
+import { getRetryAfterSeconds } from './provider-policy.js';
 import { recordRequest, recordError } from '../utils/session.js';
 const CHAT_TIMEOUT_MS = 30000;
 const FALLBACK_ATTEMPT_TIMEOUT_MS = 12000;
@@ -22,6 +16,19 @@ const MAX_FALLBACK_MODELS = 10;
 const MAX_FALLBACK_PROVIDERS = 10;
 let requestCounter = 0;
 function getProviderTimeout(provider, isPrimary) {
+    // Env var overrides
+    const envChatTimeout = process.env.HYSA_CHAT_TIMEOUT_MS;
+    const envFallbackTimeout = process.env.HYSA_FALLBACK_TIMEOUT_MS;
+    if (isPrimary && envChatTimeout) {
+        const parsed = parseInt(envChatTimeout, 10);
+        if (!isNaN(parsed) && parsed > 0)
+            return parsed;
+    }
+    if (!isPrimary && envFallbackTimeout) {
+        const parsed = parseInt(envFallbackTimeout, 10);
+        if (!isNaN(parsed) && parsed > 0)
+            return parsed;
+    }
     const tier = PROVIDER_TIERS[provider];
     if (tier === 'experimental_free')
         return EXPERIMENTAL_TIMEOUT_MS;
@@ -45,7 +52,7 @@ export function categorizeError(msg) {
         return 'timeout';
     if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed') || lower.includes('network') || lower.includes('enotfound') || lower.includes('econnaborted'))
         return 'network';
-    if (lower.includes('404') || lower.includes('model not found') || lower.includes('not found') || lower.includes('unavailable') || lower.includes('no free') || lower.includes('not supported') || lower.includes('503') || lower.includes('service unavailable') || lower.includes('overloaded') || lower.includes('overload'))
+    if (lower.includes('404') || lower.includes('model not found') || lower.includes('not found') || lower.includes('does not support') || lower.includes('not support') || lower.includes('unavailable') || lower.includes('no free') || lower.includes('not supported') || lower.includes('503') || lower.includes('service unavailable') || lower.includes('overloaded') || lower.includes('overload'))
         return 'model_unavailable';
     return 'unknown';
 }
@@ -143,6 +150,11 @@ export function getFallbackCandidates(current, config) {
         if (config.anthropicProxyBaseUrl) {
             add('anthropic_proxy');
         }
+        if (isLocalFallbackEnabled(config)) {
+            add('ollama');
+            add('local_openai');
+            add('hysa_ai');
+        }
     }
     // B. Local free fallback
     if (tier === 'local_free') {
@@ -200,6 +212,10 @@ export function getFallbackCandidates(current, config) {
 }
 // ── Provider/Model skip logic ────────────────────────
 function shouldSkipProvider(provider, model) {
+    if (isProviderOnCooldown(provider))
+        return true;
+    if (isOnCooldown(provider, model))
+        return true;
     if (isSkippedForRequest(provider, model))
         return true;
     const rec = getHealthRecord(provider, model);
@@ -246,74 +262,6 @@ function tryCreateClient(provider, model, config) {
     }
     catch {
         return null;
-    }
-}
-export function createSingleClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBaseUrl, localOpenAiModel, config) {
-    switch (provider) {
-        case 'anthropic': {
-            const key = apiKeys.anthropic;
-            if (!key)
-                throw new Error('Anthropic API key not configured. Run: hysa config');
-            return createAnthropicClient(key, model);
-        }
-        case 'openai': {
-            const key = apiKeys.openai;
-            if (!key)
-                throw new Error('OpenAI API key not configured. Run: hysa config');
-            return createOpenAIClient(key, model);
-        }
-        case 'gemini': {
-            const key = apiKeys.gemini;
-            if (!key)
-                throw new Error('Gemini API key not configured. Run: hysa config');
-            return createGeminiClient(key, model);
-        }
-        case 'ollama':
-            return createOllamaClient(ollamaBaseUrl, model);
-        case 'local_openai':
-            return createOpenAICompatibleClient(localOpenAiBaseUrl || 'http://localhost:1234/v1', undefined, localOpenAiModel || model);
-        case 'openrouter':
-            return createOpenRouterClient(apiKeys.openrouter, model);
-        case 'groq':
-            return createGroqClient(apiKeys.groq, model);
-        case 'deepseek':
-            return createDeepSeekClient(apiKeys.deepseek, model);
-        case 'opencode_zen': {
-            if (!apiKeys.opencode_zen)
-                throw new Error('OpenCode Zen requires an API key. Get one from https://opencode.ai/zen');
-            return createOpenCodeZenClient(apiKeys.opencode_zen, model);
-        }
-        case 'pollinations': {
-            const baseUrl = EXPERIMENTAL_BASE_URLS.pollinations || 'https://text.pollinations.ai/v1';
-            return createOpenAICompatibleClient(baseUrl, apiKeys.pollinations, model);
-        }
-        case 'llm7': {
-            const baseUrl = EXPERIMENTAL_BASE_URLS.llm7 || 'https://api.llm7.io/v1';
-            return createOpenAICompatibleClient(baseUrl, apiKeys.llm7, model);
-        }
-        case 'puter': {
-            const baseUrl = EXPERIMENTAL_BASE_URLS.puter || 'https://api.puter.com/v1';
-            return createOpenAICompatibleClient(baseUrl, apiKeys.puter, model);
-        }
-        case 'hysa_ai': {
-            return createHysaAIClient(apiKeys.hysa_ai, model, 'http://localhost:3002/v1');
-        }
-        case 'anthropic_proxy': {
-            const proxyUrl = config?.anthropicProxyBaseUrl;
-            if (!proxyUrl)
-                throw new Error('Anthropic proxy base URL not configured. Set HYSA_ANTHROPIC_PROXY_BASE_URL.');
-            const proxyModel = config?.anthropicProxyModel || model;
-            return createAnthropicProxyClient(proxyUrl, apiKeys.anthropic_proxy, proxyModel);
-        }
-        case 'openai_router': {
-            const routerUrl = config?.openaiRouterBaseUrl;
-            if (!routerUrl)
-                throw new Error('OpenAI router base URL not configured. Set HYSA_OPENAI_ROUTER_BASE_URL.');
-            const routerModel = config?.openaiRouterModel || model;
-            return createOpenAICompatibleClient(routerUrl, apiKeys.openai_router, routerModel);
-        }
-        default:
-            throw new Error(`Unsupported provider: ${provider}`);
     }
 }
 // ── Fallback Client ─────────────────────────────────
@@ -487,7 +435,8 @@ function createFallbackClient(primary, config) {
                             console.log(`[req:${reqId}] ${provLabel} timed out (${timeoutMs / 1000}s)`);
                         }
                         else {
-                            console.log('  Timed out. Trying next...');
+                            const dur = ((Date.now() - attemptStart) / 1000).toFixed(1);
+                            console.log(`  ${provLabel} / ${model} timed out after ${dur}s. Trying next...`);
                         }
                     }
                     else if (cat === 'rate_limit') {
@@ -524,12 +473,19 @@ function createFallbackClient(primary, config) {
                         }
                     }
                     markHealth(provider, model, 'unhealthy', friendlyError(errMsg, provider), cat, attemptDuration);
+                    if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
+                        const cooldownSec = getRetryAfterSeconds(err) ?? (cat === 'rate_limit' ? 120 : 60);
+                        markModelCooldown(provider, model, friendlyError(errMsg, provider), cooldownSec, cat);
+                        if ((provider === 'openai_router' || provider === 'openrouter') && cat === 'rate_limit') {
+                            markProviderCooldown(provider, `${PROVIDER_DEFAULTS[provider]?.label || provider} rate-limited; provider cooldown active`, cooldownSec, cat);
+                        }
+                    }
                     recordError(errMsg, provider, model);
                     if (debug) {
                         console.log(`[req:${reqId}] ${attemptLabel} failed (retry ${retries}/${maxRetries}) after ${((Date.now() - attemptStart) / 1000).toFixed(1)}s:`);
                         console.log(extractDebugInfo(err, provider, model, config, elapsed, timeoutMs, totalAttempts));
                     }
-                    if (retries <= maxRetries && isRetryableError(errMsg)) {
+                    if (retries <= maxRetries && isRetryableError(errMsg) && cat !== 'rate_limit') {
                         const delay = Math.min(1000 * Math.pow(2, retries - 1), 4000);
                         if (debug)
                             console.log(`[req:${reqId}] Retrying ${attemptLabel} in ${delay}ms...`);
@@ -554,7 +510,36 @@ function createFallbackClient(primary, config) {
             return result;
         // Check total time
         if (Date.now() - startTime >= MAX_TOTAL_TIME_MS) {
-            throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts, reqId);
+            throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts, reqId, config);
+        }
+        // Model-level fallback for OpenAI Router — try models in order before giving up
+        if (primary === 'openai_router') {
+            const triedModels = new Set([primaryModel]);
+            const orderedModels = PROVIDER_MODELS.openai_router.filter(m => m !== primaryModel).slice(0, MAX_FALLBACK_MODELS);
+            if (debug) {
+                console.log(`[req:${reqId}] Router model-level fallback with ${orderedModels.length} candidates`);
+            }
+            for (const altModel of orderedModels) {
+                if (triedModels.has(altModel))
+                    continue;
+                triedModels.add(altModel);
+                if (Date.now() - startTime >= MAX_TOTAL_TIME_MS)
+                    break;
+                if (shouldSkipProvider(primary, altModel)) {
+                    if (debug)
+                        console.log(`[req:${reqId}] Skipping unhealthy router model: ${altModel}`);
+                    continue;
+                }
+                if (debug)
+                    console.log(`[req:${reqId}] Router model fallback to ${altModel}`);
+                result = await tryProvider(primary, altModel, getProviderTimeout(primary, false), 'Router model fallback');
+                if (result) {
+                    console.log(`  OK Switched to ${altModel} on ${PROVIDER_DEFAULTS[primary]?.label || primary}.`);
+                    setLastFallbackUsed(`${PROVIDER_DEFAULTS[primary]?.label || primary} / ${altModel}`);
+                    addFallbackEvent(primary, altModel, `Switched to ${PROVIDER_DEFAULTS[primary]?.label || primary} / ${altModel}`);
+                    return result;
+                }
+            }
         }
         // Model-level fallback for OpenRouter — try many text models before giving up
         if (primary === 'openrouter') {
@@ -595,7 +580,7 @@ function createFallbackClient(primary, config) {
         }
         // Check total time
         if (Date.now() - startTime >= MAX_TOTAL_TIME_MS) {
-            throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts, reqId);
+            throwAllFailedError(lastError, primary, primaryModel, startTime, skippedReasons, totalAttempts, reqId, config);
         }
         // Provider-level fallback — grouped by provider, counting provider groups not model variants
         const flatCandidates = getFallbackCandidates(primary, config);
@@ -693,16 +678,22 @@ function createFallbackClient(primary, config) {
         const errMsg = lastError
             ? friendlyError(lastError.message, lastProvider)
             : `${lastProvLabel} is unavailable. No fallback providers configured.`;
-        throw new Error(`All free providers are currently busy or rate-limited. Try again shortly or configure a paid/stable provider.\n${errMsg}`);
+        const prefix = isLocalFallbackEnabled(config)
+            ? 'All configured free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.'
+            : 'All configured online free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.';
+        throw new Error(`${prefix}\n${errMsg}`);
     }
 }
-function throwAllFailedError(lastError, primary, primaryModel, startTime, skipped, totalAttempts, reqId) {
+function throwAllFailedError(lastError, primary, primaryModel, startTime, skipped, totalAttempts, reqId, config) {
     const el = ((Date.now() - startTime) / 1000).toFixed(0);
     const label = PROVIDER_DEFAULTS[primary]?.label || primary;
-    throw new Error(`All free providers are currently busy or rate-limited. Try again shortly or configure a paid/stable provider.\n${label} exhausted after ${el}s (${totalAttempts} attempts).`);
+    const prefix = isLocalFallbackEnabled(config)
+        ? 'All configured free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.'
+        : 'All configured online free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.';
+    throw new Error(`${prefix}\n${label} exhausted after ${el}s (${totalAttempts} attempts).`);
 }
 // ── Greeting guard ──────────────────────────────────
-const GREETINGS = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'السلام', 'صباح', 'مساء', 'مرحبا', 'اهلا', 'اه', 'اوك'];
+const GREETINGS = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'thanks', 'thank you', 'ok', 'okay', 'nice', 'good', 'great', 'perfect', 'yes', 'no', 'sure', 'bye', 'goodbye', 'السلام', 'صباح', 'مساء', 'مرحبا', 'اهلا', 'اه', 'اوك'];
 const CASUAL_RESPONSES = {
     bro: "Yo — what do you want to build or fix?",
     thanks: "You're welcome! What's next?",
@@ -782,6 +773,11 @@ async function checkLocalProviderReachable(provider, config) {
 // ── Public API ──────────────────────────────────────
 export function createClient(config, signal) {
     const { currentProvider: provider } = config;
+    const routerMode = (process.env.HYSA_MODEL_ROUTER_MODE || 'smart').toLowerCase();
+    // Smart router: classify task and pick best model
+    if (routerMode === 'smart') {
+        return createSmartRouter(config, signal);
+    }
     const tier = PROVIDER_TIERS[provider];
     const isLocal = tier === 'local_free';
     const lightMode = config.lightMode !== false && isLocal;
@@ -842,4 +838,5 @@ function wrapClient(client, provider) {
     }
     return wrapped;
 }
+export { createSingleClient } from './client-factory.js';
 //# sourceMappingURL=client.js.map

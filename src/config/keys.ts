@@ -39,6 +39,7 @@ export interface HysaConfig {
   openaiRouterModel?: string;
   allowExperimentalProviders?: boolean;
   experimentalConfirmed?: boolean;
+  enableLocalFallback?: boolean;
   agentMode?: AgentMode;
   debug?: boolean;
   lightMode?: boolean;
@@ -126,7 +127,7 @@ export const PROVIDER_MODELS: Record<ProviderType, string[]> = {
   puter: ['gpt-4o-mini'],
   hysa_ai: ['hysa-coder-lite', 'hysa-coder', 'hysa-fast'],
   anthropic_proxy: ['claude-3-5-sonnet-latest', 'claude-3-opus-latest', 'claude-3-haiku-latest'],
-  openai_router: ['oc/deepseek-v4-flash-free', 'oc/nemotron-3-super-free', 'qw/qwen3-coder-flash', 'qw/qwen3-coder-plus', 'deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'cc/claude-sonnet-4-6'],
+  openai_router: ['qw/qwen3-coder-flash', 'oc/deepseek-v4-flash-free', 'qw/qwen3-coder-plus', 'oc/nemotron-3-super-free', 'deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'cc/claude-sonnet-4-6'],
 };
 
 export type ProviderTier = 'free_api' | 'local_free' | 'premium_api' | 'experimental_free';
@@ -222,6 +223,18 @@ function isLocalProvider(provider: ProviderType): boolean {
   return provider === 'ollama' || provider === 'local_openai' || provider === 'hysa_ai';
 }
 
+export function isLocalFallbackEnabled(config?: Pick<HysaConfig, 'enableLocalFallback'> | null): boolean {
+  const raw = process.env.HYSA_ENABLE_LOCAL_FALLBACK;
+  if (raw !== undefined) {
+    return parseBooleanFlag(raw);
+  }
+  return config?.enableLocalFallback === true;
+}
+
+function parseBooleanFlag(value: string): boolean {
+  return /^(1|true|yes|on)$/i.test(value.trim());
+}
+
 export function providerRequiresKey(provider: ProviderType): boolean {
   return providerNeedsApiKey(provider) && !isLocalProvider(provider);
 }
@@ -290,6 +303,9 @@ function applyEnvOverrides(config: HysaConfig): void {
   const routerModel = process.env.HYSA_OPENAI_ROUTER_MODEL;
   if (routerModel) {
     config.openaiRouterModel = routerModel.trim();
+  }
+  if (process.env.HYSA_ENABLE_LOCAL_FALLBACK !== undefined) {
+    config.enableLocalFallback = isLocalFallbackEnabled(config);
   }
 }
 

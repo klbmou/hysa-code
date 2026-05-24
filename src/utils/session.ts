@@ -23,9 +23,45 @@ export interface ProviderHealthEntry {
   failureReason?: string;
   rateLimited?: boolean;
   timedOut?: boolean;
+  cooldownUntil?: number;
+  cooldownReason?: string;
   averageResponseTimeMs?: number;
   requestCount?: number;
   totalResponseTimeMs?: number;
+}
+
+export interface ProviderCooldownEntry {
+  provider: string;
+  reason: string;
+  category: string;
+  timestamp: number;
+  cooldownUntil: number;
+  failedCount?: number;
+}
+
+export interface LastChatErrorEntry {
+  provider: string;
+  model: string;
+  category: string;
+  reason: string;
+  timestamp: number;
+}
+
+export interface FallbackEventEntry {
+  provider: string;
+  model: string;
+  reason: string;
+  timestamp: number;
+}
+
+export interface ChatRuntimeState {
+  lastError?: LastChatErrorEntry | null;
+  lastFallbackUsed?: string | null;
+  lastSuccessfulProvider?: string | null;
+  lastSuccessfulModel?: string | null;
+  providerCooldowns?: ProviderCooldownEntry[];
+  fallbackEvents?: FallbackEventEntry[];
+  updatedAt?: number;
 }
 
 export interface SessionUsage {
@@ -48,6 +84,7 @@ export interface SessionData {
   sessionCount: number;
   yolo?: boolean;
   providerHealth?: ProviderHealthEntry[];
+  chatState?: ChatRuntimeState;
   usage?: SessionUsage;
 }
 
@@ -136,6 +173,7 @@ export function saveProviderHealth(entries: ProviderHealthEntry[]): void {
 export function clearProviderHealth(): void {
   const session = loadSession();
   session.providerHealth = [];
+  session.chatState = undefined;
   saveSession(session);
 }
 
@@ -144,6 +182,22 @@ export function getLastProviderError(): string | null {
   if (entries.length === 0) return null;
   const last = entries[entries.length - 1];
   return `${last.provider}/${last.model}: ${last.reason}`;
+}
+
+export function getChatRuntimeState(): ChatRuntimeState {
+  return loadSession().chatState ?? {};
+}
+
+export function saveChatRuntimeState(state: ChatRuntimeState): void {
+  const session = loadSession();
+  session.chatState = { ...state, updatedAt: Date.now() };
+  saveSession(session);
+}
+
+export function clearChatRuntimeState(): void {
+  const session = loadSession();
+  session.chatState = undefined;
+  saveSession(session);
 }
 
 // ── Usage Tracking ──────────────────────────────────

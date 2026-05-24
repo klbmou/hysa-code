@@ -126,6 +126,14 @@ export function isEntityFollowUpQuery(message) {
         return true;
     if (/^tell\s+me\s+(more|about)\s+(him|her|it|this|this\s+person)/i.test(trimmed))
         return true;
+    if (/^\u0645\u0646\s+(\u0647\u0648|\u0647\u0630\u0647|\u0647\u0630\u0627)\s*(\u0627\u0644\u0634\u062e\u0635|\u0627\u0644\u0645\u0633\u062a\u062e\u062f\u0645|\u0627\u0644\u0627\u0633\u0645|\u0627\u0644\u0627\u0643\u0648\u0646\u062a)?$/i.test(trimmed))
+        return true;
+    if (/^\u0645\u0627\s+\u0647\u0648\s+(\u0647\u0630\u0627|\u0647\u0630\u0647)/i.test(trimmed))
+        return true;
+    if (/^من\s+(هو|هذه|هذا)\s*(الشخص|المستخدم|الاسم|الاكونت)?$/i.test(trimmed))
+        return true;
+    if (/^ما\s+هو\s+(هذا|هذه)/i.test(trimmed))
+        return true;
     if (/^من\s+(هو|هذه|هذا)\s*(الشخص|المستخدم|الاسم|الاكونت)?$/i.test(trimmed))
         return true;
     if (/^ما\s+هو\s+(هذا|هذه)/i.test(trimmed))
@@ -153,6 +161,10 @@ export function isEntityLookupQuery(message) {
             return false;
         return true;
     }
+    if (/^\u0645\u0646\s+\u0647\u0648\s+(.+)/i.test(trimmed))
+        return true;
+    if (/^من\s+هو\s+(.+)/i.test(trimmed))
+        return true;
     if (/^من\s+هو\s+(.+)/i.test(trimmed))
         return true;
     const whatMatch = trimmed.match(/^what\s+(?:is|are)\s+(.+)/i);
@@ -187,6 +199,12 @@ export function extractEntityName(message) {
     const arWhoMatch = trimmed.match(/^من\s+هو\s+(.+)/i);
     if (arWhoMatch)
         return arWhoMatch[1].trim();
+    const arWhoMatchEscaped = trimmed.match(/^\u0645\u0646\s+\u0647\u0648\s+(.+)/i);
+    if (arWhoMatchEscaped)
+        return arWhoMatchEscaped[1].trim();
+    const arWhoMatchUtf8 = trimmed.match(/^من\s+هو\s+(.+)/i);
+    if (arWhoMatchUtf8)
+        return arWhoMatchUtf8[1].trim();
     return null;
 }
 const ACTION_WORDS = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|scan|symbol|import|open|check|remove|delete|rename|move|copy|refactor|install|upgrade|build|compile|test|deploy)\b/i;
@@ -199,6 +217,14 @@ export function shouldSearchEntity(message, previousUserMessage) {
         return { shouldSearch: false, query: null };
     }
     if (trimmed.startsWith('/')) {
+        return { shouldSearch: false, query: null };
+    }
+    const words = trimmed.split(/\s+/).filter(Boolean);
+    const explicitEntityIntent = /^@/.test(trimmed)
+        || /^(?:who|what)\s+(?:is|are|was|were)\s+/i.test(trimmed)
+        || /^\u0645\u0646\s+\u0647\u0648\s+/i.test(trimmed)
+        || isEntityFollowUpQuery(trimmed);
+    if (words.length < 5 && !explicitEntityIntent) {
         return { shouldSearch: false, query: null };
     }
     // Case 1: Follow-up query referencing previous message

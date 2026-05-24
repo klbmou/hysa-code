@@ -77,6 +77,7 @@ export function saveProviderHealth(entries) {
 export function clearProviderHealth() {
     const session = loadSession();
     session.providerHealth = [];
+    session.chatState = undefined;
     saveSession(session);
 }
 export function getLastProviderError() {
@@ -85,6 +86,19 @@ export function getLastProviderError() {
         return null;
     const last = entries[entries.length - 1];
     return `${last.provider}/${last.model}: ${last.reason}`;
+}
+export function getChatRuntimeState() {
+    return loadSession().chatState ?? {};
+}
+export function saveChatRuntimeState(state) {
+    const session = loadSession();
+    session.chatState = { ...state, updatedAt: Date.now() };
+    saveSession(session);
+}
+export function clearChatRuntimeState() {
+    const session = loadSession();
+    session.chatState = undefined;
+    saveSession(session);
 }
 // ── Usage Tracking ──────────────────────────────────
 export function saveUsage(data) {
