@@ -41,7 +41,7 @@ import { listSymbols, findReferences, searchImports, summarizeFile, explainFunct
 import { getAllHealth, toHealthSummary, resetHealth, getLastError, getLastFallbackUsed, getModelsInCooldown, getProviderCooldowns, getRateLimitedModels, getFallbackEvents, healthKey, loadHealthFromEntries, toHealthEntries } from './ai/model-health.js';
 import type { ErrorCategory } from './ai/model-health.js';
 import { listOllamaModels } from './ai/ollama.js';
-import { initBrainFiles, getBrainStatus, readRecentEvents, readProjectMap, appendBrainEvent, appendLesson, appendDecision, writeProjectMap, generateProjectMap } from './brain/index.js';
+import { initBrainFiles, getBrainStatus, readRecentEvents, readProjectMap, appendBrainEvent, appendLesson, appendDecision, writeProjectMap, generateProjectMap, getGraphStats, searchGraph, compactGraph, readExperienceGraph, logLesson as graphLogLesson, logDecision as graphLogDecision, experienceGraphExists } from './brain/index.js';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -316,10 +316,12 @@ function showHelp(agentMode?: AgentMode): void {
   console.log(pc.cyan('  /yolo              Toggle YOLO mode (auto-apply edits)'));
   console.log(pc.cyan('  /light             Toggle Light mode (short prompts, fast responses)'));
   console.log(pc.cyan('  /latency           Test provider latency'));
-  console.log(pc.cyan('  /brain status      Show brain status'));
-  console.log(pc.cyan('  /brain recent      Show recent brain events'));
-  console.log(pc.cyan('  /brain map         Update project map'));
-  console.log(pc.cyan('  /brain note <text> Add a note to brain'));
+  console.log(pc.cyan('  /brain status            Show brain status'));
+  console.log(pc.cyan('  /brain recent            Show recent brain events'));
+  console.log(pc.cyan('  /brain map               Update project map'));
+  console.log(pc.cyan('  /brain note <text>       Add a note to brain'));
+  console.log(pc.cyan('  /brain graph             Show experience graph stats'));
+  console.log(pc.cyan('  /brain graph search <q>  Search experience graph'));
 
   if (agentMode && agentMode !== 'chat') {
     console.log(pc.dim(`\n  Active mode: ${MODE_LABELS[agentMode]}`));
@@ -1855,6 +1857,43 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       continue;
     }
 
+    // ── /brain graph commands ──────────────────────
+
+    if (trimmed.toLowerCase() === '/brain graph' || trimmed.toLowerCase() === '/brain graph stats') {
+      try {
+        const stats = await getGraphStats();
+        console.log(pc.bold(pc.magenta('\n📊 Experience Graph\n')));
+        console.log(`  Nodes:   ${stats.nodeCount}`);
+        console.log(`  Edges:   ${stats.edgeCount}`);
+        console.log(`  Updated: ${new Date(stats.updatedAt).toLocaleString()}`);
+        console.log();
+      } catch {
+        console.log(pc.yellow('\n  Graph not available.\n'));
+      }
+      continue;
+    }
+
+    if (trimmed.toLowerCase().startsWith('/brain graph search ')) {
+      const query = trimmed.slice('/brain graph search '.length).trim();
+      if (query) {
+        try {
+          const { nodes, edges } = await searchGraph(query);
+          if (nodes.length === 0 && edges.length === 0) {
+            console.log(pc.dim(`\n  No results for "${query}".\n`));
+          } else {
+            console.log(pc.bold(pc.magenta(`\n🔍 "${query}"\n`)));
+            for (const n of nodes.slice(0, 10)) {
+              console.log(`  ${pc.cyan(n.kind.padEnd(12))} ${n.label.slice(0, 60)}`);
+            }
+            console.log();
+          }
+        } catch {
+          console.log(pc.yellow('\n  Search failed.\n'));
+        }
+      }
+      continue;
+    }
+
     function checkPendingEditProtected(): boolean {
       if (pendingEdit && isProtectedFilePath(pendingEdit.filePath)) {
         if (config.debug) console.log(pc.dim(`  [debug] blocked protected file pending edit: ${pendingEdit.filePath}`));
@@ -3310,6 +3349,7 @@ export async function start(): Promise<void> {
         try {
           await appendBrainEvent({ kind: 'lesson', title, summary: text, tags: ['lesson'] });
           await appendLesson(title, text, ['lesson']);
+          await graphLogLesson(title, text).catch(() => {});
           console.log(pc.green('✓ Lesson saved.\n'));
         } catch (err: unknown) {
           console.log(pc.red(`\nError: ${(err as Error).message}\n`));
@@ -3325,11 +3365,143 @@ export async function start(): Promise<void> {
         try {
           await appendBrainEvent({ kind: 'decision', title, summary: text, tags: ['decision'] });
           await appendDecision(title, text, ['decision']);
+          await graphLogDecision(title, text).catch(() => {});
           console.log(pc.green('✓ Decision saved.\n'));
         } catch (err: unknown) {
           console.log(pc.red(`\nError: ${(err as Error).message}\n`));
         }
       });
+
+    // ── Graph Commands ──────────────────────────────────
+
+    const graphCmd = brainCmd.command('graph').description('Experience graph commands');
+
+    graphCmd
+      .command('stats')
+      .description('Show graph statistics')
+      .action(async () => {
+        try {
+          const stats = await getGraphStats();
+          console.log(pc.bold(pc.magenta('\n📊 Experience Graph Stats\n')));
+          console.log(`  Nodes:      ${stats.nodeCount}`);
+          console.log(`  Edges:      ${stats.edgeCount}`);
+          console.log(`  Updated:    ${new Date(stats.updatedAt).toLocaleString()}`);
+          if (stats.topKinds.length > 0) {
+            console.log(pc.bold('\n  Top Node Kinds:'));
+            for (const k of stats.topKinds) {
+              console.log(`    ${pc.cyan(k.kind.padEnd(16))} ${k.count}`);
+            }
+          }
+          console.log();
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    graphCmd
+      .command('show')
+      .description('Show recent important nodes and edges')
+      .action(async () => {
+        try {
+          const graph = await readExperienceGraph();
+          if (graph.nodes.length === 0) {
+            console.log(pc.dim('\n  Graph is empty.\n'));
+            return;
+          }
+          console.log(pc.bold(pc.magenta('\n📋 Experience Graph\n')));
+          const important = graph.nodes
+            .filter(n => ['lesson', 'decision', 'fix', 'bug'].includes(n.kind))
+            .slice(0, 15);
+          if (important.length > 0) {
+            console.log(pc.bold('  Important Nodes:'));
+            for (const n of important) {
+              const date = new Date(n.createdAt).toLocaleDateString();
+              console.log(`    ${pc.dim(date)} ${pc.cyan(n.kind.padEnd(12))} ${n.label.slice(0, 60)}`);
+            }
+          }
+          const recent = graph.nodes.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 10);
+          console.log(pc.bold('\n  Recent Nodes:'));
+          for (const n of recent) {
+            const date = new Date(n.createdAt).toLocaleDateString();
+            console.log(`    ${pc.dim(date)} ${pc.cyan(n.kind.padEnd(12))} ${n.label.slice(0, 60)}`);
+          }
+          console.log();
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    graphCmd
+      .command('search')
+      .description('Search nodes and edges')
+      .argument('<query>', 'Search query')
+      .action(async (query: string) => {
+        try {
+          const { nodes, edges } = await searchGraph(query);
+          if (nodes.length === 0 && edges.length === 0) {
+            console.log(pc.dim(`\n  No results for "${query}".\n`));
+            return;
+          }
+          console.log(pc.bold(pc.magenta(`\n🔍 Graph Search: "${query}"\n`)));
+          if (nodes.length > 0) {
+            console.log(pc.bold(`  Nodes (${nodes.length}):`));
+            for (const n of nodes.slice(0, 20)) {
+              console.log(`    ${pc.cyan(n.kind.padEnd(12))} ${n.label.slice(0, 70)}`);
+            }
+            if (nodes.length > 20) console.log(`    ... and ${nodes.length - 20} more`);
+          }
+          if (edges.length > 0) {
+            console.log(pc.bold(`\n  Edges (${edges.length}):`));
+            for (const e of edges.slice(0, 10)) {
+              console.log(`    ${pc.dim(e.kind)} ${e.from.slice(0, 8)} → ${e.to.slice(0, 8)}`);
+            }
+            if (edges.length > 10) console.log(`    ... and ${edges.length - 10} more`);
+          }
+          console.log();
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    graphCmd
+      .command('compact')
+      .description('Remove low-value duplicate/stale nodes')
+      .action(async () => {
+        try {
+          const result = await compactGraph(500);
+          console.log(pc.green(`\n✓ Graph compacted: ${result.removedNodes} nodes, ${result.removedEdges} edges removed.\n`));
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    graphCmd
+      .command('export')
+      .description('Print path to experience-graph.json')
+      .action(() => {
+        const graphPath = join(process.cwd(), '.hysa/brain/experience-graph.json');
+        console.log(`\n  ${graphPath}\n`);
+      });
+
+    // `hysa brain graph` without subcommand shows stats
+    graphCmd.action(async () => {
+      try {
+        const stats = await getGraphStats();
+        console.log(pc.bold(pc.magenta('\n📊 Experience Graph Stats\n')));
+        console.log(`  Nodes:      ${stats.nodeCount}`);
+        console.log(`  Edges:      ${stats.edgeCount}`);
+        console.log(`  Updated:    ${new Date(stats.updatedAt).toLocaleString()}`);
+        if (stats.topKinds.length > 0) {
+          console.log(pc.bold('\n  Top Node Kinds:'));
+          for (const k of stats.topKinds) {
+            console.log(`    ${pc.cyan(k.kind.padEnd(16))} ${k.count}`);
+          }
+        }
+        console.log();
+      } catch (err: unknown) {
+        console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+      }
+    });
 
     program
     .command('web')

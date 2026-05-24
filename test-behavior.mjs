@@ -2589,6 +2589,127 @@ process.on('exit', () => {
     globalTestFailed = true;
   }
 
+  // ===== TEST 20: Experience Graph Tests (Phase 3B) =====
+  try {
+    const { readExperienceGraph, writeExperienceGraph, upsertNode, addEdge, getGraphStats, searchGraph, compactGraph, experienceGraphExists, logProviderFailure, logTestPassed, logLesson, logDecision } = await import('./dist/brain/graph-store.js');
+    const { redact } = await import('./dist/brain/store.js');
+
+    // Test 20a: graph file creation
+    section('TEST 20a: Experience graph — file is created and readable');
+    const graph = await readExperienceGraph();
+    console.log(`  Initial graph: ${graph.nodes.length} nodes, ${graph.edges.length} edges`);
+    console.log(`  Graph version: ${graph.version}`);
+    const t20aOk = graph.nodes !== undefined && graph.edges !== undefined;
+    console.log(`  ${t20aOk ? '✓ Graph created with valid structure' : '✗ Graph structure invalid'}`);
+
+    // Test 20b: upsertNode deduplicates by kind+label
+    section('TEST 20b: upsertNode — deduplicates by kind+label');
+    const n1 = await upsertNode({ kind: 'test', label: 'dedup-test', summary: 'first' });
+    const n2 = await upsertNode({ kind: 'test', label: 'dedup-test', summary: 'updated' });
+    const graphAfter = await readExperienceGraph();
+    const dedupNodes = graphAfter.nodes.filter(n => n.kind === 'test' && n.label === 'dedup-test');
+    const t20bOk = n1.id === n2.id && dedupNodes.length === 1 && n2.summary === 'updated';
+    console.log(`  First insert id: ${n1.id}, second insert id: ${n2.id}, count: ${dedupNodes.length}`);
+    console.log(`  ${t20bOk ? '✓ upsertNode deduplicates correctly' : '✗ upsertNode duplicate issue'}`);
+
+    // Test 20c: addEdge deduplicates by from+to+kind
+    section('TEST 20c: addEdge — deduplicates by from+to+kind');
+    const e1 = await addEdge({ from: n1.id, to: n1.id, kind: 'related_to', summary: 'self-edge' });
+    const e2 = await addEdge({ from: n1.id, to: n1.id, kind: 'related_to', summary: 'duplicate' });
+    const graphAfterEdge = await readExperienceGraph();
+    const dedupEdges = graphAfterEdge.edges.filter(e => e.from === n1.id && e.to === n1.id && e.kind === 'related_to');
+    const t20cOk = e1 !== null && e2 === null && dedupEdges.length === 1;
+    console.log(`  First edge: ${e1 !== null ? e1.id : 'null'}, second edge: ${e2}, count: ${dedupEdges.length}`);
+    console.log(`  ${t20cOk ? '✓ addEdge deduplicates correctly' : '✗ addEdge duplicate issue'}`);
+
+    // Test 20d: redaction works for fake secrets
+    section('TEST 20d: Graph redaction — secrets are redacted');
+    const secretNode = await upsertNode({ kind: 'event', label: 'secret-test', summary: 'API_KEY=sk-test123', tags: ['sk-test123'] });
+    const graphSecret = await readExperienceGraph();
+    const secretNodeFound = graphSecret.nodes.find(n => n.id === secretNode.id);
+    const t20dOk = secretNodeFound && !JSON.stringify(graphSecret).includes('sk-test123');
+    console.log(`  ${t20dOk ? '✓ Secrets redacted in graph' : '✗ Secrets leak detected'}`);
+
+    // Test 20e: graph stats returns expected structure
+    section('TEST 20e: getGraphStats — returns stats');
+    const stats = await getGraphStats();
+    const t20eOk = typeof stats.nodeCount === 'number' && typeof stats.edgeCount === 'number' && Array.isArray(stats.topKinds) && typeof stats.updatedAt === 'string';
+    console.log(`  Node count: ${stats.nodeCount}, Edge count: ${stats.edgeCount}`);
+    console.log(`  ${t20eOk ? '✓ Graph stats returns correct structure' : '✗ Graph stats structure issue'}`);
+
+    // Test 20f: searchGraph works
+    section('TEST 20f: searchGraph — searches labels');
+    await upsertNode({ kind: 'lesson', label: 'how-to-test', summary: 'Testing experience graph' });
+    const searchResult = await searchGraph('how-to-test');
+    const t20fOk = searchResult.nodes.length > 0 && searchResult.nodes.some(n => n.label === 'how-to-test');
+    console.log(`  Found ${searchResult.nodes.length} nodes, ${searchResult.edges.length} edges for 'how-to-test'`);
+    console.log(`  ${t20fOk ? '✓ Graph search works' : '✗ Graph search issue'}`);
+
+    // Test 20g: doctor includes graph status via experienceGraphExists
+    section('TEST 20g: experienceGraphExists — detects graph file');
+    const exists = await experienceGraphExists();
+    const t20gOk = exists === true;
+    console.log(`  Graph file exists: ${exists}`);
+    console.log(`  ${t20gOk ? '✓ experienceGraphExists works' : '✗ experienceGraphExists issue'}`);
+
+    // Test 20h: logProviderFailure creates provider/model/event nodes
+    section('TEST 20h: logProviderFailure — creates graph nodes');
+    await logProviderFailure('test-provider', 'test-model', 'rate limited');
+    const graphProv = await readExperienceGraph();
+    const providerNodes = graphProv.nodes.filter(n => n.label === 'test-provider' && n.kind === 'provider');
+    const modelNodes = graphProv.nodes.filter(n => n.label === 'test-model' && n.kind === 'model');
+    const eventNodes = graphProv.nodes.filter(n => n.label && n.label.includes('provider_failed') && n.label.includes('test-provider'));
+    const edges = graphProv.edges.filter(e => eventNodes.some(en => en.id === e.from));
+    const t20hOk = providerNodes.length >= 1 && modelNodes.length >= 1 && eventNodes.length >= 1 && edges.length >= 2;
+    console.log(`  Provider nodes: ${providerNodes.length}, Model nodes: ${modelNodes.length}, Event nodes: ${eventNodes.length}, Edges: ${edges.length}`);
+    console.log(`  ${t20hOk ? '✓ Provider failure logged to graph' : '✗ Provider failure logging issue'}`);
+
+    // Test 20i: logTestPassed creates test/event nodes
+    section('TEST 20i: logTestPassed — creates test/event nodes');
+    await logTestPassed('test-20i');
+    const graphTest = await readExperienceGraph();
+    const testNodes = graphTest.nodes.filter(n => n.label === 'test-20i' && n.kind === 'test');
+    const testEventNodes = graphTest.nodes.filter(n => n.label && n.label.includes('test_passed') && n.label.includes('test-20i'));
+    const testEdges = graphTest.edges.filter(e => testEventNodes.some(en => en.id === e.from));
+    const t20iOk = testNodes.length >= 1 && testEventNodes.length >= 1 && testEdges.length >= 1;
+    console.log(`  Test nodes: ${testNodes.length}, Event nodes: ${testEventNodes.length}, Edges: ${testEdges.length}`);
+    console.log(`  ${t20iOk ? '✓ Test passed logged to graph' : '✗ Test passed logging issue'}`);
+
+    // Test 20j: compactGraph works
+    section('TEST 20j: compactGraph — removes low-value nodes');
+    const beforeCompact = await readExperienceGraph();
+    const result = await compactGraph(10000); // high limit to avoid removing our test nodes
+    console.log(`  Removed: ${result.removedNodes} nodes, ${result.removedEdges} edges`);
+    console.log(`  ${typeof result.removedNodes === 'number' ? '✓ compactGraph runs without error' : '✗ compactGraph issue'}`);
+
+    // Test 20k: logLesson and logDecision create lesson/decision nodes
+    section('TEST 20k: logLesson/logDecision — create nodes');
+    await logLesson('test-lesson', 'A test lesson for Phase 3B');
+    await logDecision('test-decision', 'A test decision for Phase 3B');
+    const graphLD = await readExperienceGraph();
+    const lessonNodes = graphLD.nodes.filter(n => n.label === 'test-lesson' && n.kind === 'lesson');
+    const decisionNodes = graphLD.nodes.filter(n => n.label === 'test-decision' && n.kind === 'decision');
+    const t20kOk = lessonNodes.length >= 1 && decisionNodes.length >= 1;
+    console.log(`  Lesson nodes: ${lessonNodes.length}, Decision nodes: ${decisionNodes.length}`);
+    console.log(`  ${t20kOk ? '✓ Lesson and decision logged to graph' : '✗ Lesson/decision logging issue'}`);
+
+    // Test 20l: .hysa remains untracked by git
+    section('TEST 20l: Git safety — .hysa is not tracked');
+    const { execSync } = await import('node:child_process');
+    try {
+      const gitCheck = execSync('git ls-files .hysa/', { encoding: 'utf8', cwd: process.cwd() });
+      const t20lOk = gitCheck.trim() === '';
+      console.log(`  Tracked .hysa files: ${gitCheck.trim() || '(none)'}`);
+      console.log(`  ${t20lOk ? '✓ .hysa is not tracked by git' : '✗ .hysa is tracked by git'}`);
+    } catch {
+      console.log(`  ⚠ Could not check git (not in a git repo?)`);
+    }
+
+  } catch (err) {
+    console.log(`  ✗ Experience graph test error: ${err.message}`);
+    globalTestFailed = true;
+  }
+
   // ===== FINAL SUMMARY =====
   section('FINAL SUMMARY');
   console.log(`  Project: ${projectInfo.type} (${projectInfo.fileCount} files)`);
@@ -2707,6 +2828,21 @@ process.on('exit', () => {
    console.log(`  Test 19i (Doctor integration): doctor output includes Brain System section`);
    console.log(`  Test 19j (Chat context):    brain context injected to system prompt (max 800 tokens)`);
    console.log(`  Test 19k (No context):      brain context NOT injected for simple greetings`);
+   console.log();
+
+   console.log(`\n  Experience Graph Tests (Phase 3B):`);
+   console.log(`  Test 20a (Create):         experience-graph.json is created with valid structure`);
+   console.log(`  Test 20b (Dedup node):     upsertNode deduplicates by kind+label`);
+   console.log(`  Test 20c (Dedup edge):     addEdge deduplicates by from+to+kind`);
+   console.log(`  Test 20d (Redaction):      secrets redacted in graph`);
+   console.log(`  Test 20e (Stats):          getGraphStats returns node/edge counts`);
+   console.log(`  Test 20f (Search):         searchGraph finds nodes by label`);
+   console.log(`  Test 20g (Exists):         experienceGraphExists detects graph file`);
+   console.log(`  Test 20h (Prov fail):      logProviderFailure creates provider/model/event nodes`);
+   console.log(`  Test 20i (Test pass):      logTestPassed creates test/event nodes`);
+   console.log(`  Test 20j (Compact):        compactGraph runs without error`);
+   console.log(`  Test 20k (Lesson/Dec):     logLesson/logDecision create nodes`);
+   console.log(`  Test 20l (Git safety):     .hysa is not tracked by git`);
    console.log();
 
    console.log(`  Config backed up: original = ${origProvider}/${origModel}`);

@@ -11,6 +11,7 @@ import { listOllamaModels } from '../ai/ollama.js';
 import { getWebSearchConfig, getSearchDiagnostics } from '../tools/web-search.js';
 import { checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig, cliBrowserStatus, getDaemonConfig } from '../tools/browser.js';
 import { getBrainStatus } from '../brain/store.js';
+import { getGraphStats, experienceGraphExists } from '../brain/graph-store.js';
 
 const DOCTOR_TIMEOUT_MS = 15000;
 
@@ -924,7 +925,13 @@ export async function runDoctor(debug = false, provider?: string): Promise<void>
     // Brain system status
     const brainStatus = await getBrainStatus();
     if (brainStatus.exists) {
-      results.push({ name: 'Brain System', status: 'ok', message: `.hysa/brain ready (${brainStatus.eventCount} events, ${brainStatus.knownSystems.length} systems)` });
+      const graphExists = await experienceGraphExists();
+      let graphMsg = '';
+      if (graphExists) {
+        const graphStats = await getGraphStats();
+        graphMsg = `, graph: ${graphStats.nodeCount} nodes, ${graphStats.edgeCount} edges`;
+      }
+      results.push({ name: 'Brain System', status: 'ok', message: `.hysa/brain ready (${brainStatus.eventCount} events${graphMsg})` });
     } else {
       results.push({ name: 'Brain System', status: 'warn', message: 'Not initialized. Run: hysa brain init' });
     }

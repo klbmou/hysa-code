@@ -5,6 +5,7 @@ import { classifyTask } from './task-classifier.js';
 import { getCandidatesForTask, getSkippedProviderReasons } from './model-registry.js';
 import { listOllamaModels } from './ollama.js';
 import { getBestProviderForTask, getRetryAfterSeconds, isRateLimitError, isTimeoutError, } from './provider-policy.js';
+import { logProviderSuccess, logProviderFailure } from '../brain/graph-store.js';
 const LOG = '[SmartRouter]';
 const ATTEMPT_TIMEOUT_MS = 25000;
 const MAX_TOTAL_TIME_MS = 60000;
@@ -148,6 +149,7 @@ export function createSmartRouter(config, _signal) {
                     }
                     const duration = Date.now() - attemptStart;
                     markHealth(c.provider, c.model, 'healthy', 'success', 'unknown', duration);
+                    logProviderSuccess(c.provider, c.model).catch(() => { });
                     setLastSuccessfulProvider(c.provider, c.model);
                     if (c.provider !== config.currentProvider || c.model !== config.currentModel || i > 0) {
                         setLastFallbackUsed(c.label);
@@ -170,6 +172,7 @@ export function createSmartRouter(config, _signal) {
                     const retryAfter = getRetryAfterSeconds(err);
                     const cooldownSec = retryAfter ?? getCooldownSeconds(cat);
                     markHealth(c.provider, c.model, 'unhealthy', errMsg, cat);
+                    logProviderFailure(c.provider, c.model, errMsg).catch(() => { });
                     if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
                         markModelCooldown(c.provider, c.model, errMsg, cooldownSec, cat);
                     }
@@ -278,6 +281,7 @@ export function createSmartRouter(config, _signal) {
                     clearTimeout(timer);
                     const duration = Date.now() - startTime;
                     markHealth(first.provider, first.model, 'healthy', 'success', 'unknown', duration);
+                    logProviderSuccess(first.provider, first.model).catch(() => { });
                     setLastSuccessfulProvider(first.provider, first.model);
                     return result;
                 }
@@ -288,6 +292,7 @@ export function createSmartRouter(config, _signal) {
                     const retryAfter = getRetryAfterSeconds(err);
                     const cooldownSec = retryAfter ?? getCooldownSeconds(cat);
                     markHealth(first.provider, first.model, 'unhealthy', errMsg, cat);
+                    logProviderFailure(first.provider, first.model, errMsg).catch(() => { });
                     if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
                         markModelCooldown(first.provider, first.model, errMsg, cooldownSec, cat);
                     }

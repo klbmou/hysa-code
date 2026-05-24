@@ -6,6 +6,7 @@ import { checkOpenAICompatibleAPI } from './openai-compatible.js';
 import { markHealth, markModelCooldown, markProviderCooldown, isOnCooldown, isProviderOnCooldown, isUnhealthy, isSkippedForRequest, getHealthRecord, getFallbackEvents, setLastFallbackUsed, setLastSuccessfulProvider, clearRequestSkips, addFallbackEvent, clearFallbackEvents } from './model-health.js';
 import { getRetryAfterSeconds } from './provider-policy.js';
 import { recordRequest, recordError } from '../utils/session.js';
+import { logProviderSuccess, logProviderFailure } from '../brain/graph-store.js';
 const CHAT_TIMEOUT_MS = 30000;
 const FALLBACK_ATTEMPT_TIMEOUT_MS = 12000;
 const EXPERIMENTAL_TIMEOUT_MS = 4000;
@@ -302,6 +303,7 @@ function createFallbackClient(primary, config) {
                         clearTimeout(timer);
                         const duration = Date.now() - startTime;
                         markHealth(primary, primaryModel, 'healthy', 'success', 'unknown', duration);
+                        logProviderSuccess(primary, primaryModel).catch(() => { });
                         recordRequest(duration);
                         return result;
                     }
@@ -311,6 +313,7 @@ function createFallbackClient(primary, config) {
                         const errMsg = streamError.message || '';
                         const cat = categorizeError(errMsg);
                         markHealth(primary, primaryModel, 'unhealthy', friendlyError(errMsg, primary), cat);
+                        logProviderFailure(primary, primaryModel, errMsg).catch(() => { });
                         recordError(errMsg, primary, primaryModel);
                         if (contentStarted) {
                             // Some content was already emitted — cannot cleanly fallback
@@ -418,6 +421,7 @@ function createFallbackClient(primary, config) {
                     }
                     const duration = Date.now() - attemptStart;
                     markHealth(provider, model, 'healthy', 'success', 'unknown', duration);
+                    logProviderSuccess(provider, model).catch(() => { });
                     recordRequest(duration);
                     setLastSuccessfulProvider(provider, model);
                     return result;
@@ -473,6 +477,7 @@ function createFallbackClient(primary, config) {
                         }
                     }
                     markHealth(provider, model, 'unhealthy', friendlyError(errMsg, provider), cat, attemptDuration);
+                    logProviderFailure(provider, model, errMsg).catch(() => { });
                     if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
                         const cooldownSec = getRetryAfterSeconds(err) ?? (cat === 'rate_limit' ? 120 : 60);
                         markModelCooldown(provider, model, friendlyError(errMsg, provider), cooldownSec, cat);
