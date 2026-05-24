@@ -32,7 +32,7 @@ import { createTask, getActiveTask } from './agent/tasks.js';
 import { listSymbols, findReferences, searchImports, summarizeFile, explainFunction } from './agent/tools.js';
 import { getAllHealth, toHealthSummary, resetHealth, getLastError, getLastFallbackUsed, getModelsInCooldown, getProviderCooldowns, getRateLimitedModels, getFallbackEvents, loadHealthFromEntries } from './ai/model-health.js';
 import { listOllamaModels } from './ai/ollama.js';
-import { initBrainFiles, getBrainStatus, readRecentEvents, readProjectMap, appendBrainEvent, appendLesson, appendDecision, writeProjectMap, generateProjectMap, getGraphStats, searchGraph, compactGraph, readExperienceGraph, logLesson as graphLogLesson, logDecision as graphLogDecision } from './brain/index.js';
+import { initBrainFiles, getBrainStatus, readRecentEvents, readProjectMap, appendBrainEvent, appendLesson, appendDecision, writeProjectMap, generateProjectMap, getGraphStats, searchGraph, compactGraph, readExperienceGraph, logLesson as graphLogLesson, logDecision as graphLogDecision, buildRecallContext, formatRecallContext } from './brain/index.js';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -292,6 +292,7 @@ function showHelp(agentMode) {
     console.log(pc.cyan('  /brain note <text>       Add a note to brain'));
     console.log(pc.cyan('  /brain graph             Show experience graph stats'));
     console.log(pc.cyan('  /brain graph search <q>  Search experience graph'));
+    console.log(pc.cyan('  /brain recall <query>    Recall project memory'));
     if (agentMode && agentMode !== 'chat') {
         console.log(pc.dim(`\n  Active mode: ${MODE_LABELS[agentMode]}`));
         console.log(pc.dim(`  ${MODE_DESCRIPTIONS[agentMode]}`));
@@ -1758,6 +1759,26 @@ async function chatLoop(initialConfig, initialYolo = false) {
             }
             continue;
         }
+        if (trimmed.toLowerCase().startsWith('/brain recall ')) {
+            const query = trimmed.slice('/brain recall '.length).trim();
+            if (query) {
+                try {
+                    const recallCtx = await buildRecallContext(query);
+                    if (!recallCtx) {
+                        console.log(pc.dim(`\n  No relevant memory for "${query}".\n`));
+                    }
+                    else {
+                        console.log(pc.bold(pc.magenta(`\n🧠 "${query}"\n`)));
+                        console.log(`  ${recallCtx.summary.slice(0, 500)}`);
+                        console.log();
+                    }
+                }
+                catch {
+                    console.log(pc.yellow('\n  Recall failed.\n'));
+                }
+            }
+            continue;
+        }
         function checkPendingEditProtected() {
             if (pendingEdit && isProtectedFilePath(pendingEdit.filePath)) {
                 if (config.debug)
@@ -2039,6 +2060,25 @@ async function chatLoop(initialConfig, initialYolo = false) {
                     }
                 }
             }
+        }
+        // ── Recall context injection ───────────────────
+        if (!isSimpleQ && !searchQuery) {
+            try {
+                const recallCtx = await buildRecallContext(trimmed, { maxTokens: 800 });
+                if (recallCtx) {
+                    const recallStr = formatRecallContext(recallCtx);
+                    systemPrompt += recallStr;
+                    if (config.debug) {
+                        const itemCount = [
+                            recallCtx.recentLessons?.length ?? 0,
+                            recallCtx.recentDecisions?.length ?? 0,
+                            recallCtx.relevantGraphNodes?.length ?? 0,
+                        ].filter(Boolean).length;
+                        console.log(pc.dim(`  [debug] Brain recall: ${recallCtx.intent}, ${itemCount} items`));
+                    }
+                }
+            }
+            catch { /* recall not available — skip */ }
         }
         const contextStartTime = Date.now();
         // Build context and messages
@@ -3327,6 +3367,45 @@ export async function start() {
                     console.log(`    ${pc.cyan(k.kind.padEnd(16))} ${k.count}`);
                 }
             }
+            console.log();
+        }
+        catch (err) {
+            console.log(pc.red(`\nError: ${err.message}\n`));
+        }
+    });
+    // ── Recall Command ──────────────────────────────────
+    brainCmd
+        .command('recall')
+        .description('Recall project memory for a query')
+        .argument('<query>', 'Query to search memory')
+        .action(async (query) => {
+        try {
+            const recallCtx = await buildRecallContext(query, {
+                maxTokens: 2000,
+                includeProjectMap: true,
+                includeGraph: true,
+                includeLessons: true,
+                includeDecisions: true,
+            });
+            if (!recallCtx) {
+                console.log(pc.yellow(`\n  No relevant memory found for "${query}".\n`));
+                return;
+            }
+            console.log(pc.bold(pc.magenta(`\n🧠 Recall: "${query}"\n`)));
+            console.log(`  Intent: ${pc.cyan(recallCtx.intent)}`);
+            console.log();
+            console.log(recallCtx.summary);
+            console.log();
+            const sources = [];
+            if (recallCtx.projectMapSummary)
+                sources.push('project-map');
+            if (recallCtx.recentLessons && recallCtx.recentLessons.length > 0)
+                sources.push('lessons');
+            if (recallCtx.recentDecisions && recallCtx.recentDecisions.length > 0)
+                sources.push('decisions');
+            if (recallCtx.relevantGraphNodes && recallCtx.relevantGraphNodes.length > 0)
+                sources.push('graph');
+            console.log(pc.dim(`  Sources: ${sources.join(', ') || 'none'}`));
             console.log();
         }
         catch (err) {
