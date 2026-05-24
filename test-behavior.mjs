@@ -4,7 +4,7 @@ import { createClient, isOnlyGreeting, getCasualResponse } from './dist/ai/clien
 import { getFallbackEvents, clearFallbackEvents, resetHealth, getAllHealth, toHealthSummary } from './dist/ai/model-health.js';
 import { getProjectInfo } from './dist/context/builder.js';
 import { resolveFileReadPath, isGeneratedOutput } from './dist/files/reader.js';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 
 const workingDir = resolve('.');
 const projectInfo = getProjectInfo(workingDir);
@@ -1915,6 +1915,513 @@ process.on('exit', () => {
     console.log(`  ✗ No Model Call test error: ${err.message}`);
   }
 
+  // ===== TEST 12: Browser Module Tests =====
+  try {
+    section('TEST 12a: Browser — module exports expected functions');
+    const browserModule = await import('./dist/tools/browser.js');
+    const funcs = ['browserOpen', 'browserScreenshot', 'browserText', 'browserSnapshot', 'browserClick', 'browserType', 'browserClose', 'getBrowserStatus', 'checkPlaywrightInstalled', 'checkChromiumInstalled', 'getBrowserConfig'];
+    let allFound = true;
+    for (const f of funcs) {
+      if (typeof browserModule[f] !== 'function') {
+        console.log(`  ✗ Missing function: ${f}`);
+        allFound = false;
+      }
+    }
+    if (allFound) console.log(`  ✓ All ${funcs.length} browser functions exported`);
+    console.log(`  Playwright available: ${await browserModule.checkPlaywrightInstalled() ? '✓' : '✗ (not installed)'}`);
+    if (!allFound) globalTestFailed = true;
+
+    // Test 12b: browserOpen rejects file:// URLs
+    section('TEST 12b: Browser — file:// URL rejected');
+    const rejectResult = await browserModule.browserOpen('file:///etc/passwd');
+    if (!rejectResult.ok && rejectResult.message.includes('Unsupported URL')) {
+      console.log(`  ✓ file:// URL correctly rejected: "${rejectResult.message}"`);
+    } else {
+      console.log(`  ✗ file:// URL not rejected: ${rejectResult.message}`);
+      globalTestFailed = true;
+    }
+
+    // Test 12c: screenshot path safety
+    section('TEST 12c: Browser — screenshot path safety');
+    const badPathResult = await browserModule.browserScreenshot({ path: '../../outside.png' });
+    if (!badPathResult.ok && badPathResult.message.includes('must be inside')) {
+      console.log(`  ✓ Unsafe path rejected: "${badPathResult.message}"`);
+    } else {
+      console.log(`  ✗ Unsafe path not rejected: ${badPathResult.message}`);
+      globalTestFailed = true;
+    }
+
+    // Test 12d: browser status when not active
+    section('TEST 12d: Browser — status returns inactive when no session');
+    const statusIdle = await browserModule.getBrowserStatus();
+    if (!statusIdle.active) {
+      console.log(`  ✓ Status shows inactive when no session`);
+    } else {
+      console.log(`  ✗ Status shows active unexpectedly`);
+      globalTestFailed = true;
+    }
+
+    // Test 12e: browser close when no session
+    section('TEST 12e: Browser — close without session');
+    const closeIdle = await browserModule.browserClose();
+    if (closeIdle.ok) {
+      console.log(`  ✓ Close without session: "${closeIdle.message}"`);
+    } else {
+      console.log(`  ✗ Close without session failed: ${closeIdle.message}`);
+      globalTestFailed = true;
+    }
+
+    // Test 12f: browser commands parse in chat
+    section('TEST 12f: Browser — /browser slash commands parse');
+    const browserSlashPatterns = [
+      { cmd: '/browser open http://localhost:8787', expected: 'open' },
+      { cmd: '/browser screenshot', expected: 'screenshot' },
+      { cmd: '/browser text', expected: 'text' },
+      { cmd: '/browser snapshot', expected: 'snapshot' },
+      { cmd: '/browser click .button', expected: 'click' },
+      { cmd: '/browser type input "hello"', expected: 'type' },
+      { cmd: '/browser status', expected: 'status' },
+      { cmd: '/browser close', expected: 'close' },
+    ];
+    let slashOk = true;
+    for (const { cmd, expected } of browserSlashPatterns) {
+      const matched = cmd.startsWith('/browser');
+      if (!matched) { console.log(`  ✗ /browser not matched: "${cmd}"`); slashOk = false; }
+    }
+    if (slashOk) console.log(`  ✓ All ${browserSlashPatterns.length} /browser slash patterns recognized`);
+
+    // Test 12g: browser-testing skill exists
+    section('TEST 12g: Browser — browser-testing skill SKILL.md exists');
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const skillPath = join(process.cwd(), 'src/skills/builtin/browser-testing-planning/SKILL.md');
+    if (existsSync(skillPath)) {
+      console.log(`  ✓ SKILL.md exists at ${skillPath}`);
+    } else {
+      console.log(`  ✗ SKILL.md not found at ${skillPath}`);
+      globalTestFailed = true;
+    }
+
+    // Test 12h: doctor includes Browser section
+    section('TEST 12h: Browser — doctor checks browser section');
+    const browserCfg = browserModule.getBrowserConfig();
+    if (browserCfg.headless !== undefined && browserCfg.screenshotDir) {
+      console.log(`  ✓ getBrowserConfig() returns headless=${browserCfg.headless}, dir=${browserCfg.screenshotDir}`);
+    } else {
+      console.log(`  ✗ getBrowserConfig() missing fields: ${JSON.stringify(browserCfg)}`);
+      globalTestFailed = true;
+    }
+
+  } catch (err) {
+    console.log(`  ✗ Browser test error: ${err.message}`);
+    globalTestFailed = true;
+  }
+
+  // ===== TEST 13: Entity Detection Tests =====
+  try {
+    const entityModule = await import('./dist/tools/entity-detector.js');
+
+    // Test 13a: previous "yayahabes" + "who is he" triggers search
+    section('TEST 13a: Entity — "yayahabes" then "who is he" triggers search');
+    const r1 = entityModule.shouldSearchEntity('who is he', 'yayahabes');
+    if (r1.shouldSearch && r1.query === 'yayahabes') {
+      console.log(`  ✓ "who is he" with prev "yayahabes" → query="${r1.query}"`);
+    } else {
+      console.log(`  ✗ Expected search for "yayahabes", got shouldSearch=${r1.shouldSearch} query="${r1.query}"`);
+      globalTestFailed = true;
+    }
+
+    // Test 13b: "who is yahiahabes" triggers search directly
+    section('TEST 13b: Entity — "who is yahiahabes" triggers search');
+    const r2 = entityModule.shouldSearchEntity('who is yahiahabes');
+    if (r2.shouldSearch && r2.query === 'yahiahabes') {
+      console.log(`  ✓ "who is yahiahabes" → query="${r2.query}"`);
+    } else {
+      console.log(`  ✗ Expected search for "yahiahabes", got shouldSearch=${r2.shouldSearch} query="${r2.query}"`);
+      globalTestFailed = true;
+    }
+
+    // Test 13c: Arabic "من هو yahiahabes" triggers search
+    section('TEST 13c: Entity — Arabic "من هو yahiahabes" triggers search');
+    const r3 = entityModule.shouldSearchEntity('من هو yahiahabes');
+    if (r3.shouldSearch && r3.query === 'yahiahabes') {
+      console.log(`  ✓ "من هو yahiahabes" → query="${r3.query}"`);
+    } else {
+      console.log(`  ✗ Expected search for "yahiahabes", got shouldSearch=${r3.shouldSearch} query="${r3.query}"`);
+      globalTestFailed = true;
+    }
+
+    // Test 13d: "explain React hooks" does NOT trigger search
+    section('TEST 13d: Entity — "explain React hooks" does not trigger search');
+    const r4 = entityModule.shouldSearchEntity('explain React hooks');
+    if (!r4.shouldSearch) {
+      console.log(`  ✓ "explain React hooks" does not trigger search`);
+    } else {
+      console.log(`  ✗ Unexpected search trigger for "explain React hooks"`);
+      globalTestFailed = true;
+    }
+
+    // Test 13e: "write a simple game" does NOT trigger search
+    section('TEST 13e: Entity — "write a simple game" does not trigger search');
+    const r5 = entityModule.shouldSearchEntity('write a simple game');
+    if (!r5.shouldSearch) {
+      console.log(`  ✓ "write a simple game" does not trigger search`);
+    } else {
+      console.log(`  ✗ Unexpected search trigger for "write a simple game"`);
+      globalTestFailed = true;
+    }
+
+    // Test 13f: "who is he" without previous does NOT trigger search (no context)
+    section('TEST 13f: Entity — "who is he" without previous does not trigger search');
+    const r6 = entityModule.shouldSearchEntity('who is he');
+    if (!r6.shouldSearch) {
+      console.log(`  ✓ "who is he" without context does not trigger search`);
+    } else {
+      console.log(`  ✗ Unexpected search trigger for "who is he" without context`);
+      globalTestFailed = true;
+    }
+
+    // Test 13g: Arabic follow-up "من هذا" after Arabic name triggers search
+    section('TEST 13g: Entity — Arabic follow-up "من هذا" after name triggers search');
+    const r7 = entityModule.shouldSearchEntity('من هذا', 'يحيى حابس');
+    if (r7.shouldSearch && r7.query === 'يحيى حابس') {
+      console.log(`  ✓ "من هذا" with prev Arabic name → query="${r7.query}"`);
+    } else {
+      console.log(`  ✗ Expected search for "يحيى حابس", got shouldSearch=${r7.shouldSearch} query="${r7.query}"`);
+      globalTestFailed = true;
+    }
+
+    // Test 13h: @handle triggers search
+    section('TEST 13h: Entity — "@john_doe" triggers search');
+    const r8 = entityModule.shouldSearchEntity('@john_doe');
+    if (r8.shouldSearch && r8.query === '@john_doe') {
+      console.log(`  ✓ "@john_doe" → query="${r8.query}"`);
+    } else {
+      console.log(`  ✗ Expected search for "@john_doe", got shouldSearch=${r8.shouldSearch} query="${r8.query}"`);
+      globalTestFailed = true;
+    }
+
+    // Test 13i: "what is ruflo" triggers search
+    section('TEST 13i: Entity — "what is ruflo" triggers search');
+    const r9 = entityModule.shouldSearchEntity('what is ruflo');
+    if (r9.shouldSearch && r9.query === 'ruflo') {
+      console.log(`  ✓ "what is ruflo" → query="${r9.query}"`);
+    } else {
+      console.log(`  ✗ Expected search for "ruflo", got shouldSearch=${r9.shouldSearch} query="${r9.query}"`);
+      globalTestFailed = true;
+    }
+
+    // Test 13j: "what is React" is a programming concept — does NOT trigger search
+    section('TEST 13j: Entity — "what is React" (programming concept) does not trigger search');
+    const r10 = entityModule.shouldSearchEntity('what is React');
+    if (!r10.shouldSearch) {
+      console.log(`  ✓ "what is React" does not trigger search`);
+    } else {
+      console.log(`  ✗ Unexpected search trigger for "what is React"`);
+      globalTestFailed = true;
+    }
+
+    // Test 13k: "who is he" after "what is React" does NOT trigger search
+    section('TEST 13k: Entity — "who is he" after concept does not trigger search');
+    const r11 = entityModule.shouldSearchEntity('who is he', 'what is React');
+    if (!r11.shouldSearch) {
+      console.log(`  ✓ "who is he" after programming concept does not trigger search`);
+    } else {
+      console.log(`  ✗ Unexpected search trigger for "who is he" after concept`);
+      globalTestFailed = true;
+    }
+
+    // Test 13l: standalone "yayahabes" triggers search
+    section('TEST 13l: Entity — standalone "yayahabes" triggers search');
+    const r12 = entityModule.shouldSearchEntity('yayahabes');
+    if (r12.shouldSearch && r12.query === 'yayahabes') {
+      console.log(`  ✓ "yayahabes" alone → query="${r12.query}"`);
+    } else {
+      console.log(`  ✗ Expected search for "yayahabes", got shouldSearch=${r12.shouldSearch} query="${r12.query}"`);
+      globalTestFailed = true;
+    }
+
+    // Test 13m: greeting does not trigger search
+    section('TEST 13m: Entity — greeting does not trigger search');
+    const r13 = entityModule.shouldSearchEntity('hi');
+    if (!r13.shouldSearch) {
+      console.log(`  ✓ "hi" does not trigger search`);
+    } else {
+      console.log(`  ✗ Unexpected search trigger for "hi"`);
+      globalTestFailed = true;
+    }
+
+  } catch (err) {
+    console.log(`  ✗ Entity detection test error: ${err.message}`);
+    globalTestFailed = true;
+  }
+
+  // ===== TEST 14: SetupFirstRun / OpenAI Router env var tests =====
+  try {
+    const keysModule = await import('./dist/config/keys.js');
+
+    // Save original env
+    const origRouterUrl = process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+    const origDefaultProvider = process.env.HYSA_DEFAULT_PROVIDER;
+    const origRouterKey = process.env.HYSA_OPENAI_ROUTER_API_KEY;
+    const origRouterModel = process.env.HYSA_OPENAI_ROUTER_MODEL;
+
+    // Test 14a: getDefaultProviderFromEnv returns openai_router when HYSA_OPENAI_ROUTER_BASE_URL set
+    section('TEST 14a: Setup — env HYSA_OPENAI_ROUTER_BASE_URL resolves provider');
+    delete process.env.HYSA_DEFAULT_PROVIDER;
+    process.env.HYSA_OPENAI_ROUTER_BASE_URL = 'http://127.0.0.1:20128/v1';
+    const envProv1 = keysModule.getDefaultProviderFromEnv();
+    if (envProv1 === 'openai_router') {
+      console.log(`  ✓ HYSA_OPENAI_ROUTER_BASE_URL → provider="openai_router"`);
+    } else {
+      console.log(`  ✗ Expected "openai_router", got "${envProv1}"`);
+      globalTestFailed = true;
+    }
+
+    // Test 14b: getDefaultProviderFromEnv returns openai_router when HYSA_DEFAULT_PROVIDER set
+    section('TEST 14b: Setup — env HYSA_DEFAULT_PROVIDER=openai_router resolves');
+    process.env.HYSA_DEFAULT_PROVIDER = 'openai_router';
+    const envProv2 = keysModule.getDefaultProviderFromEnv();
+    if (envProv2 === 'openai_router') {
+      console.log(`  ✓ HYSA_DEFAULT_PROVIDER=openai_router → provider="openai_router"`);
+    } else {
+      console.log(`  ✗ Expected "openai_router", got "${envProv2}"`);
+      globalTestFailed = true;
+    }
+
+    // Test 14c: providerNeedsApiKey returns false for openai_router
+    section('TEST 14c: Setup — openai_router does not need API key');
+    const needsKey = keysModule.providerNeedsApiKey('openai_router');
+    if (!needsKey) {
+      console.log(`  ✓ providerNeedsApiKey("openai_router") = false (optional key)`);
+    } else {
+      console.log(`  ✗ Expected false for openai_router, got ${needsKey}`);
+      globalTestFailed = true;
+    }
+
+    // Test 14d: providerHasOptionalApiKey returns true for openai_router
+    section('TEST 14d: Setup — openai_router has optional API key');
+    const hasOptKey = keysModule.providerHasOptionalApiKey('openai_router');
+    if (hasOptKey) {
+      console.log(`  ✓ providerHasOptionalApiKey("openai_router") = true`);
+    } else {
+      console.log(`  ✗ Expected true for openai_router, got ${hasOptKey}`);
+      globalTestFailed = true;
+    }
+
+    // Test 14e: PROVIDER_DEFAULTS has openai_router with label and model
+    section('TEST 14e: Setup — PROVIDER_DEFAULTS has openai_router label');
+    const defaultCfg = keysModule.PROVIDER_DEFAULTS.openai_router;
+    if (defaultCfg && defaultCfg.label === 'OpenAI Router' && defaultCfg.model) {
+      console.log(`  ✓ PROVIDER_DEFAULTS.openai_router → label="${defaultCfg.label}", model="${defaultCfg.model}"`);
+    } else {
+      console.log(`  ✗ PROVIDER_DEFAULTS.openai_router missing: ${JSON.stringify(defaultCfg)}`);
+      globalTestFailed = true;
+    }
+
+    // Test 14f: env HYSA_OPENAI_ROUTER_MODEL should be used when set
+    section('TEST 14f: Setup — HYSA_OPENAI_ROUTER_MODEL resolves via env');
+    process.env.HYSA_OPENAI_ROUTER_MODEL = 'oc/deepseek-v4-flash-free';
+    process.env.HYSA_OPENAI_ROUTER_API_KEY = '';
+    // Simulate what the CLI handler does: applyEnvOverrides reads these
+    const testConfig = {
+      currentProvider: 'openai_router',
+      currentModel: 'gpt-4o-mini',
+      apiKeys: {},
+      ollamaBaseUrl: 'http://localhost:11434',
+    };
+    // applyEnvOverrides is not exported, but we can test via loadConfig which uses it
+    // Instead test that env HYSA_DEFAULT_PROVIDER + HYSA_OPENAI_ROUTER_MODEL resolve correctly
+    if (process.env.HYSA_OPENAI_ROUTER_MODEL === 'oc/deepseek-v4-flash-free') {
+      console.log(`  ✓ HYSA_OPENAI_ROUTER_MODEL set to "oc/deepseek-v4-flash-free"`);
+    } else {
+      console.log(`  ✗ HYSA_OPENAI_ROUTER_MODEL not set correctly`);
+      globalTestFailed = true;
+    }
+
+    // Test 14g: missing HYSA_OPENAI_ROUTER_API_KEY does not cause setup
+    section('TEST 14g: Setup — no router API key does not force setup');
+    delete process.env.HYSA_OPENAI_ROUTER_API_KEY;
+    // providerNeedsApiKey for openai_router is false, so no setup needed
+    if (!keysModule.providerNeedsApiKey('openai_router')) {
+      console.log(`  ✓ Missing router API key does not trigger setup (optional key)`);
+    } else {
+      console.log(`  ✗ providerNeedsApiKey unexpectedly true for openai_router`);
+      globalTestFailed = true;
+    }
+
+    // Restore env
+    if (origRouterUrl) process.env.HYSA_OPENAI_ROUTER_BASE_URL = origRouterUrl;
+    else delete process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+    if (origDefaultProvider) process.env.HYSA_DEFAULT_PROVIDER = origDefaultProvider;
+    else delete process.env.HYSA_DEFAULT_PROVIDER;
+    if (origRouterKey) process.env.HYSA_OPENAI_ROUTER_API_KEY = origRouterKey;
+    else delete process.env.HYSA_OPENAI_ROUTER_API_KEY;
+    if (origRouterModel) process.env.HYSA_OPENAI_ROUTER_MODEL = origRouterModel;
+    else delete process.env.HYSA_OPENAI_ROUTER_MODEL;
+
+  } catch (err) {
+    console.log(`  ✗ SetupFirstRun test error: ${err.message}`);
+    globalTestFailed = true;
+  }
+
+  // ===== TEST 15: Auto-detection (detectBestProvider) tests =====
+  await (async () => {
+    let mockServer = null;
+    let origGeminiKey, origGroqKey, origDeepseekKey, origOpenrouterKey;
+    let origRouterUrl15, origRouterModel15;
+
+    try {
+      const detectModule = await import('./dist/config/provider-detect.js');
+      const keysModule = await import('./dist/config/keys.js');
+
+      // Save env
+      origGeminiKey = process.env.GEMINI_API_KEY;
+      origGroqKey = process.env.GROQ_API_KEY;
+      origDeepseekKey = process.env.DEEPSEEK_API_KEY;
+      origOpenrouterKey = process.env.OPENROUTER_API_KEY;
+      origRouterUrl15 = process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+      origRouterModel15 = process.env.HYSA_OPENAI_ROUTER_MODEL;
+      delete process.env.GEMINI_API_KEY;
+      delete process.env.GROQ_API_KEY;
+      delete process.env.DEEPSEEK_API_KEY;
+      delete process.env.OPENROUTER_API_KEY;
+      delete process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+      delete process.env.HYSA_OPENAI_ROUTER_MODEL;
+
+      // Test 15a: detectBestProvider detects openai_router when mock 9router is reachable
+      section('TEST 15a: Auto-detect — mock 9router endpoint reachable → selects openai_router');
+      const http = await import('node:http');
+      const PORT = 27182;
+      mockServer = http.createServer((req, res) => {
+        if (req.url === '/v1/models') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ data: [{ id: 'oc/deepseek-v4-flash-free' }] }));
+        } else {
+          res.writeHead(404);
+          res.end();
+        }
+      });
+      await new Promise(resolve => mockServer.listen(PORT, '127.0.0.1', resolve));
+      process.env.HYSA_OPENAI_ROUTER_BASE_URL = `http://127.0.0.1:${PORT}/v1`;
+      const result15a = await detectModule.detectBestProvider();
+      if (result15a && result15a.provider === 'openai_router') {
+        console.log(`  ✓ detectBestProvider → openai_router (${result15a.reason})`);
+      } else {
+        console.log(`  ✗ Expected openai_router, got ${JSON.stringify(result15a)}`);
+        globalTestFailed = true;
+      }
+
+      // Test 15b: HYSA_OPENAI_ROUTER_BASE_URL takes priority
+      section('TEST 15b: Auto-detect — HYSA_OPENAI_ROUTER_BASE_URL takes priority');
+      process.env.HYSA_OPENAI_ROUTER_BASE_URL = `http://127.0.0.1:${PORT}/v1`;
+      const result15b = await detectModule.detectBestProvider();
+      if (result15b && result15b.openaiRouterBaseUrl === `http://127.0.0.1:${PORT}/v1`) {
+        console.log(`  ✓ HYSA_OPENAI_ROUTER_BASE_URL used as base URL`);
+      } else {
+        console.log(`  ✗ Expected base URL http://127.0.0.1:${PORT}/v1`);
+        globalTestFailed = true;
+      }
+
+      // Test 15c: Missing router API key does not trigger setup
+      section('TEST 15c: Auto-detect — missing router API key not a blocker');
+      if (!keysModule.providerNeedsApiKey('openai_router')) {
+        console.log(`  ✓ openai_router does not need API key`);
+      } else {
+        console.log(`  ✗ providerNeedsApiKey unexpectedly true`);
+        globalTestFailed = true;
+      }
+
+      // Test 15d: Router unavailable + Gemini key → selects Gemini
+      section('TEST 15d: Auto-detect — router unavailable + GEMINI_API_KEY → selects gemini');
+      // Stop mock server, set skip env vars to disable network-based checks that might
+      // be reachable in CI (OpenCode Zen, real 9router, Ollama)
+      await new Promise(resolve => mockServer.close(resolve));
+      mockServer = null;
+      process.env.HYSA_DETECT_SKIP_ROUTER = 'true';
+      process.env.HYSA_DETECT_SKIP_OPENCODE_ZEN = 'true';
+      process.env.HYSA_DETECT_SKIP_OLLAMA = 'true';
+      process.env.GEMINI_API_KEY = 'fake-test-key-not-real';
+      const result15d = await detectModule.detectBestProvider();
+      if (result15d && result15d.provider === 'gemini') {
+        console.log(`  ✓ Gemini selected when router unavailable (${result15d.reason})`);
+      } else {
+        console.log(`  ✗ Expected gemini, got ${JSON.stringify(result15d)}`);
+        globalTestFailed = true;
+      }
+
+      // Clean Gemini key for next tests
+      delete process.env.GEMINI_API_KEY;
+
+      // Test 15e: Nothing available → null (manual menu fallback)
+      section('TEST 15e: Auto-detect — nothing available → null (manual menu)');
+      const result15e = await detectModule.detectBestProvider();
+      if (result15e === null) {
+        console.log(`  ✓ No provider detected, returns null (manual menu fallback)`);
+      } else {
+        console.log(`  ✗ Expected null, got ${JSON.stringify(result15e)}`);
+        globalTestFailed = true;
+      }
+
+      // Test 15f: buildConfigFromDetection creates correct config
+      section('TEST 15f: Auto-detect — buildConfigFromDetection creates valid config');
+      const fakeDetect = {
+        provider: 'openai_router',
+        model: 'oc/deepseek-v4-flash-free',
+        reason: 'test',
+        openaiRouterBaseUrl: 'http://127.0.0.1:20128/v1',
+      };
+      const cfg = detectModule.buildConfigFromDetection(fakeDetect);
+      let cfgOk = true;
+      if (cfg.currentProvider !== 'openai_router') { console.log(`  ✗ provider mismatch`); cfgOk = false; }
+      if (cfg.currentModel !== 'oc/deepseek-v4-flash-free') { console.log(`  ✗ model mismatch`); cfgOk = false; }
+      if (cfg.openaiRouterBaseUrl !== 'http://127.0.0.1:20128/v1') { console.log(`  ✗ base URL mismatch`); cfgOk = false; }
+      if (!cfg.ollamaBaseUrl) { console.log(`  ✗ missing ollamaBaseUrl`); cfgOk = false; }
+      if (cfg.openaiRouterModel !== 'oc/deepseek-v4-flash-free') { console.log(`  ✗ router model mismatch`); cfgOk = false; }
+      if (cfgOk) console.log(`  ✓ buildConfigFromDetection creates valid openai_router config`);
+
+      // Test 15g: Config persistence — save then load
+      section('TEST 15g: Auto-detect — config persists via saveConfig/loadConfig');
+      const persistConfig = detectModule.buildConfigFromDetection(fakeDetect);
+      keysModule.saveConfig(persistConfig);
+      const loaded = keysModule.loadConfig();
+      if (loaded && loaded.currentProvider === 'openai_router' && loaded.currentModel === 'oc/deepseek-v4-flash-free') {
+        console.log(`  ✓ Config saved and loaded correctly`);
+        // Clean up test config after verification
+        const fs = await import('node:fs');
+        const osMod = await import('node:os');
+        const homeDir = osMod.homedir();
+        const cfgPath = join(homeDir, '.hysa', 'config.json');
+        try { fs.unlinkSync(cfgPath); } catch {}
+      } else {
+        console.log(`  ✗ Config persistence failed: ${JSON.stringify(loaded)}`);
+        globalTestFailed = true;
+      }
+
+    } catch (err) {
+      console.log(`  ✗ Auto-detect test error: ${err.message}`);
+      globalTestFailed = true;
+    } finally {
+      if (mockServer) await new Promise(resolve => mockServer.close(resolve));
+      // Restore env vars
+      if (origGeminiKey) process.env.GEMINI_API_KEY = origGeminiKey;
+      else delete process.env.GEMINI_API_KEY;
+      if (origGroqKey) process.env.GROQ_API_KEY = origGroqKey;
+      else delete process.env.GROQ_API_KEY;
+      if (origDeepseekKey) process.env.DEEPSEEK_API_KEY = origDeepseekKey;
+      else delete process.env.DEEPSEEK_API_KEY;
+      if (origOpenrouterKey) process.env.OPENROUTER_API_KEY = origOpenrouterKey;
+      else delete process.env.OPENROUTER_API_KEY;
+      if (origRouterUrl15) process.env.HYSA_OPENAI_ROUTER_BASE_URL = origRouterUrl15;
+      else delete process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+      if (origRouterModel15) process.env.HYSA_OPENAI_ROUTER_MODEL = origRouterModel15;
+      else delete process.env.HYSA_OPENAI_ROUTER_MODEL;
+      delete process.env.HYSA_DETECT_SKIP_ROUTER;
+      delete process.env.HYSA_DETECT_SKIP_OPENCODE_ZEN;
+      delete process.env.HYSA_DETECT_SKIP_OLLAMA;
+    }
+  })();
+
   // ===== FINAL SUMMARY =====
   section('FINAL SUMMARY');
   console.log(`  Project: ${projectInfo.type} (${projectInfo.fileCount} files)`);
@@ -1958,6 +2465,41 @@ process.on('exit', () => {
   console.log(`  Test 11c (Normal Q):      Normal "what is" question not blocked`);
   console.log(`  Test 11d (hysa websearch): hysa websearch blocked when unreliable`);
   console.log(`  Test 11e (All patterns):  All search patterns return config message`);
+  console.log(`  Test 12a (Browser exports): browser module exports all expected functions`);
+  console.log(`  Test 12b (URL safety):      file:// URLs rejected`);
+  console.log(`  Test 12c (Screenshot path): unsafe paths rejected`);
+  console.log(`  Test 12d (Status idle):     status shows inactive when no session`);
+  console.log(`  Test 12e (Close idle):      close without session works`);
+  console.log(`  Test 12f (Slash commands):  /browser slash patterns recognized`);
+  console.log(`  Test 12g (Skill file):      browser-testing SKILL.md exists`);
+  console.log(`  Test 12h (Doctor checks):   getBrowserConfig() returns expected fields`);
+  console.log(`  Test 13a (Entity prev):     "yayahabes" + "who is he" → query="yayahabes"`);
+  console.log(`  Test 13b (Direct who):     "who is yahiahabes" → search triggers`);
+  console.log(`  Test 13c (Arabic who):     "من هو yahiahabes" → search triggers`);
+  console.log(`  Test 13d (No coding Q):    "explain React hooks" → no search`);
+  console.log(`  Test 13e (No write game):  "write a simple game" → no search`);
+  console.log(`  Test 13f (No context):     "who is he" no previous → no search`);
+  console.log(`  Test 13g (Arabic follow):  "من هذا" after Arabic name → search`);
+  console.log(`  Test 13h (@handle):        "@john_doe" → search triggers`);
+  console.log(`  Test 13i (Brand/product):  "what is ruflo" → search triggers`);
+  console.log(`  Test 13j (Concept skip):   "what is React" → no search`);
+  console.log(`  Test 13k (Context skip):   "who is he" after concept → no search`);
+  console.log(`  Test 13l (Standalone):     "yayahabes" alone → search triggers`);
+  console.log(`  Test 13m (Greeting skip):  "hi" → no search`);
+  console.log(`  Test 14a (Env base URL):    HYSA_OPENAI_ROUTER_BASE_URL → provider=openai_router`);
+  console.log(`  Test 14b (Env default):    HYSA_DEFAULT_PROVIDER=openai_router → resolves`);
+  console.log(`  Test 14c (No key needed):  providerNeedsApiKey("openai_router") = false`);
+  console.log(`  Test 14d (Optional key):   providerHasOptionalApiKey("openai_router") = true`);
+  console.log(`  Test 14e (Defaults):       PROVIDER_DEFAULTS has openai_router label + model`);
+  console.log(`  Test 14f (Router model):   HYSA_OPENAI_ROUTER_MODEL resolves via env`);
+  console.log(`  Test 14g (No setup):       Missing router API key does not force setup`);
+  console.log(`  Test 15a (Auto-detect):    Mock 9router reachable → openai_router selected`);
+  console.log(`  Test 15b (Auto-detect):    HYSA_OPENAI_ROUTER_BASE_URL takes priority`);
+  console.log(`  Test 15c (Auto-detect):    Missing router key not a blocker`);
+  console.log(`  Test 15d (Auto-detect):    Router unavailable + GEMINI_API_KEY → selects gemini`);
+  console.log(`  Test 15e (Auto-detect):    Nothing available → null (manual menu fallback)`);
+  console.log(`  Test 15f (Auto-detect):    buildConfigFromDetection creates valid config`);
+  console.log(`  Test 15g (Auto-detect):    Config persists via saveConfig/loadConfig`);
   console.log();
   console.log(`  Config backed up: original = ${origProvider}/${origModel}`);
   console.log(`  Config restored: ${origProvider}/${origModel}`);

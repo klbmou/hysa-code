@@ -1,10 +1,12 @@
 import pc from 'picocolors';
 import { loadConfig, PROVIDER_SIGNUP_URLS, PROVIDER_DEFAULTS, PROVIDER_TIERS, TIER_LABELS, FREE_API_PROVIDERS, LOCAL_FREE_PROVIDERS, EXPERIMENTAL_FREE_PROVIDERS, EXPERIMENTAL_BASE_URLS, validateApiKey, normalizeApiKey, providerNeedsApiKey, providerHasOptionalApiKey, getDefaultProviderFromEnv } from '../config/keys.js';
 import type { ProviderType, HysaConfig } from '../config/keys.js';
+import { detectBestProvider, detectedProviderLabel } from '../config/provider-detect.js';
 import { checkOpenCodeZenAPI } from '../ai/opencode-zen.js';
 import { checkAnthropicProxyAPI } from '../ai/anthropic-proxy.js';
 import { checkOpenAICompatibleAPI } from '../ai/openai-compatible.js';
 import { getWebSearchConfig, getSearchDiagnostics } from '../tools/web-search.js';
+import { checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig } from '../tools/browser.js';
 
 const DOCTOR_TIMEOUT_MS = 15000;
 
@@ -836,8 +838,25 @@ export async function runDoctor(debug = false, provider?: string): Promise<void>
       results.push({ name: 'Web Search', status: 'warn', message: 'Not configured. Set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.' });
       results.push({ name: 'DDG Fallback', status: 'ok', message: 'Available (no API key needed, but limited — instant answers only)' });
     }
+
+    // Browser status
+    const pwInstalled = await checkPlaywrightInstalled();
+    const crInstalled = await checkChromiumInstalled();
+    const browserCfg = getBrowserConfig();
+    results.push({ name: 'Playwright', status: pwInstalled ? 'ok' : 'warn', message: pwInstalled ? 'Package installed' : 'Not installed. Run: npm install playwright' });
+    results.push({ name: 'Chromium', status: crInstalled === true ? 'ok' : 'warn', message: crInstalled === true ? 'Installed' : crInstalled === 'unknown' ? 'Unknown (check with: npx playwright install chromium)' : 'Not found. Run: npx playwright install chromium' });
+    results.push({ name: 'Browser Mode', status: 'ok', message: browserCfg.headless ? 'Headless' : 'Visible (HYSA_BROWSER_HEADLESS=false)' });
+    results.push({ name: 'Screenshots', status: 'ok', message: browserCfg.screenshotDir });
+    results.push({ name: 'Browser API', status: 'warn', message: process.env.HYSA_BROWSER_API_ENABLED === 'true' ? 'Enabled (HYSA_BROWSER_API_ENABLED=true)' : 'CLI only (set HYSA_BROWSER_API_ENABLED=true for Web API)' });
   } else {
-    results.push({ name: 'Config', status: 'error', message: 'No config found. Run: hysa chat' });
+    results.push({ name: 'Config', status: 'error', message: 'No config found. Running auto-detection...' });
+    const detected = await detectBestProvider();
+    if (detected) {
+      results.push({ name: 'Auto-Detected', status: 'ok', message: detectedProviderLabel(detected) });
+      results.push({ name: 'Next Step', status: 'ok', message: 'Run: hysa chat  (will auto-save this config)' });
+    } else {
+      results.push({ name: 'Auto-Detection', status: 'error', message: 'No provider detected. Run: hysa chat to set up manually.' });
+    }
   }
 
   console.log();

@@ -10,6 +10,7 @@ import { getYolo, setYolo } from '../utils/session.js';
 import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents, getLastSuccessfulProvider, getLastSuccessfulModel, getAllHealth } from '../ai/model-health.js';
 import { detectSecrets } from '../utils/secrets.js';
 import { searchWeb, formatSearchResults, getSearchDiagnostics } from '../tools/web-search.js';
+import { shouldSearchEntity } from '../tools/entity-detector.js';
 import { estimateTokens } from '../context/tokens.js';
 const LOG = '[HYSA Chat]';
 let apiRequestCounter = 0;
@@ -694,7 +695,6 @@ export async function handleChat(req) {
                     const results = await searchWeb(searchQuery, { maxResults: 5 });
                     const formatted = formatSearchResults(searchQuery, results);
                     if (isExplicitSearchCmd) {
-                        // Replace the raw command with search results
                         searchLastMsg.content = `[Web search results for "${searchQuery}"]\n\n${formatted}`;
                     }
                     else {
@@ -705,6 +705,43 @@ export async function handleChat(req) {
                 }
                 catch (err) {
                     console.log(LOG, `[req:${reqId}] Web search failed: ${err.message}`);
+                }
+            }
+        }
+        // ── Entity detection for unknown names/handles ─────
+        if (!searchQuery) {
+            // Find previous user message for follow-up context
+            let previousUserMessage;
+            for (let i = messages.length - 2; i >= 0; i--) {
+                if (messages[i].role === 'user' && typeof messages[i].content === 'string') {
+                    previousUserMessage = messages[i].content;
+                    break;
+                }
+            }
+            const entityResult = shouldSearchEntity(searchLastContent, previousUserMessage);
+            if (entityResult.shouldSearch && entityResult.query) {
+                searchQuery = entityResult.query;
+                console.log(LOG, `[req:${reqId}] Entity search: "${searchQuery}"`);
+                const wsDiag = getSearchDiagnostics();
+                if (!wsDiag.isReliable) {
+                    const hasArabic = /[\u0600-\u06FF]/.test(searchLastContent);
+                    const configMsg = hasArabic
+                        ? 'البحث في الإنترنت غير مضبوط بشكل موثوق. فعّل TAVILY_API_KEY أو SERPER_API_KEY أو BRAVE_SEARCH_API_KEY.'
+                        : 'Web search is not reliably configured. To enable web search, set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.';
+                    console.log(LOG, `[req:${reqId}] Entity search skipped (provider: ${wsDiag.provider}, no reliable API keys)`);
+                    return { message: configMsg, toolCalls: [] };
+                }
+                else {
+                    try {
+                        const results = await searchWeb(searchQuery, { maxResults: 5 });
+                        const formatted = formatSearchResults(searchQuery, results);
+                        const searchMsg = { role: 'user', content: formatted };
+                        messages.splice(messages.length - 1, 0, searchMsg);
+                        console.log(LOG, `[req:${reqId}] Entity search: ${results.length} results for "${searchQuery}"`);
+                    }
+                    catch (err) {
+                        console.log(LOG, `[req:${reqId}] Entity search failed: ${err.message}`);
+                    }
                 }
             }
         }

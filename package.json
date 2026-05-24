@@ -63,7 +63,8 @@
     "express": "^5.2.1",
     "ignore": "^6.0.0",
     "openai": "^4.70.0",
-    "picocolors": "^1.1.0"
+    "picocolors": "^1.1.0",
+    "playwright": "^1.60.0"
   },
   "pkg": {
     "assets": [

@@ -3,7 +3,8 @@ import { input, confirm, password, select } from '@inquirer/prompts';
 import pc from 'picocolors';
 import { execSync } from 'node:child_process';
 import { resolve, relative } from 'node:path';
-import { loadConfig, saveConfig, PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_CATEGORIES, PROVIDER_CATEGORY_LABELS, PROVIDER_DESCRIPTIONS, PROVIDER_SIGNUP_URLS, TIER_LABELS, PROVIDER_TIERS, LOCAL_FREE_PROVIDERS, providerNeedsApiKey, providerHasOptionalApiKey, validateApiKey } from './config/keys.js';
+import { loadConfig, saveConfig, PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_CATEGORIES, PROVIDER_CATEGORY_LABELS, PROVIDER_DESCRIPTIONS, PROVIDER_SIGNUP_URLS, TIER_LABELS, PROVIDER_TIERS, LOCAL_FREE_PROVIDERS, providerNeedsApiKey, providerHasOptionalApiKey, validateApiKey, getDefaultProviderFromEnv } from './config/keys.js';
+import { detectBestProvider, buildConfigFromDetection, detectedProviderLabel } from './config/provider-detect.js';
 import { runDoctor } from './utils/doctor.js';
 import { fetchOpenRouterModels, filterFreeModels, formatModelsTable } from './ai/openrouter-models.js';
 import { getSettings, updateSettings, updateAgentMode } from './config/settings.js';
@@ -21,6 +22,8 @@ import { getGitInfo } from './utils/git.js';
 import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo, getProviderHealth, clearProviderHealth, getUsage, recordPromptMode } from './utils/session.js';
 import { grepSearch, findFiles } from './utils/searcher.js';
 import { searchWeb, formatSearchResults, getWebSearchConfig, getSearchDiagnostics } from './tools/web-search.js';
+import { browserOpen, browserScreenshot, browserText, browserSnapshot, browserClick, browserType, browserClose, getBrowserStatus, checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig } from './tools/browser.js';
+import { shouldSearchEntity } from './tools/entity-detector.js';
 import { classifyCommand } from './utils/commands.js';
 import { ALL_MODES, MODE_LABELS, MODE_DESCRIPTIONS } from './agent/modes.js';
 import { createTask, getActiveTask } from './agent/tasks.js';
@@ -52,6 +55,15 @@ function getPackageVersion() {
 }
 // ── Setup ────────────────────────────────────────────────
 async function setupFirstRun() {
+    // Auto-detect the best available provider first
+    const detected = await detectBestProvider();
+    if (detected) {
+        const config = buildConfigFromDetection(detected);
+        saveConfig(config);
+        console.log(pc.green(`\n✓ Auto-detected ${detectedProviderLabel(detected)}`));
+        console.log(pc.dim('  Start chatting with: hysa chat\n'));
+        return config;
+    }
     console.clear();
     console.log(pc.bold(pc.magenta('┌─────────────────────────────────────────────┐')));
     console.log(pc.bold(pc.magenta(`│        💜 Welcome to HYSA Code v${getPackageVersion()}         │`)));
@@ -763,6 +775,7 @@ async function chatLoop(initialConfig, initialYolo = false) {
         }
     }
     const messages = [];
+    let previousUserMessage = null;
     const tokenEstimate = estimateTokens(projectInfo.tree) + estimateTokens(readmeContent);
     // Agent mode tracking
     let currentAgentMode = config.agentMode || 'chat';
@@ -1248,6 +1261,94 @@ async function chatLoop(initialConfig, initialYolo = false) {
             }
             continue;
         }
+        // ── Browser slash commands ─────────────────────
+        if (trimmed.startsWith('/browser open ')) {
+            const url = trimmed.slice(14).trim();
+            if (!url) {
+                console.log(pc.red('Usage: /browser open <url>\n'));
+                continue;
+            }
+            const result = await browserOpen(url);
+            console.log(`  ${result.ok ? pc.green('✓') : pc.red('✗')} ${result.message}\n`);
+            continue;
+        }
+        if (trimmed === '/browser screenshot') {
+            const result = await browserScreenshot();
+            console.log(`  ${result.ok ? pc.green('✓') : pc.red('✗')} ${result.message}\n`);
+            continue;
+        }
+        if (trimmed === '/browser text') {
+            const result = await browserText();
+            if (result.ok && result.text) {
+                const lines = result.text.split('\n').filter(l => l.trim());
+                console.log(`  ${pc.green('✓')} ${result.message}`);
+                console.log(`  ${lines.slice(0, 20).join('\n  ')}`);
+                if (lines.length > 20)
+                    console.log(`  ... (${lines.length - 20} more lines)`);
+                console.log();
+            }
+            else {
+                console.log(`  ${result.ok ? pc.green('✓') : pc.red('✗')} ${result.message}\n`);
+            }
+            continue;
+        }
+        if (trimmed === '/browser snapshot') {
+            const result = await browserSnapshot();
+            if (result.ok && result.snapshot) {
+                const lines = result.snapshot.split('\n').filter(l => l.trim());
+                console.log(`  ${pc.green('✓')} ${result.message}`);
+                console.log(`  ${lines.slice(0, 30).join('\n  ')}`);
+                if (lines.length > 30)
+                    console.log(`  ... (${lines.length - 30} more lines)`);
+                console.log();
+            }
+            else {
+                console.log(`  ${result.ok ? pc.green('✓') : pc.red('✗')} ${result.message}\n`);
+            }
+            continue;
+        }
+        if (trimmed.startsWith('/browser click ')) {
+            const target = trimmed.slice(15).trim();
+            if (!target) {
+                console.log(pc.red('Usage: /browser click <target>\n'));
+                continue;
+            }
+            const result = await browserClick(target);
+            console.log(`  ${result.ok ? pc.green('✓') : pc.red('✗')} ${result.message}\n`);
+            continue;
+        }
+        if (trimmed.startsWith('/browser type ')) {
+            const rest = trimmed.slice(14).trim();
+            const spaceIdx = rest.indexOf(' ');
+            if (spaceIdx < 0) {
+                console.log(pc.red('Usage: /browser type <target> <value>\n'));
+                continue;
+            }
+            const target = rest.slice(0, spaceIdx).trim();
+            const value = rest.slice(spaceIdx + 1).trim();
+            const result = await browserType(target, value);
+            console.log(`  ${result.ok ? pc.green('✓') : pc.red('✗')} ${result.message}\n`);
+            continue;
+        }
+        if (trimmed === '/browser status') {
+            const status = await getBrowserStatus();
+            const cfg = getBrowserConfig();
+            console.log(`\n  Browser status:`);
+            console.log(`    Active: ${status.active ? pc.green('yes') : pc.red('no')}`);
+            if (status.active) {
+                console.log(`    URL: ${status.url || '(none)'}`);
+                console.log(`    Title: ${status.title || '(none)'}`);
+                console.log(`    Engine: ${status.browser || '(unknown)'}`);
+            }
+            console.log(`    Headless: ${cfg.headless ? pc.green('true') : pc.yellow('false')}`);
+            console.log(`    Timeout: ${cfg.timeoutMs}ms\n`);
+            continue;
+        }
+        if (trimmed === '/browser close') {
+            const result = await browserClose();
+            console.log(`  ${result.ok ? pc.green('✓') : pc.red('✗')} ${result.message}\n`);
+            continue;
+        }
         // ── YOLO mode ──────────────────────────────────
         if (trimmed.toLowerCase() === '/yolo') {
             yoloMode = !yoloMode;
@@ -1638,6 +1739,44 @@ async function chatLoop(initialConfig, initialYolo = false) {
                     console.log(pc.red(`  Web search failed: ${err.message}`));
                     if (config.debug)
                         console.log(pc.dim(`  [debug] Web search failed: ${err.message}`));
+                }
+            }
+        }
+        // ── Entity detection for unknown names/handles ─────
+        if (!searchQuery) {
+            const entityResult = shouldSearchEntity(trimmed, previousUserMessage);
+            if (entityResult.shouldSearch && entityResult.query) {
+                searchQuery = entityResult.query;
+                console.log(pc.cyan(`  Entity search: "${searchQuery}"`));
+                const wsDiag = getSearchDiagnostics();
+                if (!wsDiag.isReliable) {
+                    const hasArabic = /[\u0600-\u06FF]/.test(trimmed);
+                    const configMsg = hasArabic
+                        ? 'البحث في الإنترنت غير مضبوط بشكل موثوق. فعّل TAVILY_API_KEY أو SERPER_API_KEY أو BRAVE_SEARCH_API_KEY.'
+                        : 'Web search is not reliably configured. To enable web search, set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.';
+                    console.log(pc.yellow(`\n  ${configMsg}\n`));
+                    previousUserMessage = trimmed;
+                    continue;
+                }
+                else {
+                    try {
+                        const results = await searchWeb(searchQuery, { maxResults: 5 });
+                        webSearchResults = formatSearchResults(searchQuery, results);
+                        if (results.length > 0) {
+                            console.log(pc.dim(`  ${results.length} result(s) found, injecting into conversation.`));
+                        }
+                        else {
+                            console.log(pc.yellow(`  No results found.`));
+                        }
+                        if (config.debug)
+                            console.log(pc.dim(`  [debug] Entity search: ${results.length} results for "${searchQuery}"`));
+                    }
+                    catch (err) {
+                        webSearchResults = `Web search failed: ${err.message}`;
+                        console.log(pc.red(`  Web search failed: ${err.message}`));
+                        if (config.debug)
+                            console.log(pc.dim(`  [debug] Entity search failed: ${err.message}`));
+                    }
                 }
             }
         }
@@ -2055,6 +2194,7 @@ async function chatLoop(initialConfig, initialYolo = false) {
                 console.log(pc.dim(`  [debug] Multi-step tools: ${steps} steps`));
             }
         }
+        previousUserMessage = trimmed;
     }
 }
 // ── Main CLI ─────────────────────────────────────────────
@@ -2093,7 +2233,30 @@ export async function start() {
             }
         }
         else if (!config) {
-            config = await setupFirstRun();
+            const envProvider = getDefaultProviderFromEnv();
+            if (envProvider) {
+                const envConfig = {
+                    currentProvider: envProvider,
+                    currentModel: PROVIDER_DEFAULTS[envProvider]?.model || 'default',
+                    apiKeys: {},
+                    ollamaBaseUrl: 'http://localhost:11434',
+                };
+                if (envProvider === 'openai_router') {
+                    if (process.env.HYSA_OPENAI_ROUTER_BASE_URL)
+                        envConfig.openaiRouterBaseUrl = process.env.HYSA_OPENAI_ROUTER_BASE_URL.replace(/\/+$/, '');
+                    if (process.env.HYSA_OPENAI_ROUTER_MODEL) {
+                        envConfig.currentModel = process.env.HYSA_OPENAI_ROUTER_MODEL;
+                        envConfig.openaiRouterModel = process.env.HYSA_OPENAI_ROUTER_MODEL;
+                    }
+                    if (process.env.HYSA_OPENAI_ROUTER_API_KEY)
+                        envConfig.apiKeys.openai_router = process.env.HYSA_OPENAI_ROUTER_API_KEY.trim();
+                }
+                saveConfig(envConfig);
+                config = envConfig;
+            }
+            else {
+                config = await setupFirstRun();
+            }
         }
         else {
             const hasApiKey = Object.values(config.apiKeys).some(k => k);
@@ -2467,6 +2630,132 @@ export async function start() {
         }
         catch (err) {
             console.log(pc.red(`  ${err.message}\n`));
+        }
+    });
+    const browserCmd = program.command('browser').description('Browser automation (Playwright)');
+    browserCmd
+        .command('open')
+        .description('Open a URL in the browser')
+        .argument('<url>', 'URL to open (http/https only)')
+        .action(async (url) => {
+        const result = await browserOpen(url);
+        if (result.ok) {
+            console.log(`\n  ${pc.green('✓')} ${result.message}\n`);
+        }
+        else {
+            console.log(`\n  ${pc.red('✗')} ${result.message}\n`);
+        }
+    });
+    browserCmd
+        .command('screenshot')
+        .description('Take a screenshot of the current page')
+        .option('--full-page', 'Capture full page (not just viewport)')
+        .option('--path <path>', 'Custom save path (inside .hysa/screenshots/)')
+        .action(async (opts) => {
+        const result = await browserScreenshot({ fullPage: opts.fullPage, path: opts.path });
+        if (result.ok) {
+            console.log(`\n  ${pc.green('✓')} ${result.message}\n`);
+        }
+        else {
+            console.log(`\n  ${pc.red('✗')} ${result.message}\n`);
+        }
+    });
+    browserCmd
+        .command('text')
+        .description('Get visible text content from the current page')
+        .action(async () => {
+        const result = await browserText();
+        if (result.ok) {
+            console.log(`\n  ${pc.green('✓')} ${result.message}`);
+            if (result.text) {
+                const lines = result.text.split('\n').filter(l => l.trim());
+                console.log(`  ${lines.slice(0, 20).join('\n  ')}`);
+                if (lines.length > 20)
+                    console.log(`  ... (${lines.length - 20} more lines)`);
+            }
+            console.log();
+        }
+        else {
+            console.log(`\n  ${pc.red('✗')} ${result.message}\n`);
+        }
+    });
+    browserCmd
+        .command('snapshot')
+        .description('Get an accessibility/ARIA snapshot of the current page')
+        .action(async () => {
+        const result = await browserSnapshot();
+        if (result.ok) {
+            console.log(`\n  ${pc.green('✓')} ${result.message}`);
+            if (result.snapshot) {
+                const lines = result.snapshot.split('\n').filter(l => l.trim());
+                console.log(`  ${lines.slice(0, 30).join('\n  ')}`);
+                if (lines.length > 30)
+                    console.log(`  ... (${lines.length - 30} more lines)`);
+            }
+            console.log();
+        }
+        else {
+            console.log(`\n  ${pc.red('✗')} ${result.message}\n`);
+        }
+    });
+    browserCmd
+        .command('click')
+        .description('Click an element by CSS selector or text')
+        .argument('<target>', 'CSS selector or text to click')
+        .action(async (target) => {
+        const result = await browserClick(target);
+        if (result.ok) {
+            console.log(`\n  ${pc.green('✓')} ${result.message}\n`);
+        }
+        else {
+            console.log(`\n  ${pc.red('✗')} ${result.message}\n`);
+        }
+    });
+    browserCmd
+        .command('type')
+        .description('Type text into an input field')
+        .argument('<target>', 'CSS selector or placeholder text')
+        .argument('<value>', 'Text to type')
+        .action(async (target, value) => {
+        const result = await browserType(target, value);
+        if (result.ok) {
+            console.log(`\n  ${pc.green('✓')} ${result.message}\n`);
+        }
+        else {
+            console.log(`\n  ${pc.red('✗')} ${result.message}\n`);
+        }
+    });
+    browserCmd
+        .command('status')
+        .description('Show browser session status')
+        .action(async () => {
+        const status = await getBrowserStatus();
+        const cfg = getBrowserConfig();
+        const pwOk = await checkPlaywrightInstalled();
+        const crOk = await checkChromiumInstalled();
+        console.log(`\n  Browser status:`);
+        console.log(`    Active: ${status.active ? pc.green('yes') : pc.red('no')}`);
+        if (status.active) {
+            console.log(`    URL: ${status.url || '(none)'}`);
+            console.log(`    Title: ${status.title || '(none)'}`);
+            console.log(`    Engine: ${status.browser || '(unknown)'}`);
+        }
+        console.log(`    Playwright installed: ${pwOk ? pc.green('yes') : pc.red('no')}`);
+        console.log(`    Chromium installed: ${crOk === true ? pc.green('yes') : crOk === 'unknown' ? pc.yellow('unknown') : pc.red('no')}`);
+        console.log(`    Headless: ${cfg.headless ? pc.green('true') : pc.yellow('false')}`);
+        console.log(`    Screenshot dir: ${cfg.screenshotDir}`);
+        console.log(`    Timeout: ${cfg.timeoutMs}ms\n`);
+    });
+    browserCmd
+        .command('close')
+        .description('Close the browser session')
+        .action(async () => {
+        const result = await browserClose();
+        if (result.ok) {
+            console.log(`\n  ${pc.green('✓')} ${result.message}\n`);
+        }
+        else {
+            console.log(`\n  ${pc.red('✗')} ${result.message}\n`);
         }
     });
     program
