@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { loadConfig, saveConfig, PROVIDER_DEFAULTS, PROVIDER_TIERS, PROVIDER_MODELS, TIER_LABELS, LOCAL_FREE_PROVIDERS, COMPACT_PROMPT_PROVIDERS } from '../config/keys.js';
+import { loadConfig, saveConfig, PROVIDER_DEFAULTS, PROVIDER_TIERS, PROVIDER_MODELS, TIER_LABELS, LOCAL_FREE_PROVIDERS, COMPACT_PROMPT_PROVIDERS, getDefaultProviderFromEnv } from '../config/keys.js';
 import type { ProviderType, HysaConfig } from '../config/keys.js';
 import { getProjectInfo } from '../context/builder.js';
 import { readFile, shouldIgnore } from '../files/reader.js';
@@ -263,7 +263,7 @@ export function getStatus(): { provider: string; model: string; tier: string; vi
   if (!config) {
     return { provider: 'not configured', model: '', tier: '', visionCapable: false, git: null };
   }
-  const prov = config.currentProvider;
+  const prov = (getDefaultProviderFromEnv() || config.currentProvider) as ProviderType;
   const label = PROVIDER_DEFAULTS[prov]?.label || prov;
   const tier = PROVIDER_TIERS[prov];
   const tierLabel = tier ? TIER_LABELS[tier]?.label || '' : '';
@@ -569,6 +569,11 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
     return { message: '', toolCalls: [], error: 'No configuration found. Run: hysa chat' };
   }
 
+  // Apply env-based default provider resolution (same as CLI)
+  const envProvider = getDefaultProviderFromEnv();
+  if (envProvider) {
+    config.currentProvider = envProvider as ProviderType;
+  }
   const prov = config.currentProvider;
 
   if (!req.messages || !Array.isArray(req.messages) || req.messages.length === 0) {

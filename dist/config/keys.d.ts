@@ -60,6 +60,7 @@ export declare function providerNeedsApiKey(provider: ProviderType): boolean;
 export declare function providerHasOptionalApiKey(provider: ProviderType): boolean;
 export declare function providerRequiresKey(provider: ProviderType): boolean;
 export declare function loadConfig(): HysaConfig | null;
+export declare function getDefaultProviderFromEnv(): string | null;
 export declare function normalizeApiKey(key: string): string;
 export declare function validateApiKey(key: string, provider?: ProviderType): {
     valid: boolean;

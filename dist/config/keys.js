@@ -227,6 +227,14 @@ function applyEnvOverrides(config) {
         config.openaiRouterModel = routerModel.trim();
     }
 }
+export function getDefaultProviderFromEnv() {
+    const fromEnv = process.env.HYSA_DEFAULT_PROVIDER;
+    if (fromEnv)
+        return fromEnv;
+    if (process.env.HYSA_OPENAI_ROUTER_BASE_URL)
+        return 'openai_router';
+    return null;
+}
 export function normalizeApiKey(key) {
     return key.trim().replace(/^Bearer\s+/i, '');
 }

@@ -1,5 +1,5 @@
 import pc from 'picocolors';
-import { loadConfig, PROVIDER_SIGNUP_URLS, PROVIDER_DEFAULTS, PROVIDER_TIERS, TIER_LABELS, FREE_API_PROVIDERS, LOCAL_FREE_PROVIDERS, EXPERIMENTAL_FREE_PROVIDERS, EXPERIMENTAL_BASE_URLS, validateApiKey, normalizeApiKey, providerNeedsApiKey, providerHasOptionalApiKey } from '../config/keys.js';
+import { loadConfig, PROVIDER_SIGNUP_URLS, PROVIDER_DEFAULTS, PROVIDER_TIERS, TIER_LABELS, FREE_API_PROVIDERS, LOCAL_FREE_PROVIDERS, EXPERIMENTAL_FREE_PROVIDERS, EXPERIMENTAL_BASE_URLS, validateApiKey, normalizeApiKey, providerNeedsApiKey, providerHasOptionalApiKey, getDefaultProviderFromEnv } from '../config/keys.js';
 import type { ProviderType, HysaConfig } from '../config/keys.js';
 import { checkOpenCodeZenAPI } from '../ai/opencode-zen.js';
 import { checkAnthropicProxyAPI } from '../ai/anthropic-proxy.js';

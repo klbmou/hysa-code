@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { loadConfig, saveConfig, PROVIDER_DEFAULTS, PROVIDER_TIERS, TIER_LABELS, LOCAL_FREE_PROVIDERS } from '../config/keys.js';
+import { loadConfig, saveConfig, PROVIDER_DEFAULTS, PROVIDER_TIERS, TIER_LABELS, LOCAL_FREE_PROVIDERS, getDefaultProviderFromEnv } from '../config/keys.js';
 import { getProjectInfo } from '../context/builder.js';
 import { readFile, shouldIgnore } from '../files/reader.js';
 import { writeFileWithBackup, previewEdit } from '../files/writer.js';
@@ -202,7 +202,7 @@ export function getStatus() {
     if (!config) {
         return { provider: 'not configured', model: '', tier: '', visionCapable: false, git: null };
     }
-    const prov = config.currentProvider;
+    const prov = (getDefaultProviderFromEnv() || config.currentProvider);
     const label = PROVIDER_DEFAULTS[prov]?.label || prov;
     const tier = PROVIDER_TIERS[prov];
     const tierLabel = tier ? TIER_LABELS[tier]?.label || '' : '';
@@ -481,6 +481,11 @@ export async function handleChat(req) {
     if (!config) {
         console.log(LOG, 'No config found');
         return { message: '', toolCalls: [], error: 'No configuration found. Run: hysa chat' };
+    }
+    // Apply env-based default provider resolution (same as CLI)
+    const envProvider = getDefaultProviderFromEnv();
+    if (envProvider) {
+        config.currentProvider = envProvider;
     }
     const prov = config.currentProvider;
     if (!req.messages || !Array.isArray(req.messages) || req.messages.length === 0) {

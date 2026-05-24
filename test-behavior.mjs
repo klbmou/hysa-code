@@ -8,6 +8,7 @@ import { resolve } from 'node:path';
 
 const workingDir = resolve('.');
 const projectInfo = getProjectInfo(workingDir);
+let globalTestFailed = false;
 
 function section(title) {
   console.log(`\n${'='.repeat(70)}`);
@@ -630,6 +631,9 @@ process.on('exit', () => {
   let savedProxyBase;
   let savedAllKeys;
   let savedExpFlag;
+  let savedRouterBaseUrl6d;
+  let savedRouterEnv6d;
+  let savedDefaultProvider6d;
   let fbMockServer = null;
   let fbMockBaseUrl = '';
   try {
@@ -662,15 +666,22 @@ process.on('exit', () => {
     fbMockBaseUrl = await startFbServer();
     console.log(`  Fallback mock server at: ${fbMockBaseUrl}`);
 
-    // Save all keys, then clear everything except anthropic_proxy fallback
-    // This forces all intermediate providers to fail so proxy is reached
+    // Save all state, then isolate so only anthropic_proxy can succeed
     savedDsKey = config.apiKeys.deepseek;
-    const savedAllKeys = { ...config.apiKeys };
+    savedAllKeys = { ...config.apiKeys };
     for (const k of Object.keys(config.apiKeys)) {
       if (k !== 'anthropic_proxy') {
         config.apiKeys[k] = '';
       }
     }
+
+    // Disable openai_router (env + config) so it doesn't win before anthropic_proxy
+    savedRouterBaseUrl6d = config.openaiRouterBaseUrl;
+    savedRouterEnv6d = process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+    savedDefaultProvider6d = process.env.HYSA_DEFAULT_PROVIDER;
+    config.openaiRouterBaseUrl = undefined;
+    delete process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+    if (savedDefaultProvider6d === 'openai_router') delete process.env.HYSA_DEFAULT_PROVIDER;
 
     // Use deepseek as primary (will fail with empty key)
     config.currentProvider = 'deepseek';
@@ -733,8 +744,8 @@ process.on('exit', () => {
 
     const proxyUsed = fbEvents.some(e => e.reason.includes('Anthropic Proxy') && e.reason.includes('Switched'));
     const gotContent = fbResult?.message?.includes('Fallback proxy response');
-    console.log(`  ${proxyUsed ? '✓ anthropic_proxy was used as fallback' : '✗ anthropic_proxy not in fallback chain'}`);
-    console.log(`  ${gotContent ? '✓ Got expected response from proxy' : '✗ Unexpected response'}`);
+    if (!proxyUsed) { console.log(`  ✗ anthropic_proxy not in fallback chain`); globalTestFailed = true; } else { console.log(`  ✓ anthropic_proxy was used as fallback`); }
+    if (!gotContent) { console.log(`  ✗ Unexpected response`); globalTestFailed = true; } else { console.log(`  ✓ Got expected response from proxy`); }
     console.log(`  ${proxyUsed && gotContent ? '✓ Fallback to anthropic_proxy WORKS' : '⚠ Fallback test issues'}`);
   } catch (err) {
     console.log(`  ✗ Error: ${err.message}`);
@@ -745,6 +756,9 @@ process.on('exit', () => {
     }
     config.anthropicProxyBaseUrl = savedProxyBase;
     if (savedExpFlag !== undefined) config.allowExperimentalProviders = savedExpFlag;
+    config.openaiRouterBaseUrl = savedRouterBaseUrl6d;
+    if (savedRouterEnv6d !== undefined) process.env.HYSA_OPENAI_ROUTER_BASE_URL = savedRouterEnv6d; else delete process.env.HYSA_OPENAI_ROUTER_BASE_URL;
+    if (savedDefaultProvider6d !== undefined) process.env.HYSA_DEFAULT_PROVIDER = savedDefaultProvider6d; else delete process.env.HYSA_DEFAULT_PROVIDER;
     config.currentProvider = origProvider;
     config.currentModel = origModel;
     if (fbMockServer) {
@@ -1584,8 +1598,14 @@ process.on('exit', () => {
       const serperUrl = await startSerper();
       console.log(`  Mock Serper server at: ${serperUrl}`);
 
-      const oldSerperKey = process.env.SERPER_API_KEY;
-      const oldSerperBase = process.env.HYSA_WEB_SEARCH_SERPER_BASE;
+      const oldTavilyKey9f = process.env.TAVILY_API_KEY;
+      const oldBraveKey9f = process.env.BRAVE_SEARCH_API_KEY;
+      const oldSerperKey9f = process.env.SERPER_API_KEY;
+      const oldSerperBase9f = process.env.HYSA_WEB_SEARCH_SERPER_BASE;
+      const oldWebSearchProvider9f = process.env.HYSA_WEB_SEARCH_PROVIDER;
+      delete process.env.TAVILY_API_KEY;
+      delete process.env.BRAVE_SEARCH_API_KEY;
+      process.env.HYSA_WEB_SEARCH_PROVIDER = 'serper';
       process.env.SERPER_API_KEY = 'mock-serper-key';
       process.env.HYSA_WEB_SEARCH_SERPER_BASE = serperUrl;
 
@@ -1596,17 +1616,24 @@ process.on('exit', () => {
       console.log(`  URL: ${serperResults[0]?.url || '(none)'}`);
       console.log(`  Snippet: ${serperResults[0]?.snippet || '(none)'}`);
       console.log(`  Source: ${serperResults[0]?.source || '(none)'}`);
-      console.log(`  ${hasSerperContent ? '✓ Serper mock returns expected results' : '✗ Unexpected Serper results'}`);
+      if (!hasSerperContent) { console.log(`  ✗ Unexpected Serper results`); globalTestFailed = true; } else { console.log(`  ✓ Serper mock returns expected results`); }
 
-      if (oldSerperKey) process.env.SERPER_API_KEY = oldSerperKey; else delete process.env.SERPER_API_KEY;
-      if (oldSerperBase) process.env.HYSA_WEB_SEARCH_SERPER_BASE = oldSerperBase; else delete process.env.HYSA_WEB_SEARCH_SERPER_BASE;
+      if (oldTavilyKey9f !== undefined) process.env.TAVILY_API_KEY = oldTavilyKey9f; else delete process.env.TAVILY_API_KEY;
+      if (oldBraveKey9f !== undefined) process.env.BRAVE_SEARCH_API_KEY = oldBraveKey9f; else delete process.env.BRAVE_SEARCH_API_KEY;
+      if (oldSerperKey9f !== undefined) process.env.SERPER_API_KEY = oldSerperKey9f; else delete process.env.SERPER_API_KEY;
+      if (oldSerperBase9f !== undefined) process.env.HYSA_WEB_SEARCH_SERPER_BASE = oldSerperBase9f; else delete process.env.HYSA_WEB_SEARCH_SERPER_BASE;
+      if (oldWebSearchProvider9f !== undefined) process.env.HYSA_WEB_SEARCH_PROVIDER = oldWebSearchProvider9f; else delete process.env.HYSA_WEB_SEARCH_PROVIDER;
       serperPassed = hasSerperContent;
       serperServer.close();
       console.log('  Serper mock server stopped.');
     } catch (err) {
       console.log(`  ✗ Serper test error: ${err.message}`);
-      if (process.env.SERPER_API_KEY) delete process.env.SERPER_API_KEY;
-      if (process.env.HYSA_WEB_SEARCH_SERPER_BASE) delete process.env.HYSA_WEB_SEARCH_SERPER_BASE;
+      globalTestFailed = true;
+      if (oldTavilyKey9f !== undefined) process.env.TAVILY_API_KEY = oldTavilyKey9f; else delete process.env.TAVILY_API_KEY;
+      if (oldBraveKey9f !== undefined) process.env.BRAVE_SEARCH_API_KEY = oldBraveKey9f; else delete process.env.BRAVE_SEARCH_API_KEY;
+      if (oldSerperKey9f !== undefined) process.env.SERPER_API_KEY = oldSerperKey9f; else delete process.env.SERPER_API_KEY;
+      if (oldSerperBase9f !== undefined) process.env.HYSA_WEB_SEARCH_SERPER_BASE = oldSerperBase9f; else delete process.env.HYSA_WEB_SEARCH_SERPER_BASE;
+      if (oldWebSearchProvider9f !== undefined) process.env.HYSA_WEB_SEARCH_PROVIDER = oldWebSearchProvider9f; else delete process.env.HYSA_WEB_SEARCH_PROVIDER;
     }
     console.log(`  ${serperPassed ? '✓ Serper mock server TEST PASSED' : '⚠ Serper mock test issues'}`);
 
@@ -1647,8 +1674,14 @@ process.on('exit', () => {
       const braveUrl = await startBrave();
       console.log(`  Mock Brave server at: ${braveUrl}`);
 
-      const oldBraveKey = process.env.BRAVE_SEARCH_API_KEY;
-      const oldBraveBase = process.env.HYSA_WEB_SEARCH_BRAVE_BASE;
+      const oldTavilyKey9g = process.env.TAVILY_API_KEY;
+      const oldSerperKey9g = process.env.SERPER_API_KEY;
+      const oldBraveKey9g = process.env.BRAVE_SEARCH_API_KEY;
+      const oldBraveBase9g = process.env.HYSA_WEB_SEARCH_BRAVE_BASE;
+      const oldWebSearchProvider9g = process.env.HYSA_WEB_SEARCH_PROVIDER;
+      delete process.env.TAVILY_API_KEY;
+      delete process.env.SERPER_API_KEY;
+      process.env.HYSA_WEB_SEARCH_PROVIDER = 'brave';
       process.env.BRAVE_SEARCH_API_KEY = 'mock-brave-key';
       process.env.HYSA_WEB_SEARCH_BRAVE_BASE = braveUrl;
 
@@ -1659,17 +1692,24 @@ process.on('exit', () => {
       console.log(`  URL: ${braveResults[0]?.url || '(none)'}`);
       console.log(`  Snippet: ${braveResults[0]?.snippet || '(none)'}`);
       console.log(`  Source: ${braveResults[0]?.source || '(none)'}`);
-      console.log(`  ${hasBraveContent ? '✓ Brave mock returns expected results' : '✗ Unexpected Brave results'}`);
+      if (!hasBraveContent) { console.log(`  ✗ Unexpected Brave results`); globalTestFailed = true; } else { console.log(`  ✓ Brave mock returns expected results`); }
 
-      if (oldBraveKey) process.env.BRAVE_SEARCH_API_KEY = oldBraveKey; else delete process.env.BRAVE_SEARCH_API_KEY;
-      if (oldBraveBase) process.env.HYSA_WEB_SEARCH_BRAVE_BASE = oldBraveBase; else delete process.env.HYSA_WEB_SEARCH_BRAVE_BASE;
+      if (oldTavilyKey9g !== undefined) process.env.TAVILY_API_KEY = oldTavilyKey9g; else delete process.env.TAVILY_API_KEY;
+      if (oldSerperKey9g !== undefined) process.env.SERPER_API_KEY = oldSerperKey9g; else delete process.env.SERPER_API_KEY;
+      if (oldBraveKey9g !== undefined) process.env.BRAVE_SEARCH_API_KEY = oldBraveKey9g; else delete process.env.BRAVE_SEARCH_API_KEY;
+      if (oldBraveBase9g !== undefined) process.env.HYSA_WEB_SEARCH_BRAVE_BASE = oldBraveBase9g; else delete process.env.HYSA_WEB_SEARCH_BRAVE_BASE;
+      if (oldWebSearchProvider9g !== undefined) process.env.HYSA_WEB_SEARCH_PROVIDER = oldWebSearchProvider9g; else delete process.env.HYSA_WEB_SEARCH_PROVIDER;
       bravePassed = hasBraveContent;
       braveServer.close();
       console.log('  Brave mock server stopped.');
     } catch (err) {
       console.log(`  ✗ Brave test error: ${err.message}`);
-      if (process.env.BRAVE_SEARCH_API_KEY) delete process.env.BRAVE_SEARCH_API_KEY;
-      if (process.env.HYSA_WEB_SEARCH_BRAVE_BASE) delete process.env.HYSA_WEB_SEARCH_BRAVE_BASE;
+      globalTestFailed = true;
+      if (oldTavilyKey9g !== undefined) process.env.TAVILY_API_KEY = oldTavilyKey9g; else delete process.env.TAVILY_API_KEY;
+      if (oldSerperKey9g !== undefined) process.env.SERPER_API_KEY = oldSerperKey9g; else delete process.env.SERPER_API_KEY;
+      if (oldBraveKey9g !== undefined) process.env.BRAVE_SEARCH_API_KEY = oldBraveKey9g; else delete process.env.BRAVE_SEARCH_API_KEY;
+      if (oldBraveBase9g !== undefined) process.env.HYSA_WEB_SEARCH_BRAVE_BASE = oldBraveBase9g; else delete process.env.HYSA_WEB_SEARCH_BRAVE_BASE;
+      if (oldWebSearchProvider9g !== undefined) process.env.HYSA_WEB_SEARCH_PROVIDER = oldWebSearchProvider9g; else delete process.env.HYSA_WEB_SEARCH_PROVIDER;
     }
     console.log(`  ${bravePassed ? '✓ Brave mock server TEST PASSED' : '⚠ Brave mock test issues'}`);
 
@@ -1922,4 +1962,11 @@ process.on('exit', () => {
   console.log(`  Config backed up: original = ${origProvider}/${origModel}`);
   console.log(`  Config restored: ${origProvider}/${origModel}`);
 
+  if (globalTestFailed) {
+    console.log(`\n  ✗ SOME TESTS FAILED`);
+    process.exit(1);
+  } else {
+    console.log(`\n  ✓ ALL TESTS PASSED`);
+    process.exit(0);
+  }
 })();
