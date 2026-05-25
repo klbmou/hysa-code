@@ -24,6 +24,8 @@ export type GraphEdgeKind =
   | 'related_to'
   | 'led_to';
 
+export type MemorySource = 'user' | 'auto-fix' | 'provider' | 'command' | 'manual';
+
 export type ExperienceGraphNode = {
   id: string;
   kind: GraphNodeKind;
@@ -33,6 +35,12 @@ export type ExperienceGraphNode = {
   updatedAt?: string;
   tags?: string[];
   metadata?: Record<string, unknown>;
+  // Quality score fields
+  importance?: number;       // 0–100 (user-defined importance)
+  confidence?: number;       // 0–100 (how reliable/specific)
+  source?: MemorySource;     // origin of the memory
+  lastAccessedAt?: string;   // last read/used timestamp
+  pinned?: boolean;          // protected from cleanup
 };
 
 export type ExperienceGraphEdge = {
@@ -50,4 +58,21 @@ export type ExperienceGraph = {
   updatedAt: string;
   nodes: ExperienceGraphNode[];
   edges: ExperienceGraphEdge[];
+};
+
+export type CleanupAction = {
+  action: 'prune' | 'archive' | 'keep' | 'merge' | 'forget';
+  nodeId: string;
+  label: string;
+  kind: string;
+  reason: string;
+};
+
+export type CleanupResult = {
+  actions: CleanupAction[];
+  removedNodes: number;
+  archivedNodes: number;
+  mergedNodes: number;
+  forgottenNodes: number;
+  pinnedSkipped: number;
 };

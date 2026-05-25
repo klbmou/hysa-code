@@ -1,4 +1,4 @@
-# HYSA Code v0.5.1
+# HYSA Code v0.6.0
 
 <div dir="rtl">
 
@@ -280,6 +280,10 @@ hysa doctor --provider puter
 - **PDF text extraction** — selectable-text PDFs extracted in-browser via pdf.js; scanned PDFs detected (OCR not yet supported)
 - **Image understanding** — attach images for AI analysis; requires vision-capable provider (Gemini, OpenRouter vision, GPT-4o, Claude)
 - **Vision provider fallback** — non-vision providers automatically route to OpenRouter vision → Gemini vision models
+- **Persistent Project Memory** — auto-learns decisions, lessons, and provider behavior across sessions. `hysa brain recall` to query past context.
+- **Smart Context Injection** — relevant memories (decisions, lessons, provider events) are automatically ranked and injected into chat context with per-task token budgets. Pinned memories are always preserved.
+- **Memory Quality & Cleanup** — importance/confidence scoring, fuzzy-duplicate detection via Jaccard similarity, optional pruning of low-value events. `hysa brain inspect`, `hysa brain cleanup`, `hysa brain forget`, `hysa brain merge`, `hysa brain pin`.
+- **Session Tracking** — records commands, file edits, tools, errors, auto-fix attempts, provider fallbacks. Auto-saves important outcomes to Brain memory. `hysa session summary`, `hysa session save`, `hysa session clear`.
 - **Smart project detection** — auto-detects Next.js, React, Express, Django, Go, Rust, and more
 - **Context-aware** — knows your project structure, key files, and entry points
 - **Multi-step reasoning** — AI reads, analyzes, then edits in one turn
@@ -300,6 +304,8 @@ hysa doctor --provider puter
 
 ## Commands
 
+### Chat Commands
+
 | Command | Description |
 |---------|-------------|
 | `/help` | Show help |
@@ -315,9 +321,36 @@ hysa doctor --provider puter
 | `/find <filename>` | Find files by name |
 | `/read <path>` | Read a file directly |
 | `/run <command>` | Execute a shell command (with approval) |
-| `/yolo`             | Toggle YOLO mode (auto-apply edits) |
-| `hysa local setup` | Show local provider setup instructions |
+| `/yolo` | Toggle YOLO mode (auto-apply edits) |
 | `/exit` | Exit HYSA Code |
+
+### CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `hysa chat` | Start interactive chat |
+| `hysa config` | View or update configuration |
+| `hysa doctor` | Run system diagnostics |
+| `hysa tree` | Show project file tree |
+| `hysa session summary` | Show session summary (commands, files, errors, status) |
+| `hysa session save` | Save important session outcomes to Brain memory |
+| `hysa session clear` | Clear current session tracking state |
+| `hysa brain init` | Initialize `.hysa/brain` files |
+| `hysa brain status` | Show brain directory status |
+| `hysa brain inspect` | Memory quality report: counts, duplicates, stale events, top memories |
+| `hysa brain note <text>` | Add a manual note to brain |
+| `hysa brain lesson <title> <text>` | Add a lesson learned |
+| `hysa brain decision <title> <text>` | Add a design decision |
+| `hysa brain remember <text>` | Save text as decision/lesson via keyword classification |
+| `hysa brain recall <query>` | Search the experience graph for relevant memories |
+| `hysa brain map` | Generate/update project-map.json |
+| `hysa brain cleanup [--apply]` | Prune low-value memories (dry-run by default) |
+| `hysa brain forget <query>` | Remove matching memory nodes (pinned nodes protected) |
+| `hysa brain merge <a> <b>` | Merge two memory nodes |
+| `hysa brain pin <query>` | Pin a memory node (protected from cleanup) |
+| `hysa local setup` | Show local provider setup instructions |
+| `hysa models <provider>` | View available models for a provider |
+| `hysa web` | Start the HYSA Web UI |
 
 ---
 
@@ -331,6 +364,10 @@ hysa doctor --provider puter
 | **Command approval** | Every shell command is shown — you approve before execution |
 | **Backup system** | Modified files are automatically backed up to `~/.hysa/backups/` |
 | **Ignore rules** | Respects `.gitignore` — never reads `node_modules`, `.env`, `.git`, `dist` |
+| **Pinned brain memories** | Pinned memories are never deleted by cleanup or forget commands |
+| **Dry-run cleanup** | `hysa brain cleanup` defaults to dry-run; add `--apply` to mutate |
+| **Secrets redacted** | API keys, tokens, and secrets are redacted from brain memory and session records |
+| **Token-bounded context** | Brain context injection respects per-task token budgets (800–3000 chars) |
 
 See [SECURITY.md](SECURITY.md) for details.
 
@@ -406,6 +443,74 @@ Commands are classified into three safety levels:
 - `git reset --hard`, `git clean`
 - `npm publish`, any command with `--force`
 - `Remove-Item` (PowerShell)
+
+---
+
+## Brain — Project Memory
+
+HYSA maintains a persistent **experience graph** (`.hysa/brain/`) that records decisions, lessons, provider events, and session outcomes. This memory survives across chat sessions and is automatically used to inject relevant context into new conversations.
+
+### How it works
+
+1. **Auto-learning** — decisions, lessons, and provider events are written to the graph as you work
+2. **Smart context injection** — on each chat message, relevant memories are scored by keyword relevance, importance, confidence, and recency, then injected within a per-task token budget
+3. **Memory quality scoring** — each node has `importance` (0–100) and `confidence` (0–100); pinned nodes are protected from cleanup
+4. **Fuzzy deduplication** — similar labels are detected via Jaccard similarity (threshold >0.4); duplicates are merged automatically
+5. **Pruning** — low-importance events (>30 days old, importance <30) are candidates for cleanup
+
+### CLI commands
+
+| Command | Description |
+|---------|-------------|
+| `hysa brain status` | Show brain directory status |
+| `hysa brain inspect` | Full memory quality report: nodes by kind, stale events, duplicate groups, top decisions/lessons |
+| `hysa brain cleanup` | Dry-run: show what would be pruned. Add `--apply` to execute |
+| `hysa brain forget <query>` | Remove matching nodes (pinned nodes are skipped) |
+| `hysa brain merge <a> <b>` | Merge two nodes (keeps highest confidence/importance) |
+| `hysa brain pin <query>` | Protect a node from cleanup (sets pinned, importance bumped to 80) |
+| `hysa brain recall <query>` | Search the experience graph for relevant memories |
+| `hysa brain note <text>` | Add a manual note |
+| `hysa brain lesson <title> <text>` | Add a lesson |
+| `hysa brain decision <title> <text>` | Add a decision |
+| `hysa brain graph stats` | Show graph statistics |
+| `hysa brain graph search <query>` | Search graph nodes and edges |
+
+### Safety
+
+- **Pinned nodes are never deleted** by cleanup or forget commands
+- **Dry-run by default** — `hysa brain cleanup` shows actions without mutating; add `--apply` to execute
+- **Secrets are redacted** before any memory is written or injected
+- **Token budgets** prevent context overflow (800 chars for simple chat, 2000 for code, 3000 for planning, 1500 for provider queries)
+
+---
+
+## Session Tracking
+
+HYSA tracks activity within a session: commands run, files read/edited, tools used, errors encountered, auto-fix attempts, provider fallbacks, and memories injected. At the end of a session, you can generate a summary and save important outcomes to Brain memory.
+
+### CLI commands
+
+| Command | Description |
+|---------|-------------|
+| `hysa session summary` | Show a human-readable session summary with duration, status, files, decisions, issues, and test/build status |
+| `hysa session save` | Auto-save important session outcomes to Brain (decisions as decision nodes, lessons as lesson nodes, session summary as lesson, provider fallbacks as provider events) |
+| `hysa session clear` | Reset the current session tracking state |
+
+### Auto-save behavior
+
+When you run `hysa session save`, the tracker:
+1. **Detects decisions** — events containing "decided" or "decision" keywords are saved as `decision` memory nodes
+2. **Detects lessons** — events containing "learned" or "lesson" keywords are saved as `lesson` memory nodes
+3. **Saves a session summary** — if files were changed or errors occurred, a `lesson` node is created with the full summary (files, commands, issues, test/build status)
+4. **Records provider fallbacks** — if fallbacks occurred, a `provider_failure` event is recorded
+5. **Skips trivial sessions** — sessions with no commands, files, or errors are not saved
+
+### Safety
+
+- **Secrets are redacted** from all event details before storage
+- **Summary is capped** at 4000 characters; longer summaries are truncated
+- **Raw command output is not saved** — only the command string and outcome
+- **File diffs are not saved** — only file paths are recorded
 
 ---
 

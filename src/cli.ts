@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { input, confirm, password, select } from '@inquirer/prompts';
 import pc from 'picocolors';
 import { execSync } from 'node:child_process';
-import { resolve, relative } from 'node:path';
+import { resolve, relative, normalize } from 'node:path';
 
 import { loadConfig, saveConfig, PROVIDER_DEFAULTS, PROVIDER_MODELS, PROVIDER_CATEGORIES, PROVIDER_CATEGORY_LABELS, PROVIDER_DESCRIPTIONS, PROVIDER_SIGNUP_URLS, TIER_LABELS, PROVIDER_TIERS, FREE_API_PROVIDERS, LOCAL_FREE_PROVIDERS, PREMIUM_API_PROVIDERS, EXPERIMENTAL_FREE_PROVIDERS, providerNeedsApiKey, providerHasOptionalApiKey, validateApiKey, getDefaultProviderFromEnv, isLocalFallbackEnabled } from './config/keys.js';
 import { detectBestProvider, buildConfigFromDetection, detectedProviderLabel } from './config/provider-detect.js';
@@ -22,18 +22,20 @@ import { estimateTokens, truncateMessages } from './context/tokens.js';
 import { buildSystemPrompt, resolvePromptMode } from './prompts/system.js';
 import type { PromptMode } from './prompts/system.js';
 import { isProtectedFilePath, PROTECTED_FILE_MESSAGE, normalizeToolParams, containsOnlyToolSyntax, hasToolSyntax, stripToolCallBlocks } from './ai/tools.js';
-import { readFile, resolveFileReadPath, isGeneratedOutput } from './files/reader.js';
-import { writeFileWithBackup, previewEdit } from './files/writer.js';
+import { readFile, resolveFileReadPath, isGeneratedOutput, isPathTraversal as isReadPathTraversal } from './files/reader.js';
+import { writeFileWithBackup, previewEdit, summarizeDiff } from './files/writer.js';
 import { Spinner } from './utils/spinner.js';
 import { detectSecrets } from './utils/secrets.js';
 import { getGitInfo, getCommitSuggestion } from './utils/git.js';
 import { addTask, addRecentFile, addEdit, incrementSessionCount, getYolo, setYolo, getProviderHealth, saveProviderHealth, clearProviderHealth, getLastProviderError, getUsage, recordPromptMode } from './utils/session.js';
 import { grepSearch, findFiles } from './utils/searcher.js';
+import { Timer } from './utils/timing.js';
 import { searchWeb, formatSearchResults, getWebSearchConfig, getSearchDiagnostics, isCapabilityQuestion, getCapabilityResponse } from './tools/web-search.js';
+import { shouldAutoFix, attemptAutoFix } from './tools/auto-fix.js';
 import { browserOpen, browserScreenshot, browserText, browserSnapshot, browserClick, browserType, browserClose, getBrowserStatus, checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig, cliBrowserOpen, cliBrowserScreenshot, cliBrowserText, cliBrowserSnapshot, cliBrowserClick, cliBrowserType, cliBrowserClose, cliBrowserStatus, getDaemonConfig } from './tools/browser.js';
 import type { BrowserSessionInfo } from './tools/browser.js';
 import { shouldSearchEntity } from './tools/entity-detector.js';
-import { classifyCommand } from './utils/commands.js';
+import { classifyCommand, withTimeout, formatCommandOutput } from './utils/commands.js';
 import type { AgentMode } from './agent/types.js';
 import { ALL_MODES, MODE_LABELS, MODE_DESCRIPTIONS } from './agent/modes.js';
 import { createTask, updateTask, loadTasks, getActiveTask } from './agent/tasks.js';
@@ -41,7 +43,8 @@ import { listSymbols, findReferences, searchImports, summarizeFile, explainFunct
 import { getAllHealth, toHealthSummary, resetHealth, getLastError, getLastFallbackUsed, getModelsInCooldown, getProviderCooldowns, getRateLimitedModels, getFallbackEvents, healthKey, loadHealthFromEntries, toHealthEntries } from './ai/model-health.js';
 import type { ErrorCategory } from './ai/model-health.js';
 import { listOllamaModels } from './ai/ollama.js';
-import { initBrainFiles, getBrainStatus, readRecentEvents, readProjectMap, appendBrainEvent, appendLesson, appendDecision, writeProjectMap, generateProjectMap, getGraphStats, searchGraph, compactGraph, readExperienceGraph, logLesson as graphLogLesson, logDecision as graphLogDecision, experienceGraphExists } from './brain/index.js';
+import { initBrainFiles, getBrainStatus, readRecentEvents, readProjectMap, appendBrainEvent, appendLesson, appendDecision, writeProjectMap, generateProjectMap, getGraphStats, searchGraph, compactGraph, readExperienceGraph, logLesson as graphLogLesson, logDecision as graphLogDecision, experienceGraphExists, buildRecallContext, formatRecallContext, detectRecallIntent, cleanupGraph, forgetNodes, mergeNodes, pinNode, unpinNode, getInspectReport, selectContext, formatSelectedContext } from './brain/index.js';
+import { writeMemoryFromText, writeAutoFixMemory, classifyMemoryText, containsMemoryTrigger } from './tools/memory-writer.js';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -322,6 +325,16 @@ function showHelp(agentMode?: AgentMode): void {
   console.log(pc.cyan('  /brain note <text>       Add a note to brain'));
   console.log(pc.cyan('  /brain graph             Show experience graph stats'));
   console.log(pc.cyan('  /brain graph search <q>  Search experience graph'));
+  console.log(pc.cyan('  /brain recall <query>    Recall project memory'));
+  console.log(pc.cyan('  /brain remember <text>   Save a decision or lesson'));
+  console.log(pc.cyan('  /brain lessons           Show recent lessons'));
+  console.log(pc.cyan('  /brain decisions          Show recent decisions'));
+  console.log(pc.cyan('  /brain providers          Show provider history'));
+  console.log(pc.cyan('  /brain inspect            Show memory quality report'));
+  console.log(pc.cyan('  /brain cleanup [--apply]  Prune low-value memories'));
+  console.log(pc.cyan('  /brain forget <query>     Remove matching memories'));
+  console.log(pc.cyan('  /brain merge <a> <b>      Merge two memories'));
+  console.log(pc.cyan('  /brain pin <query>        Protect memory from cleanup'));
 
   if (agentMode && agentMode !== 'chat') {
     console.log(pc.dim(`\n  Active mode: ${MODE_LABELS[agentMode]}`));
@@ -526,223 +539,257 @@ async function handleToolCall(
   toolCall: ToolCall,
   yolo = false,
   debug = false,
+  toolTimer?: Timer,
+  projectRoot: string = resolve('.'),
 ): Promise<string> {
   const { type } = toolCall;
   const params = normalizeToolParams(toolCall.params);
+  toolTimer?.start(`tool.${type}.validate`);
+
+  // Common path traversal check
+  const filePath = params.filePath;
+  if (filePath && (type === 'read_file' || type === 'edit_file' || type === 'summarize_file' || type === 'explain_function')) {
+    if (isReadPathTraversal(filePath, projectRoot)) {
+      if (debug) console.log(pc.dim(`  [debug] blocked path traversal: ${filePath}`));
+      return `Error: path traversal blocked — ${filePath} is outside the project root.`;
+    }
+  }
+
+  toolTimer?.stop(`tool.${type}.validate`);
+  toolTimer?.start(`tool.${type}.execute`);
+
+  const runWithTimeout = <T>(fn: () => Promise<T>, label: string, timeoutMs: number): Promise<T> => {
+    return withTimeout(fn(), timeoutMs || 15000, label);
+  };
 
   switch (type) {
     case 'read_file': {
-      const filePath = params.filePath;
-      if (!filePath) return 'Error: missing filePath parameter';
+      return await runWithTimeout(async () => {
+        if (!filePath) return 'Error: missing filePath parameter';
 
-      const spinner = new Spinner();
-      spinner.start('Searching...');
-      const pathsToTry = resolveFileReadPath(filePath);
+        const spinner = new Spinner();
+        spinner.start('Searching...');
+        const pathsToTry = resolveFileReadPath(filePath);
 
-      let foundPath = '';
-      let content: string | null = null;
-      for (const tryPath of pathsToTry) {
-        content = readFile(tryPath);
-        if (content !== null) {
-          foundPath = tryPath;
-          break;
+        let foundPath = '';
+        let content: string | null = null;
+        for (const tryPath of pathsToTry) {
+          content = readFile(tryPath);
+          if (content !== null) {
+            foundPath = tryPath;
+            break;
+          }
         }
-      }
 
-      if (content === null) {
-        spinner.fail(`ERR  File not found: ${filePath}`);
-        return `Error: file not found: ${filePath}`;
-      }
+        if (content === null) {
+          spinner.fail(`ERR  File not found: ${filePath}`);
+          return `Error: file not found: ${filePath}`;
+        }
 
-      const secrets = detectSecrets(content);
-      if (secrets.length > 0) {
-        spinner.fail(`ERR  ${secrets.length} potential secret(s) detected in ${foundPath}!`);
-        return `Blocked: ${foundPath} contains potential secrets.`;
-      }
+        const secrets = detectSecrets(content);
+        if (secrets.length > 0) {
+          spinner.fail(`ERR  ${secrets.length} potential secret(s) detected in ${foundPath}!`);
+          return `Blocked: ${foundPath} contains potential secrets.`;
+        }
 
-      if (foundPath !== filePath) {
-        spinner.succeed(`OK   Read ${foundPath} (auto-resolved)`);
-      } else {
-        spinner.succeed(`OK   Read ${filePath} (${content.split('\n').length} lines)`);
-      }
-      addRecentFile(foundPath);
-      return `Content of ${foundPath}:\n\`\`\`\n${content}\n\`\`\``;
+        if (foundPath !== filePath) {
+          spinner.succeed(`OK   Read ${foundPath} (auto-resolved)`);
+        } else {
+          spinner.succeed(`OK   Read ${filePath} (${content.split('\n').length} lines)`);
+        }
+        addRecentFile(foundPath);
+        return `Content of ${foundPath}:\n\`\`\`\n${content}\n\`\`\``;
+      }, `tool read_file`, 15000);
     }
 
     case 'edit_file': {
-      const filePath = params.filePath;
-      const newContent = params.newContent;
-      if (!filePath || !newContent) return 'Error: missing filePath or newContent parameter';
+      return await runWithTimeout(async () => {
+        const newContent = params.newContent;
+        if (!filePath || !newContent) return 'Error: missing filePath or newContent parameter';
 
-      // Absolute .env and protected file protection (applies in ALL modes, including YOLO)
-      if (isProtectedFilePath(filePath)) {
-        if (debug) console.log(pc.dim(`  [debug] blocked protected file edit: ${filePath}`));
-        return PROTECTED_FILE_MESSAGE;
-      }
+        // Absolute .env and protected file protection (applies in ALL modes, including YOLO)
+        if (isProtectedFilePath(filePath)) {
+          if (debug) console.log(pc.dim(`  [debug] blocked protected file edit: ${filePath}`));
+          return PROTECTED_FILE_MESSAGE;
+        }
 
-      // Block edits to generated output (dist, build, etc.) unless YOLO
-      if (isGeneratedOutput(filePath) && !yolo) {
-        return `Edit blocked: ${filePath} is in a generated output directory (dist, build, etc.). To edit generated files enable YOLO mode.`;
-      }
+        // Block edits to generated output (dist, build, etc.) unless YOLO
+        if (isGeneratedOutput(filePath) && !yolo) {
+          return `Edit blocked: ${filePath} is in a generated output directory (dist, build, etc.). To edit generated files enable YOLO mode.`;
+        }
 
-      const spinner = new Spinner();
-      spinner.start(`EDIT ${filePath}`);
+        const spinner = new Spinner();
+        spinner.start(`EDIT ${filePath}`);
 
-      const diff = previewEdit(filePath, newContent);
-      if (diff === null) {
-        spinner.succeed('OK   No changes needed');
-        return `No changes needed for ${filePath}`;
-      }
+        const diff = previewEdit(filePath, newContent);
+        if (diff === null) {
+          spinner.succeed('OK   No changes needed');
+          return `No changes needed for ${filePath}`;
+        }
 
-      spinner.stop();
-      console.log(`\nProposed edit: ${filePath}`);
-      console.log(formatDiff(diff));
+        spinner.stop();
+        const summary = summarizeDiff(diff);
+        console.log(`\nProposed edit: ${filePath}`);
+        console.log(formatDiff(diff));
+        console.log(pc.dim(`  Summary: +${summary.additions} -${summary.deletions} across ${summary.hunks} hunk(s)`));
 
-      if (yolo) {
+        if (yolo) {
+          writeFileWithBackup(filePath, newContent);
+          invalidateCache();
+          console.log(`OK   Applied edit to ${filePath}\n`);
+          addEdit({ file: filePath, timestamp: new Date().toISOString(), summary: `Edited ${filePath}` });
+          return `Edit applied successfully to ${filePath}`;
+        }
+
+        const approved = await confirm({ message: 'Apply this edit?', default: true });
+        if (!approved) {
+          console.log(`ERR  Edit rejected`);
+          return `Edit rejected by user for ${filePath}`;
+        }
+
         writeFileWithBackup(filePath, newContent);
         invalidateCache();
         console.log(`OK   Applied edit to ${filePath}\n`);
+
         addEdit({ file: filePath, timestamp: new Date().toISOString(), summary: `Edited ${filePath}` });
         return `Edit applied successfully to ${filePath}`;
-      }
-
-      const approved = await confirm({ message: 'Apply this edit?', default: true });
-      if (!approved) {
-        console.log(`ERR  Edit rejected`);
-        return `Edit rejected by user for ${filePath}`;
-      }
-
-      writeFileWithBackup(filePath, newContent);
-      invalidateCache();
-      console.log(`OK   Applied edit to ${filePath}\n`);
-
-      addEdit({ file: filePath, timestamp: new Date().toISOString(), summary: `Edited ${filePath}` });
-      return `Edit applied successfully to ${filePath}`;
+      }, `tool edit_file`, 15000);
     }
 
     case 'execute_command': {
-      const command = params.command;
-      if (!command) return 'Error: missing command parameter';
+      return await runWithTimeout(async () => {
+        const command = params.command;
+        if (!command) return 'Error: missing command parameter';
 
-      const safety = classifyCommand(command);
-      console.log(`\nRUN   ${command}`);
+        const safety = classifyCommand(command);
+        console.log(`\nRUN   ${command}`);
 
-      if (safety === 'dangerous') {
-        console.log('  WARN: Dangerous command detected');
-        const approved = await confirm({ message: 'Are you SURE you want to run this?', default: false });
-        if (!approved) {
-          console.log('ERR  Command rejected (dangerous)\n');
-          return `Blocked: dangerous command rejected by user: ${command}`;
+        if (safety === 'dangerous') {
+          console.log('  WARN: Dangerous command detected');
+          const approved = await confirm({ message: 'Are you SURE you want to run this?', default: false });
+          if (!approved) {
+            console.log('ERR  Command rejected (dangerous)\n');
+            return `Blocked: dangerous command rejected by user: ${command}`;
+          }
+          console.log('  Running dangerous command...\n');
+        } else if (yolo && safety === 'safe') {
+          console.log('  YOLO: Running safe command...\n');
+        } else if (yolo && safety === 'caution') {
+          console.log('  Caution command detected.');
+          const approved = await confirm({ message: 'Run this command?', default: true });
+          if (!approved) {
+            console.log('ERR  Command rejected\n');
+            return `Command execution rejected by user: ${command}`;
+          }
+        } else {
+          const approved = await confirm({ message: 'Run this command?', default: safety === 'safe' });
+          if (!approved) {
+            console.log('ERR  Command rejected');
+            return `Command execution rejected by user: ${command}`;
+          }
         }
-        console.log('  Running dangerous command...\n');
-      } else if (yolo && safety === 'safe') {
-        console.log('  YOLO: Running safe command...\n');
-      } else if (yolo && safety === 'caution') {
-        console.log('  Caution command detected.');
-        const approved = await confirm({ message: 'Run this command?', default: true });
-        if (!approved) {
-          console.log('ERR  Command rejected\n');
-          return `Command execution rejected by user: ${command}`;
-        }
-      } else {
-        const approved = await confirm({ message: 'Run this command?', default: safety === 'safe' });
-        if (!approved) {
-          console.log('ERR  Command rejected');
-          return `Command execution rejected by user: ${command}`;
-        }
-      }
 
-      const spinner = new Spinner();
-      spinner.start('RUN   (running...)');
-      try {
-        const result = runCommandSync(command);
-        spinner.succeed('OK    Command completed');
-        if (result.stdout.trim()) {
-          console.log(result.stdout);
+        const spinner = new Spinner();
+        spinner.start('RUN   (running...)');
+        try {
+          const result = runCommandSync(command);
+          const formatted = formatCommandOutput(result.stdout, 80);
+          spinner.succeed('OK    Command completed');
+          if (formatted.trim()) {
+            console.log(formatted);
+          }
+          return `Command executed successfully:\n${result.stdout}`;
+        } catch (error: unknown) {
+          const err = error as Error;
+          spinner.fail('ERR   Command failed');
+          const msg = err.message || 'Unknown error';
+          const truncated = msg.length > 2000 ? msg.slice(0, 2000) + '\n...(truncated)' : msg;
+          console.log(truncated);
+          return `Command failed:\n${truncated}`;
         }
-        return `Command executed successfully:\n${result.stdout}`;
-      } catch (error: unknown) {
-        const err = error as Error;
-        spinner.fail('ERR   Command failed');
-        const msg = err.message || 'Unknown error';
-        console.log(msg);
-        return `Command failed:\n${msg}`;
-      }
+      }, `tool execute_command`, 45000);
     }
 
     case 'list_symbols': {
-      const filePath = params.filePath;
-      if (!filePath) return 'Error: missing filePath parameter';
-      const spinner = new Spinner();
-      spinner.start(`SYMS ${filePath}`);
-      const symbols = listSymbols(filePath);
-      if (symbols.length === 0) {
-        spinner.fail('ERR  No symbols found');
-        return `No symbols found in ${filePath}`;
-      }
-      spinner.succeed(`OK   Found ${symbols.length} symbols`);
-      const result = symbols.map(s => `  ${s.type} ${s.name} (line ${s.line})`).join('\n');
-      return `Symbols in ${filePath}:\n${result}`;
+      return await runWithTimeout(async () => {
+        if (!filePath) return 'Error: missing filePath parameter';
+        const spinner = new Spinner();
+        spinner.start(`SYMS ${filePath}`);
+        const symbols = listSymbols(filePath);
+        if (symbols.length === 0) {
+          spinner.fail('ERR  No symbols found');
+          return `No symbols found in ${filePath}`;
+        }
+        spinner.succeed(`OK   Found ${symbols.length} symbols`);
+        const result = symbols.map(s => `  ${s.type} ${s.name} (line ${s.line})`).join('\n');
+        return `Symbols in ${filePath}:\n${result}`;
+      }, `tool list_symbols`, 15000);
     }
 
     case 'find_references': {
-      const symbol = params.symbol;
-      if (!symbol) return 'Error: missing symbol parameter';
-      const spinner = new Spinner();
-      spinner.start(`REFS ${symbol}`);
-      const refs = findReferences(resolve('.'), symbol);
-      if (refs.length === 0) {
-        spinner.fail('ERR  No references found');
-        return `No references found for "${symbol}"`;
-      }
-      spinner.succeed(`OK   Found ${refs.length} references`);
-      const result = refs.slice(0, 20).map(r => `  ${r.file}:${r.line}  ${r.content}`).join('\n');
-      const extra = refs.length > 20 ? `\n  ... and ${refs.length - 20} more` : '';
-      return `References to "${symbol}":\n${result}${extra}`;
+      return await runWithTimeout(async () => {
+        const symbol = params.symbol;
+        if (!symbol) return 'Error: missing symbol parameter';
+        const spinner = new Spinner();
+        spinner.start(`REFS ${symbol}`);
+        const refs = findReferences(resolve('.'), symbol);
+        if (refs.length === 0) {
+          spinner.fail('ERR  No references found');
+          return `No references found for "${symbol}"`;
+        }
+        spinner.succeed(`OK   Found ${refs.length} references`);
+        const result = refs.slice(0, 20).map(r => `  ${r.file}:${r.line}  ${r.content}`).join('\n');
+        const extra = refs.length > 20 ? `\n  ... and ${refs.length - 20} more` : '';
+        return `References to "${symbol}":\n${result}${extra}`;
+      }, `tool find_references`, 15000);
     }
 
     case 'search_imports': {
-      const mod = params.module;
-      if (!mod) return 'Error: missing module parameter';
-      const spinner = new Spinner();
-      spinner.start(`📦 Searching imports: ${mod}`);
-      const imports = searchImports(resolve('.'), mod);
-      if (imports.length === 0) {
-        spinner.fail('No imports found');
-        return `No imports found for "${mod}"`;
-      }
-      spinner.succeed(`Found ${imports.length} imports`);
-      const result = imports.map(r => `  ${r.file}:${r.line}  ${r.content}`).join('\n');
-      return `Files importing "${mod}":\n${result}`;
+      return await runWithTimeout(async () => {
+        const mod = params.module;
+        if (!mod) return 'Error: missing module parameter';
+        const spinner = new Spinner();
+        spinner.start(`📦 Searching imports: ${mod}`);
+        const imports = searchImports(resolve('.'), mod);
+        if (imports.length === 0) {
+          spinner.fail('No imports found');
+          return `No imports found for "${mod}"`;
+        }
+        spinner.succeed(`Found ${imports.length} imports`);
+        const result = imports.map(r => `  ${r.file}:${r.line}  ${r.content}`).join('\n');
+        return `Files importing "${mod}":\n${result}`;
+      }, `tool search_imports`, 15000);
     }
 
     case 'summarize_file': {
-      const filePath = params.filePath;
-      if (!filePath) return 'Error: missing filePath parameter';
-      const spinner = new Spinner();
-      spinner.start(`📋 Summarizing: ${filePath}`);
-      const summary = summarizeFile(filePath);
-      if (summary.startsWith('File not found')) {
-        spinner.fail('File not found');
+      return await runWithTimeout(async () => {
+        if (!filePath) return 'Error: missing filePath parameter';
+        const spinner = new Spinner();
+        spinner.start(`📋 Summarizing: ${filePath}`);
+        const summary = summarizeFile(filePath);
+        if (summary.startsWith('File not found')) {
+          spinner.fail('File not found');
+          return summary;
+        }
+        spinner.succeed('Summary complete');
         return summary;
-      }
-      spinner.succeed('Summary complete');
-      return summary;
+      }, `tool summarize_file`, 15000);
     }
 
     case 'explain_function': {
-      const filePath = params.filePath;
-      const functionName = params.functionName;
-      if (!filePath || !functionName) return 'Error: missing filePath or functionName parameter';
-      const spinner = new Spinner();
-      spinner.start(`📖 Explaining: ${functionName} in ${filePath}`);
-      const explanation = explainFunction(filePath, functionName);
-      if (explanation.includes('not found')) {
-        spinner.fail('Function not found');
+      return await runWithTimeout(async () => {
+        const functionName = params.functionName;
+        if (!filePath || !functionName) return 'Error: missing filePath or functionName parameter';
+        const spinner = new Spinner();
+        spinner.start(`📖 Explaining: ${functionName} in ${filePath}`);
+        const explanation = explainFunction(filePath, functionName);
+        if (explanation.includes('not found')) {
+          spinner.fail('Function not found');
+          return explanation;
+        }
+        spinner.succeed('Function found');
         return explanation;
-      }
-      spinner.succeed('Function found');
-      return explanation;
+      }, `tool explain_function`, 15000);
     }
 
     default:
@@ -954,7 +1001,7 @@ async function printFallbackStatus(config: HysaConfig | null): Promise<void> {
   console.log();
 }
 
-async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise<void> {
+async function chatLoop(initialConfig: HysaConfig, initialYolo = false, debugTiming = false): Promise<void> {
   let config = initialConfig;
   let yoloMode = initialYolo;
   let client: AIClient;
@@ -1894,6 +1941,25 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       continue;
     }
 
+    if (trimmed.toLowerCase().startsWith('/brain recall ')) {
+      const query = trimmed.slice('/brain recall '.length).trim();
+      if (query) {
+        try {
+          const recallCtx = await buildRecallContext(query);
+          if (!recallCtx) {
+            console.log(pc.dim(`\n  No relevant memory for "${query}".\n`));
+          } else {
+            console.log(pc.bold(pc.magenta(`\n🧠 "${query}"\n`)));
+            console.log(`  ${recallCtx.summary.slice(0, 500)}`);
+            console.log();
+          }
+        } catch {
+          console.log(pc.yellow('\n  Recall failed.\n'));
+        }
+      }
+      continue;
+    }
+
     function checkPendingEditProtected(): boolean {
       if (pendingEdit && isProtectedFilePath(pendingEdit.filePath)) {
         if (config.debug) console.log(pc.dim(`  [debug] blocked protected file pending edit: ${pendingEdit.filePath}`));
@@ -2041,11 +2107,27 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       continue;
     }
 
+    // ── Keyword-triggered memory write ─────────────
+    if (!trimmed.startsWith('/') && containsMemoryTrigger(trimmed)) {
+      const memResult = await writeMemoryFromText(trimmed);
+      if (memResult) {
+        console.log(pc.dim(`  🧠 Auto-saved ${memResult.kind}: ${memResult.title.slice(0, 60)}`));
+      }
+    }
+
     // ── AI message ──────────────────────────────────
     if (!trimmed) continue;
 
+    // Timing
+    const timer = debugTiming ? new Timer() : null;
+    timer?.start('full_request');
+
     // Track the task in session
     addTask(trimmed);
+
+    // ── Fast path for short/simple messages ─────────
+    const trimmedWords = trimmed.split(/\s+/).filter(Boolean);
+    const isShortMsg = trimmedWords.length <= 3;
 
     // ── Capability question detection ──────────────
     if (isCapabilityQuestion(trimmed)) {
@@ -2057,7 +2139,9 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     }
 
     // ── Detect question type and rebuild prompt ─────
+    timer?.start('task_classification');
     const taskKind = classifyTask([{ role: 'user', content: trimmed }]);
+    timer?.stop('task_classification');
     const injectProjectContext = shouldInjectProjectContext(trimmed, taskKind);
     const isSimpleQ = isSimpleQuestion(trimmed) || taskKind === 'simple_chat';
     const resolvedMode = resolvePromptMode(
@@ -2141,7 +2225,10 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     }
 
     // ── Entity detection for unknown names/handles ─────
-    if (!searchQuery && taskKind !== 'simple_chat') {
+    // Fast path: skip for short messages that don't look like entity queries
+    timer?.start('entity_detection');
+    const shouldSkipEntity = isShortMsg && !/^@|who\s+is|what\s+is|من\s+هو|من\s+هذه/.test(trimmed);
+    if (!shouldSkipEntity && !searchQuery && taskKind !== 'simple_chat') {
       const entityResult = shouldSearchEntity(trimmed, previousUserMessage);
       if (entityResult.shouldSearch && entityResult.query) {
         searchQuery = entityResult.query;
@@ -2173,8 +2260,36 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
         }
       }
     }
+    timer?.stop('entity_detection');
+
+    // ── Smart context injection ────────────────────
+    // Replace broad recall with scored selection by complexity + relevance
+    timer?.start('brain_recall');
+    if (!isSimpleQ && !searchQuery && !isOnlyGreeting(trimmed)) {
+      try {
+        const selected = await selectContext({
+          message: trimmed,
+          taskKind,
+          maxItems: 5,
+          debug: !!config.debug,
+        });
+        if (selected.items.length > 0) {
+          const ctxStr = formatSelectedContext(selected);
+          systemPrompt += ctxStr;
+          if (config.debug) {
+            console.log(pc.dim(`  [debug] Context injection: ${selected.items.length} items (${selected.totalChars}/${selected.budget} chars)`));
+            console.log(pc.dim(`  [debug] ${selected.debugExplanation.split('\n').slice(1).join('\n  [debug] ')}`));
+          }
+        } else if (config.debug) {
+          console.log(pc.dim(`  [debug] Context injection: no items selected (budget=${selected.budget})`));
+          console.log(pc.dim(`  [debug] ${selected.debugExplanation.split('\n').slice(1).join('\n  [debug] ')}`));
+        }
+      } catch { /* context not available — skip */ }
+    }
+    timer?.stop('brain_recall');
 
     const contextStartTime = Date.now();
+    timer?.start('context_injection');
 
     // Build context and messages
     // For explicit search commands, don't include the raw command — only search results
@@ -2249,6 +2364,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
 
     const currentTokens = allMessages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
     const contextBuildTime = Date.now() - contextStartTime;
+    timer?.stop('context_injection');
 
     // Debug: show prompt size info
     if (config.debug) {
@@ -2266,6 +2382,8 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
     }
 
     const requestStart = Date.now();
+    timer?.start('provider_selection');
+    timer?.start('model_call');
     thinkingCancelled = false;
     const provLabel = PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider;
 
@@ -2325,7 +2443,11 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
           const spinnerTools = new Spinner();
           spinnerTools.start('Executing tools...');
           for (const toolCall of result.toolCalls) {
-            await handleToolCall(toolCall, yoloMode, !!config.debug);
+            const toolTimer = timer ? new Timer() : undefined;
+            await handleToolCall(toolCall, yoloMode, !!config.debug, toolTimer, workingDir);
+            if (debugTiming && toolTimer) {
+              console.log(pc.dim(toolTimer.table(`tool.${toolCall.type}`)));
+            }
           }
           spinnerTools.succeed('Tools executed');
         }
@@ -2347,6 +2469,14 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
           console.log(pc.red(`\n  ${e.message || 'Stream error'}\n`));
         }
         lastResponse = null;
+      }
+
+      // Timing table for streaming path
+      timer?.stop('model_call');
+      timer?.stop('full_request');
+      if (debugTiming && timer) {
+        console.log(pc.dim(`\n  ⏱ Timing breakdown:`));
+        console.log(pc.dim(timer.table('chat')));
       }
 
       // Cleanup
@@ -2522,8 +2652,48 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       spinner.stop();
       const toolResults: string[] = [];
       for (const toolCall of response.toolCalls) {
-        const result = await handleToolCall(toolCall, yoloMode, !!config.debug);
+        const toolTimer = timer ? new Timer() : undefined;
+        const result = await handleToolCall(toolCall, yoloMode, !!config.debug, toolTimer, workingDir);
+        if (debugTiming && toolTimer) {
+          console.log(pc.dim(toolTimer.table(`tool.${toolCall.type}`)));
+        }
         toolResults.push(result);
+        // Auto-fix attempt for error results
+        if (shouldAutoFix(result, toolCall.type, taskKind)) {
+          const autoFixState = { attempts: 0, lastErrorHash: '' };
+          while (autoFixState.attempts < 2) {
+            autoFixState.attempts++;
+            console.log(pc.yellow(`\n  ⚡ Auto-fix attempt ${autoFixState.attempts}/2`));
+            const fixResult = await attemptAutoFix(
+              result, toolCall, client, workingDir, trimmed,
+              autoFixState, runCommandSync, !!config.debug,
+            );
+            if (fixResult.debugLog.length > 0 && config.debug) {
+              for (const log of fixResult.debugLog) {
+                console.log(pc.dim(`  [auto-fix] ${log}`));
+              }
+            }
+            if (fixResult.fixed) {
+              console.log(pc.green(`  ✓ Auto-fixed: ${fixResult.errorType} — ${fixResult.filesTouched.join(', ')}`));
+              toolResults[toolResults.length - 1] = fixResult.newResult!;
+              // Save to persistent memory
+              writeAutoFixMemory(fixResult, trimmed).catch(() => {});
+              // If there was a rerun, print its output
+              if (fixResult.newResult!.startsWith('Command executed successfully:')) {
+                console.log(pc.dim(`  Rerun output: ${fixResult.newResult!.slice(0, 300)}`));
+              }
+              break;
+            } else {
+              console.log(pc.red(`  ✗ Auto-fix attempt ${autoFixState.attempts} failed`));
+              autoFixState.lastErrorHash = fixResult.debugLog.join('|');
+              // Save failed auto-fix to persistent memory
+              if (autoFixState.attempts >= 2) {
+                console.log(pc.yellow(`  Max attempts reached. Stopping auto-fix.`));
+                writeAutoFixMemory(fixResult, trimmed).catch(() => {});
+              }
+            }
+          }
+        }
       }
 
       // Stop loop after successful edit - don't continue analyzing
@@ -2616,6 +2786,8 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       }
     }
 
+    timer?.stop('model_call');
+
     // Debug: request timing info
     if (config.debug && lastResponse) {
       const totalElapsed = ((Date.now() - requestStart) / 1000).toFixed(1);
@@ -2623,6 +2795,13 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false): Promise
       if (steps > 1) {
         console.log(pc.dim(`  [debug] Multi-step tools: ${steps} steps`));
       }
+    }
+
+    // Timing table
+    timer?.stop('full_request');
+    if (debugTiming && timer) {
+      console.log(pc.dim(`\n  ⏱ Timing breakdown:`));
+      console.log(pc.dim(timer.table('chat')));
     }
 
     previousUserMessage = trimmed;
@@ -2644,7 +2823,8 @@ export async function start(): Promise<void> {
     .description('Start an interactive chat with the AI')
     .option('-y, --yolo', 'Enable YOLO mode (auto-apply edits, skip confirmations for safe commands)')
     .option('-p, --provider <name>', 'Provider to use (overrides config)')
-    .action(async (opts: { yolo?: boolean; provider?: string }) => {
+    .option('--debug-timing', 'Show detailed timing breakdown for each request')
+    .action(async (opts: { yolo?: boolean; provider?: string; debugTiming?: boolean }) => {
       let config = getSettings();
       if (opts.provider) {
         const provider = opts.provider as ProviderType;
@@ -2692,7 +2872,8 @@ export async function start(): Promise<void> {
         }
       }
       const yolo = opts.yolo ?? getYolo();
-      await chatLoop(config, yolo);
+      const debugTiming = opts.debugTiming ?? false;
+      await chatLoop(config, yolo, debugTiming);
     });
 
   program
@@ -3244,6 +3425,104 @@ export async function start(): Promise<void> {
       console.log(pc.dim('\n  Note: Quota/rate limits are provider-side, not related to context tokens.\n'));
     });
 
+    // ── Session Commands ──────────────────────────────────
+
+    const sessionCmd = program.command('session').description('Session tracking — record, summarize, and save session activity');
+
+    sessionCmd
+      .command('summary')
+      .description('Show a summary of the current session')
+      .action(async () => {
+        try {
+          const { generateSummary, formatSummaryForChat } = await import('./brain/session-tracker.js');
+          const summary = await generateSummary();
+          console.log(pc.bold(pc.magenta('\n📋 Session Summary\n')));
+          console.log(`  Session:    ${summary.sessionId}`);
+          console.log(`  Duration:   ${summary.duration}`);
+          console.log(`  Status:     ${summary.finalStatus}`);
+          console.log();
+          if (summary.commandsRun.length > 0) {
+            console.log(`  ${pc.bold('Commands')} (${summary.commandsRun.length}):`);
+            for (const c of summary.commandsRun) console.log(`    ${pc.dim('$')} ${c}`);
+            console.log();
+          }
+          if (summary.filesChanged.length > 0) {
+            console.log(`  ${pc.bold('Files Changed')} (${summary.filesChanged.length}):`);
+            for (const f of summary.filesChanged) console.log(`    ${f}`);
+            console.log();
+          }
+          if (summary.decisionsMade.length > 0) {
+            console.log(`  ${pc.bold('Decisions')}:`);
+            for (const d of summary.decisionsMade) console.log(`    ${d}`);
+            console.log();
+          }
+          if (summary.lessonsLearned.length > 0) {
+            console.log(`  ${pc.bold('Lessons')}:`);
+            for (const l of summary.lessonsLearned) console.log(`    ${l}`);
+            console.log();
+          }
+          if (summary.unresolvedIssues.length > 0) {
+            console.log(`  ${pc.yellow(pc.bold('Unresolved Issues'))}:`);
+            for (const i of summary.unresolvedIssues) console.log(`    ${i}`);
+            console.log();
+          }
+          console.log(`  ${pc.bold('Build/Tests:')}     ${summary.testsBuildStatus}`);
+          console.log(`  ${pc.bold('Auto-fix:')}       ${summary.autoFixAttempts} attempts`);
+          console.log(`  ${pc.bold('Provider:' )}       ${summary.providerFallbacks} fallbacks`);
+          console.log(`  ${pc.bold('Memories:')}       ${summary.memoriesSaved} injected`);
+          console.log(`  ${pc.dim('Summary size:')}   ${summary.charCount} chars`);
+          if (summary.charCount > 3500) {
+            console.log(`  ${pc.yellow('⚠ Large summary, may be truncated on save')}`);
+          }
+          console.log();
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    sessionCmd
+      .command('clear')
+      .description('Clear the current session tracking state')
+      .action(async () => {
+        try {
+          const st = await import('./brain/session-tracker.js');
+          const session = await st.loadSession();
+          const eventCount = session?.events.length ?? 0;
+          await st.clearSession();
+          console.log(pc.green(`\n✓ Session cleared (${eventCount} events discarded)\n`));
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    sessionCmd
+      .command('save')
+      .description('Save important session outcomes to Brain memory')
+      .action(async () => {
+        try {
+          const st = await import('./brain/session-tracker.js');
+          // Use loadSession to count events without creating a new session
+          const session = await st.loadSession();
+          const eventCount = session?.events.length ?? 0;
+
+          const result = await st.saveSessionToBrain();
+
+          if (result.skipped) {
+            console.log(pc.yellow(`\n⚠ Session not saved: ${result.reason || 'trivial session'}\n`));
+            return;
+          }
+
+          const summary = await st.generateSummary();
+          console.log(pc.green(`\n✓ Saved ${result.saved} memory node(s) to Brain\n`));
+          console.log(`  ${pc.dim(`Events: ${eventCount} | Memory writes: ${result.saved} | Summary: ${summary.charCount} chars`)}`);
+          console.log();
+          console.log(`  ${pc.dim('Try:')} ${pc.cyan('hysa brain recall "what happened last session?"')}`);
+          console.log();
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
     // ── Brain Commands ──────────────────────────────────
 
     const brainCmd = program.command('brain').description('Project brain — local project memory and experience logging');
@@ -3367,6 +3646,313 @@ export async function start(): Promise<void> {
           await appendDecision(title, text, ['decision']);
           await graphLogDecision(title, text).catch(() => {});
           console.log(pc.green('✓ Decision saved.\n'));
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    // ── Persistent Memory Commands ──────────────────────
+
+    brainCmd
+      .command('remember')
+      .description('Save a decision or lesson to persistent memory')
+      .argument('<text>', 'What to remember ("we decided X", "lesson: Y", or plain text)')
+      .action(async (text: string) => {
+        try {
+          const result = await writeMemoryFromText(text);
+          if (!result) {
+            console.log(pc.yellow('\n  Could not classify memory. Try "we decided ..." or "lesson: ..."\n'));
+            return;
+          }
+          console.log(pc.green(`\n✓ ${result.kind} saved: ${result.title}\n`));
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    brainCmd
+      .command('lessons')
+      .description('Show recent lessons')
+      .action(async () => {
+        try {
+          const graph = await readExperienceGraph();
+          const lessons = graph.nodes
+            .filter(n => n.kind === 'lesson')
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+            .slice(0, 15);
+          if (lessons.length === 0) {
+            console.log(pc.dim('\n  No lessons recorded yet.\n'));
+            return;
+          }
+          console.log(pc.bold(pc.magenta('\n📚 Lessons Learned\n')));
+          for (const l of lessons) {
+            const date = new Date(l.createdAt).toLocaleDateString();
+            console.log(`  ${pc.dim(date)} ${pc.cyan(l.label.slice(0, 70))}`);
+            if (l.summary && l.summary !== l.label) {
+              console.log(`    ${pc.dim(l.summary.slice(0, 120))}`);
+            }
+            if (l.tags && l.tags.length > 0) {
+              console.log(`    ${pc.dim('tags: ' + l.tags.join(', '))}`);
+            }
+            console.log();
+          }
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    brainCmd
+      .command('decisions')
+      .description('Show recent decisions')
+      .action(async () => {
+        try {
+          const graph = await readExperienceGraph();
+          const decisions = graph.nodes
+            .filter(n => n.kind === 'decision')
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+            .slice(0, 15);
+          if (decisions.length === 0) {
+            console.log(pc.dim('\n  No decisions recorded yet.\n'));
+            return;
+          }
+          console.log(pc.bold(pc.magenta('\n📝 Design Decisions\n')));
+          for (const d of decisions) {
+            const date = new Date(d.createdAt).toLocaleDateString();
+            console.log(`  ${pc.dim(date)} ${pc.cyan(d.label.slice(0, 70))}`);
+            if (d.summary && d.summary !== d.label) {
+              console.log(`    ${pc.dim(d.summary.slice(0, 120))}`);
+            }
+            if (d.tags && d.tags.length > 0) {
+              console.log(`    ${pc.dim('tags: ' + d.tags.join(', '))}`);
+            }
+            console.log();
+          }
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    brainCmd
+      .command('providers')
+      .description('Show provider history')
+      .action(async () => {
+        try {
+          const graph = await readExperienceGraph();
+          const providers = graph.nodes
+            .filter(n => n.kind === 'provider' || n.kind === 'event')
+            .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+            .slice(0, 20);
+          if (providers.length === 0) {
+            console.log(pc.dim('\n  No provider history recorded yet.\n'));
+            return;
+          }
+          console.log(pc.bold(pc.magenta('\n📡 Provider History\n')));
+          for (const p of providers) {
+            const date = new Date(p.createdAt).toLocaleDateString();
+            const marker = p.kind === 'provider' ? pc.green('●') : pc.cyan('◆');
+            const status = p.label.includes('succeeded') ? pc.green('✓') : p.label.includes('failed') ? pc.red('✗') : '';
+            console.log(`  ${marker} ${pc.dim(date)} ${p.kind.padEnd(10)} ${status} ${p.label.slice(0, 70)}`);
+            if (p.summary && p.summary !== p.label) {
+              console.log(`    ${pc.dim(p.summary.slice(0, 120))}`);
+            }
+          }
+          console.log();
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    // ── Inspect ─────────────────────────────────────────
+
+    brainCmd
+      .command('inspect')
+      .description('Show memory quality report: counts, duplicates, stale events')
+      .action(async () => {
+        try {
+          const report = await getInspectReport();
+          console.log(pc.bold(pc.magenta('\n🔍 Brain Inspect\n')));
+          console.log(`  Total nodes:   ${report.totalNodes}`);
+          console.log(`  Total edges:   ${report.totalEdges}`);
+          console.log(`  Pinned:        ${report.pinned}`);
+          console.log(`  Stale events:  ${report.staleEvents}`);
+          console.log(`  Low importance: ${report.lowImportanceNodes}`);
+
+          console.log(pc.bold('\n  Nodes by kind:'));
+          for (const k of report.countsByKind) {
+            console.log(`    ${pc.cyan(k.kind.padEnd(16))} ${k.count}`);
+          }
+
+          if (report.duplicateGroups.length > 0) {
+            console.log(pc.bold(`\n  Duplicate groups (${report.duplicateGroups.length}):`));
+            for (const g of report.duplicateGroups.slice(0, 10)) {
+              console.log(`    ${pc.yellow(g.reason)} — ${g.nodes.map(n => n.label).join(' | ')}`);
+            }
+          }
+
+          if (report.topDecisions.length > 0) {
+            console.log(pc.bold('\n  Top decisions:'));
+            for (const d of report.topDecisions) {
+              const imp = d.importance ?? '?';
+              const conf = d.confidence ?? '?';
+              const pin = d.pinned ? pc.yellow(' 📌') : '';
+              console.log(`    ${pc.dim(`imp=${imp} conf=${conf}`)} ${d.label.slice(0, 60)}${pin}`);
+            }
+          }
+
+          if (report.topLessons.length > 0) {
+            console.log(pc.bold('\n  Top lessons:'));
+            for (const l of report.topLessons) {
+              const imp = l.importance ?? '?';
+              const conf = l.confidence ?? '?';
+              const pin = l.pinned ? pc.yellow(' 📌') : '';
+              console.log(`    ${pc.dim(`imp=${imp} conf=${conf}`)} ${l.label.slice(0, 60)}${pin}`);
+            }
+          }
+
+          if (report.recentProviderEvents.length > 0) {
+            console.log(pc.bold('\n  Recent provider events:'));
+            for (const e of report.recentProviderEvents.slice(0, 8)) {
+              const date = new Date(e.createdAt).toLocaleDateString();
+              console.log(`    ${pc.dim(date)} ${e.label.slice(0, 60)}`);
+            }
+          }
+          console.log();
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    // ── Cleanup ─────────────────────────────────────────
+
+    brainCmd
+      .command('cleanup')
+      .description('Prune low-value memories. Use --apply to mutate (default: dry-run)')
+      .option('--apply', 'Actually apply cleanup (default is dry-run)')
+      .option('--max-age <days>', 'Max age in days for events', '30')
+      .option('--min-importance <n>', 'Minimum importance score to keep', '30')
+      .action(async (opts: { apply?: boolean; maxAge?: string; minImportance?: string }) => {
+        try {
+          const dryRun = !opts.apply;
+          const maxAgeDays = parseInt(opts.maxAge || '30', 10);
+          const minImportance = parseInt(opts.minImportance || '30', 10);
+
+          console.log(pc.bold(pc.magenta(`\n🧹 Brain Cleanup${dryRun ? ' (dry-run)' : ''}\n`)));
+          console.log(`  Max age:        ${maxAgeDays}d`);
+          console.log(`  Min importance: ${minImportance}`);
+          console.log(`  Mode:           ${dryRun ? pc.yellow('dry-run (pass --apply to mutate)') : pc.green('apply')}`);
+          console.log();
+
+          const result = await cleanupGraph({
+            dryRun,
+            maxAgeDays,
+            minImportance,
+          });
+
+          for (const a of result.actions.slice(0, 50)) {
+            const icon = a.action === 'prune' ? pc.red('✗') : a.action === 'archive' ? pc.yellow('→') : a.action === 'merge' ? pc.cyan('⊕') : a.action === 'keep' ? pc.green('✓') : pc.dim('·');
+            console.log(`  ${icon} ${a.action.padEnd(8)} ${pc.dim(a.kind.padEnd(12))} ${a.label.slice(0, 50)}`);
+            console.log(`    ${pc.dim(a.reason)}`);
+          }
+
+          if (result.actions.length > 50) {
+            console.log(pc.dim(`  ... and ${result.actions.length - 50} more actions`));
+          }
+
+          console.log();
+          console.log(`  ${pc.bold('Summary:')}`);
+          console.log(`    Pruned:      ${result.removedNodes}`);
+          console.log(`    Archived:    ${result.archivedNodes}`);
+          console.log(`    Merged:      ${result.mergedNodes}`);
+          console.log(`    Forgot:      ${result.forgottenNodes}`);
+          console.log(`    Pinned kept: ${result.pinnedSkipped}`);
+          if (dryRun && (result.removedNodes > 0 || result.archivedNodes > 0 || result.mergedNodes > 0)) {
+            console.log(pc.yellow(`\n  ⚠ Dry-run — no changes made. Pass --apply to execute.`));
+          }
+          console.log();
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    // ── Forget ──────────────────────────────────────────
+
+    brainCmd
+      .command('forget')
+      .description('Remove matching memory nodes (skips pinned)')
+      .argument('<query>', 'Text query to find memories to remove')
+      .action(async (query: string) => {
+        try {
+          const result = await forgetNodes(query);
+          if (result.forgottenNodes === 0) {
+            if (result.pinnedSkipped > 0) {
+              console.log(pc.yellow(`\n  Found ${result.pinnedSkipped} pinned memories — skipped.\n`));
+            } else {
+              console.log(pc.dim(`\n  No memories matched "${query}".\n`));
+            }
+            return;
+          }
+          console.log(pc.green(`\n  ✓ Removed ${result.forgottenNodes} memory/ies.`));
+          if (result.pinnedSkipped > 0) {
+            console.log(pc.yellow(`  ⚠ ${result.pinnedSkipped} pinned memory/ies skipped.`));
+          }
+          for (const a of result.actions.filter(a => a.action === 'forget')) {
+            console.log(`    ${pc.dim(a.kind.padEnd(12))} ${a.label.slice(0, 60)}`);
+          }
+          console.log();
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    // ── Merge ───────────────────────────────────────────
+
+    brainCmd
+      .command('merge')
+      .description('Merge two similar memory nodes')
+      .argument('<queryA>', 'First memory to merge')
+      .argument('<queryB>', 'Second memory to merge')
+      .action(async (queryA: string, queryB: string) => {
+        try {
+          const resultA = await searchGraph(queryA);
+          const resultB = await searchGraph(queryB);
+          const nodeA = resultA.nodes[0];
+          const nodeB = resultB.nodes[0];
+
+          if (!nodeA || !nodeB) {
+            console.log(pc.yellow(`\n  Could not find matching memories.\n`));
+            return;
+          }
+
+          if (nodeA.id === nodeB.id) {
+            console.log(pc.yellow('\n  Both queries match the same node.\n'));
+            return;
+          }
+
+          const merged = await mergeNodes([nodeA.id, nodeB.id]);
+          if (merged) {
+            console.log(pc.green(`\n  ✓ Merged into: ${merged.label}`));
+            console.log(`    ${pc.dim(merged.summary?.slice(0, 120) || '')}`);
+            console.log();
+          }
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
+
+    // ── Pin / Unpin ─────────────────────────────────────
+
+    brainCmd
+      .command('pin')
+      .description('Pin a memory to protect it from cleanup')
+      .argument('<query>', 'Text query to find memory to pin')
+      .action(async (query: string) => {
+        try {
+          const pinned = await pinNode(query);
+          if (!pinned) {
+            console.log(pc.dim(`\n  No memories matched "${query}".\n`));
+            return;
+          }
+          console.log(pc.green(`\n  📌 Pinned: ${pinned.label.slice(0, 60)}\n`));
         } catch (err: unknown) {
           console.log(pc.red(`\nError: ${(err as Error).message}\n`));
         }
@@ -3502,6 +4088,50 @@ export async function start(): Promise<void> {
         console.log(pc.red(`\nError: ${(err as Error).message}\n`));
       }
     });
+
+    // ── Recall Command ──────────────────────────────────
+
+    brainCmd
+      .command('recall')
+      .description('Recall project memory for a query')
+      .argument('<query>', 'Query to search memory')
+      .option('--debug-timing', 'Show detailed timing breakdown')
+      .action(async (query: string, opts: { debugTiming?: boolean }) => {
+        const timer = opts?.debugTiming ? new Timer() : null;
+        try {
+          timer?.start('build_recall_context');
+          const recallCtx = await buildRecallContext(query, {
+            maxTokens: 2000,
+            includeProjectMap: true,
+            includeGraph: true,
+            includeLessons: true,
+            includeDecisions: true,
+          });
+          if (!recallCtx) {
+            console.log(pc.yellow(`\n  No relevant memory found for "${query}".\n`));
+            return;
+          }
+          console.log(pc.bold(pc.magenta(`\n🧠 Recall: "${query}"\n`)));
+          console.log(`  Intent: ${pc.cyan(recallCtx.intent)}`);
+          console.log();
+          console.log(recallCtx.summary);
+          console.log();
+          const sources: string[] = [];
+          if (recallCtx.projectMapSummary) sources.push('project-map');
+          if (recallCtx.recentLessons && recallCtx.recentLessons.length > 0) sources.push('lessons');
+          if (recallCtx.recentDecisions && recallCtx.recentDecisions.length > 0) sources.push('decisions');
+          if (recallCtx.relevantGraphNodes && recallCtx.relevantGraphNodes.length > 0) sources.push('graph');
+          console.log(pc.dim(`  Sources: ${sources.join(', ') || 'none'}`));
+          console.log();
+          timer?.stop('build_recall_context');
+          if (opts?.debugTiming && timer) {
+            console.log(pc.dim(`  ⏱ Timing breakdown:`));
+            console.log(pc.dim(timer.table('recall')));
+          }
+        } catch (err: unknown) {
+          console.log(pc.red(`\nError: ${(err as Error).message}\n`));
+        }
+      });
 
     program
     .command('web')

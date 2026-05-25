@@ -14,6 +14,7 @@ import { detectSecrets } from '../utils/secrets.js';
 import { searchWeb, formatSearchResults, getSearchDiagnostics, isCapabilityQuestion, getCapabilityResponse } from '../tools/web-search.js';
 import { shouldSearchEntity } from '../tools/entity-detector.js';
 import { estimateTokens, truncateMessages } from '../context/tokens.js';
+import { buildRecallContext, formatRecallContext } from '../brain/recall.js';
 
 const LOG = '[HYSA Chat]';
 let apiRequestCounter = 0;
@@ -533,13 +534,23 @@ export async function handleChatStream(
     const isSimpleQ = isSimpleQuestion(lastUserMsgStr);
     const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, isSimpleQ);
 
-    const perQueryPrompt = buildSystemPrompt({
+    let perQueryPrompt = buildSystemPrompt({
       type: projectInfo.type,
       entryPoints: projectInfo.entryPoints,
       configFiles: projectInfo.configFiles,
       fileCount: projectInfo.fileCount,
       tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
     }, config.agentMode || 'chat', lightActive, config.currentProvider, resolvedMode);
+
+    // ── Recall context injection ──
+    if (!isSimpleQ) {
+      try {
+        const recallCtx = await buildRecallContext(lastUserMsgStr, { maxTokens: 800 });
+        if (recallCtx) {
+          perQueryPrompt += formatRecallContext(recallCtx);
+        }
+      } catch { /* skip */ }
+    }
 
     const response = await client.sendMessageStream(messages as any, perQueryPrompt, (event) => {
       if (event.type === 'token') {
@@ -748,7 +759,7 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       config.currentProvider,
       isSimpleQ,
     );
-    const perQueryPrompt = buildSystemPrompt({
+    let perQueryPrompt = buildSystemPrompt({
       type: projectInfo.type,
       entryPoints: projectInfo.entryPoints,
       configFiles: projectInfo.configFiles,
@@ -869,6 +880,16 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
           }
         }
       }
+    }
+
+    // ── Recall context injection ──
+    if (!isSimpleQ && !searchQuery) {
+      try {
+        const recallCtx = await buildRecallContext(lastUserMsg, { maxTokens: 800 });
+        if (recallCtx) {
+          perQueryPrompt += formatRecallContext(recallCtx);
+        }
+      } catch { /* skip */ }
     }
 
     console.log(LOG, `Sending ${messages.length} messages to provider`);

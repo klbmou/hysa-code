@@ -3,6 +3,55 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { getBrainDir, readProjectMap, redact } from './store.js';
 import { readExperienceGraph, searchGraph } from './graph-store.js';
+const recallCache = new Map();
+const CACHE_TTL_MS = 30_000;
+function cacheKey(message, optionsMask) {
+    const kw = message.toLowerCase().split(/\s+/).filter(w => w.length > 2).sort().join(',');
+    return `${kw}|${optionsMask}`;
+}
+function getCached(message, optionsMask) {
+    const key = cacheKey(message, optionsMask);
+    const entry = recallCache.get(key);
+    if (entry && Date.now() - entry.timestamp < CACHE_TTL_MS) {
+        return entry.result;
+    }
+    if (entry)
+        recallCache.delete(key);
+    return undefined;
+}
+function setCached(message, optionsMask, result) {
+    const key = cacheKey(message, optionsMask);
+    recallCache.set(key, { result, timestamp: Date.now() });
+    if (recallCache.size > 50) {
+        const oldest = [...recallCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)[0];
+        if (oldest)
+            recallCache.delete(oldest[0]);
+    }
+}
+// ── Fast path: detect if query clearly asks about memory ──
+const MEMORY_KEYWORDS = [
+    'decision', 'decided', 'decide',
+    'lesson', 'learned',
+    'provider', 'fallback', 'rate', 'cooldown', 'quota',
+    'ollama', 'local_fallback',
+    'bug', 'fix', 'error', 'issue',
+    'project', 'context', 'brain', 'memory',
+    'change', 'changes', 'update',
+    'history', 'recall',
+];
+export function isMemoryQuery(message) {
+    const trimmed = message.trim();
+    if (!trimmed)
+        return false;
+    const lower = trimmed.toLowerCase();
+    const words = lower.split(/\s+/);
+    // Very short messages (1-3 words) are unlikely to be memory queries
+    // unless they directly contain a memory keyword (as substring)
+    if (words.length <= 3) {
+        return MEMORY_KEYWORDS.some(kw => lower.includes(kw));
+    }
+    return true;
+}
 const INTENT_PATTERNS = [
     {
         intent: 'lesson_history',
@@ -87,7 +136,6 @@ const NEGATIVE_PATTERNS = [
 ];
 export function detectRecallIntent(message) {
     const trimmed = message.trim();
-    // Check negative patterns first
     for (const p of NEGATIVE_PATTERNS) {
         if (p.test(trimmed))
             return 'none';
@@ -100,6 +148,27 @@ export function detectRecallIntent(message) {
     }
     return 'none';
 }
+// ── Smart truncation: no mid-word cuts, prefers sentence boundaries ──
+function truncateText(text, maxLen) {
+    if (text.length <= maxLen)
+        return text;
+    // Try sentence boundary within range [maxLen-40, maxLen]
+    const searchStart = Math.max(0, maxLen - 40);
+    const searchArea = text.slice(searchStart, maxLen);
+    const sentenceEnd = searchArea.search(/[.!?]\s/);
+    if (sentenceEnd !== -1) {
+        const cutPos = searchStart + sentenceEnd + 1;
+        return text.slice(0, cutPos) + '...';
+    }
+    // Try last word boundary within 10 chars before maxLen
+    const wordBoundary = text.lastIndexOf(' ', maxLen - 1);
+    if (wordBoundary > maxLen - 10) {
+        return text.slice(0, wordBoundary) + '...';
+    }
+    // Hard truncate at maxLen
+    return text.slice(0, maxLen - 3) + '...';
+}
+// ── Parse lessons/decisions with smart truncation ──
 async function readLessons() {
     try {
         const filePath = join(getBrainDir(), 'lessons.md');
@@ -112,7 +181,7 @@ async function readLessons() {
         for (const line of content.split('\n')) {
             if (line.startsWith('## ')) {
                 if (currentTitle) {
-                    entries.push(`${currentTitle}: ${currentBody.slice(0, 200)}`);
+                    entries.push(`${currentTitle}: ${truncateText(currentBody.trim(), 280)}`);
                 }
                 currentTitle = line.replace('## ', '').trim();
                 currentBody = '';
@@ -122,9 +191,9 @@ async function readLessons() {
             }
         }
         if (currentTitle) {
-            entries.push(`${currentTitle}: ${currentBody.slice(0, 200)}`);
+            entries.push(`${currentTitle}: ${truncateText(currentBody.trim(), 280)}`);
         }
-        return entries.slice(-5);
+        return entries;
     }
     catch {
         return [];
@@ -142,7 +211,7 @@ async function readDecisions() {
         for (const line of content.split('\n')) {
             if (line.startsWith('## ')) {
                 if (currentTitle) {
-                    entries.push(`${currentTitle}: ${currentBody.slice(0, 200)}`);
+                    entries.push(`${currentTitle}: ${truncateText(currentBody.trim(), 280)}`);
                 }
                 currentTitle = line.replace('## ', '').trim();
                 currentBody = '';
@@ -152,28 +221,238 @@ async function readDecisions() {
             }
         }
         if (currentTitle) {
-            entries.push(`${currentTitle}: ${currentBody.slice(0, 200)}`);
+            entries.push(`${currentTitle}: ${truncateText(currentBody.trim(), 280)}`);
         }
-        return entries.slice(-5);
+        return entries;
     }
     catch {
         return [];
     }
 }
+// ── Keyword extraction and relevance scoring ──
+const STOP_WORDS = new Set([
+    'what', 'why', 'did', 'was', 'were', 'the', 'we', 'you', 'about', 'for',
+    'that', 'this', 'have', 'has', 'had', 'not', 'are', 'is', 'can', 'do',
+    'does', 'done', 'been', 'being', 'will', 'would', 'could', 'should',
+    'may', 'might', 'shall', 'our', 'its', 'his', 'her', 'their', 'they',
+    'how', 'where', 'when', 'which', 'who', 'whom', 'in', 'on', 'at', 'to',
+    'from', 'with', 'without', 'into', 'onto', 'upon', 'after', 'before',
+    'during', 'since', 'until', 'of', 'by', 'than', 'then', 'else', 'also',
+    'very', 'just', 'only', 'still', 'even', 'too', 'much', 'many', 'some',
+    'any', 'all', 'both', 'each', 'few', 'more', 'most', 'other', 'into',
+    'over', 'under', 'again', 'further', 'once', 'here', 'there', 'and',
+    'but', 'or', 'nor', 'as', 'if', 'while', 'because', 'a', 'an', 'hi',
+    'hello', 'hey', 'thanks', 'ok', 'okay', 'nice', 'good', 'great',
+    'tell', 'describe', 'summarize', 'list', 'show', 'give', 'find',
+    'happen', 'happened', 'going', 'go', 'went',
+]);
+const PROVIDER_TERMS = [
+    'provider', 'fallback', 'rate', 'rate_limit', 'limit', 'cooldown',
+    'openai_router', 'openrouter', 'ollama', 'local', 'HYSA_ENABLE_LOCAL_FALLBACK',
+    'invalid key', 'timeout', 'unavailable', 'quota', 'model', 'test',
+    'connection error', 'proxy',
+];
+function extractKeywords(message) {
+    const tokens = message.toLowerCase().split(/\s+/);
+    return [...new Set(tokens.filter(t => t.length >= 3 && !STOP_WORDS.has(t)))];
+}
+function computeRelevance(text, keywords, queryMessage, providerOnly) {
+    const lower = text.toLowerCase();
+    let score = 0;
+    for (const kw of keywords) {
+        if (lower.includes(kw)) {
+            score += 10;
+        }
+    }
+    // Title match bonus (text before first colon)
+    const titlePart = text.includes(':') ? text.split(':')[0].toLowerCase() : '';
+    for (const kw of keywords) {
+        if (titlePart.includes(kw)) {
+            score += 5;
+        }
+    }
+    // Boost for provider terms when query is provider-related
+    if (providerOnly) {
+        for (const term of PROVIDER_TERMS) {
+            if (lower.includes(term)) {
+                score += 8;
+            }
+        }
+    }
+    // Penalize generic architecture/brain items when query is not about brain/context
+    const mentionsBrain = queryMessage.toLowerCase().includes('brain') || queryMessage.toLowerCase().includes('context') || queryMessage.toLowerCase().includes('memory');
+    if (!mentionsBrain) {
+        if (titlePart.includes('brain') || titlePart.includes('context injection')) {
+            score -= 25;
+        }
+    }
+    // Penalize "Phase 3A" / "Phase 3B" unrelated items unless query mentions "phase"
+    const queryLower = queryMessage.toLowerCase();
+    if (!queryLower.includes('phase')) {
+        if (lower.includes('phase 3a') || lower.includes('phase 3b') || lower.includes('phase 3c')) {
+            if (!lower.includes('rate') && !lower.includes('fallback') && !lower.includes('provider') && !lower.includes('cooldown')) {
+                score -= 15;
+            }
+        }
+    }
+    // Direct provider_term boost when query has provider/fail/rate keywords
+    if (providerOnly) {
+        const hasOllama = queryLower.includes('ollama');
+        const hasFallback = queryLower.includes('fallback');
+        const hasLocal = queryLower.includes('local');
+        const hasRateLimit = queryLower.includes('rate');
+        if (hasOllama && (lower.includes('ollama') || lower.includes('HYSA_ENABLE_LOCAL_FALLBACK'))) {
+            score += 20;
+        }
+        if (hasFallback && (lower.includes('fallback') || lower.includes('cooldown') || lower.includes('HYSA_ENABLE_LOCAL_FALLBACK'))) {
+            score += 15;
+        }
+        if (hasLocal && (lower.includes('local') || lower.includes('ollama') || lower.includes('HYSA_ENABLE_LOCAL_FALLBACK'))) {
+            score += 15;
+        }
+        if (hasRateLimit && (lower.includes('rate') || lower.includes('limit') || lower.includes('cooldown') || lower.includes('timeout'))) {
+            score += 15;
+        }
+    }
+    return score;
+}
+// ── Provider nodes: extract providers from event labels too ──
+function extractProvidersFromAllNodes(nodes) {
+    const providers = new Set();
+    // From kind=provider nodes
+    for (const n of nodes) {
+        if (n.kind === 'provider') {
+            providers.add(n.label);
+        }
+    }
+    // From event labels like provider_failed:anthropic_proxy/claude-3-haiku-latest
+    for (const n of nodes) {
+        if (n.kind === 'event' && n.label) {
+            const colonIdx = n.label.indexOf(':');
+            if (colonIdx !== -1) {
+                const rest = n.label.slice(colonIdx + 1); // e.g. "anthropic_proxy/claude-3-haiku-latest"
+                const slashIdx = rest.indexOf('/');
+                if (slashIdx !== -1) {
+                    providers.add(rest.slice(0, slashIdx));
+                }
+            }
+        }
+    }
+    return [...providers].sort();
+}
+function formatProviderNodes(nodes) {
+    const lines = [];
+    const seenEvents = new Set();
+    let hasRateLimit = false;
+    let hasConnectionError = false;
+    let hasTimeout = false;
+    let hasUnavailable = false;
+    const failureEvents = nodes.filter(n => n.kind === 'event' && n.label && n.label.includes('provider_failed'));
+    const successEvents = nodes.filter(n => n.kind === 'event' && n.label && n.label.includes('provider_succeeded'));
+    for (const e of failureEvents) {
+        const key = e.label;
+        if (!seenEvents.has(key)) {
+            seenEvents.add(key);
+            const summary = e.summary || e.label;
+            const display = summary.replace(/^event:/, '');
+            lines.push(`  ❌ ${display}`);
+            const lower = summary.toLowerCase();
+            if (lower.includes('rate'))
+                hasRateLimit = true;
+            if (lower.includes('connection error'))
+                hasConnectionError = true;
+            if (lower.includes('timeout'))
+                hasTimeout = true;
+            if (lower.includes('unavailable'))
+                hasUnavailable = true;
+        }
+    }
+    for (const e of successEvents) {
+        const key = e.label;
+        if (!seenEvents.has(key)) {
+            seenEvents.add(key);
+            const summary = e.summary || e.label;
+            const display = summary.replace(/^event:/, '');
+            lines.push(`  ✅ ${display}`);
+        }
+    }
+    const providers = extractProvidersFromAllNodes(nodes);
+    const models = [...new Set(nodes.filter(n => n.kind === 'model').map(n => n.label))];
+    // Build explanation paragraph
+    const explanationParts = [];
+    if (hasRateLimit)
+        explanationParts.push('some online/free providers previously hit rate limits');
+    if (hasConnectionError)
+        explanationParts.push('some providers had connection errors');
+    if (hasTimeout)
+        explanationParts.push('some providers timed out');
+    if (hasUnavailable)
+        explanationParts.push('some providers were temporarily unavailable');
+    let explanation = '';
+    if (explanationParts.length > 0) {
+        explanation = `Summary: ${explanationParts.join('; ')}. HYSA puts failing models on cooldown and retries other providers. Local fallback (Ollama) is disabled by default — use HYSA_ENABLE_LOCAL_FALLBACK=true or --provider ollama to enable. Tests should mock live provider failures rather than fail when free providers are busy.`;
+    }
+    else {
+        explanation = 'Summary: HYSA puts failing models/providers on cooldown and retries fallback providers. Local fallback (Ollama) is disabled by default.';
+    }
+    if (lines.length === 0 && providers.length === 0) {
+        return { summary: '[Provider History]\n  No provider events recorded.', explanation, providers: [] };
+    }
+    let result = '[Provider History]\n';
+    if (lines.length > 0) {
+        result += lines.join('\n');
+    }
+    if (providers.length > 0) {
+        result += `\n  Providers involved: ${providers.join(', ')}`;
+    }
+    if (models.length > 0) {
+        result += `\n  Models involved: ${models.join(', ')}`;
+    }
+    return { summary: result, explanation, providers };
+}
+function formatBugNodes(nodes) {
+    const lines = [];
+    const seen = new Set();
+    const fixNodes = nodes.filter(n => n.kind === 'fix');
+    for (const n of fixNodes) {
+        if (!seen.has(n.label)) {
+            seen.add(n.label);
+            lines.push(`  🔧 Fix: ${n.label}`);
+        }
+    }
+    const bugNodes = nodes.filter(n => n.kind === 'bug');
+    for (const n of bugNodes) {
+        if (!seen.has(n.label)) {
+            seen.add(n.label);
+            lines.push(`  🐛 Bug: ${n.label}`);
+        }
+    }
+    if (lines.length === 0)
+        return '[Bug/Fix History]\n  No bug/fix records found.';
+    return `[Bug/Fix History]\n${lines.join('\n')}`;
+}
 export async function buildRecallContext(message, options) {
     const intent = detectRecallIntent(message);
     if (intent === 'none')
+        return null;
+    // Fast path: if not clearly a memory query, skip broad scanning
+    if (!isMemoryQuery(message))
         return null;
     const maxTokens = options?.maxTokens ?? 800;
     const includeProjectMap = options?.includeProjectMap ?? true;
     const includeGraph = options?.includeGraph ?? true;
     const includeLessons = options?.includeLessons ?? true;
     const includeDecisions = options?.includeDecisions ?? true;
-    let summary = '';
-    const recentLessons = [];
-    const recentDecisions = [];
-    const relevantGraphNodes = [];
-    const relevantGraphEdges = [];
+    const optionsMask = (includeProjectMap ? 1 : 0) | (includeGraph ? 2 : 0) | (includeLessons ? 4 : 0) | (includeDecisions ? 8 : 0);
+    // Check session cache
+    const cached = getCached(message, optionsMask);
+    if (cached)
+        return cached;
+    const keywords = extractKeywords(message);
+    const allDecisions = [];
+    const allLessons = [];
+    let matchedNodes = [];
+    let graphEdgeStrs = [];
     const warnings = [];
     let projectMapSummary;
     // Project map
@@ -200,36 +479,33 @@ export async function buildRecallContext(message, options) {
         }
         catch { /* skip */ }
     }
-    // Lessons
+    // Lessons & decisions
     if (includeLessons) {
-        const lessons = await readLessons();
-        recentLessons.push(...lessons);
+        allLessons.push(...(await readLessons()));
     }
-    // Decisions
     if (includeDecisions) {
-        const decisions = await readDecisions();
-        recentDecisions.push(...decisions);
+        allDecisions.push(...(await readDecisions()));
     }
     // Graph search
     if (includeGraph) {
         try {
             const graph = await readExperienceGraph();
             if (graph.nodes.length > 0) {
-                const query = message.toLowerCase();
-                const searchTerms = query.split(/\s+/).filter(w => w.length > 3).slice(0, 5);
+                const searchTerms = message.toLowerCase().split(/\s+/).filter(w => w.length > 3).slice(0, 5);
                 if (searchTerms.length > 0) {
+                    const seenIds = new Set();
                     for (const term of searchTerms) {
                         const result = await searchGraph(term);
                         for (const n of result.nodes) {
-                            const label = `${n.kind}:${n.label}`;
-                            if (!relevantGraphNodes.includes(label)) {
-                                relevantGraphNodes.push(label);
+                            if (!seenIds.has(n.id)) {
+                                seenIds.add(n.id);
+                                matchedNodes.push(n);
                             }
                         }
                         for (const e of result.edges) {
                             const edgeStr = `${e.kind}:${e.from.slice(0, 6)}→${e.to.slice(0, 6)}`;
-                            if (!relevantGraphEdges.includes(edgeStr)) {
-                                relevantGraphEdges.push(edgeStr);
+                            if (!graphEdgeStrs.includes(edgeStr)) {
+                                graphEdgeStrs.push(edgeStr);
                             }
                         }
                     }
@@ -238,98 +514,192 @@ export async function buildRecallContext(message, options) {
         }
         catch { /* skip */ }
     }
-    // Build summary based on intent
-    const summaries = [];
-    if (intent === 'project_context' && projectMapSummary) {
-        summaries.push(`Project: ${projectMapSummary}`);
-    }
-    if (intent === 'lesson_history' && recentLessons.length > 0) {
-        summaries.push(`Lessons: ${recentLessons.join('; ')}`);
-    }
-    if (intent === 'decision_history' && recentDecisions.length > 0) {
-        summaries.push(`Decisions: ${recentDecisions.join('; ')}`);
-    }
-    if ((intent === 'bug_history' || intent === 'browser_history' || intent === 'provider_history') && relevantGraphNodes.length > 0) {
-        const maxNodes = Math.min(relevantGraphNodes.length, 10);
-        summaries.push(`Related: ${relevantGraphNodes.slice(0, maxNodes).join(', ')}`);
-    }
-    if (intent === 'project_context' && relevantGraphNodes.length > 0) {
-        const maxNodes = Math.min(relevantGraphNodes.length, 5);
-        summaries.push(`Graph: ${relevantGraphNodes.slice(0, maxNodes).join(', ')}`);
-    }
-    // If we're looking at recent changes/project context, include project map
-    if (intent === 'project_context' && projectMapSummary) {
-        summary = `[Project Context]\n${projectMapSummary}`;
-        if (recentLessons.length > 0) {
-            summary += `\nLessons: ${recentLessons.slice(0, 3).join('; ')}`;
+    // ── Intent-specific summaries ──
+    if (intent === 'decision_history') {
+        const scored = allDecisions.map(d => ({
+            text: d,
+            score: computeRelevance(d, keywords, message),
+        }));
+        scored.sort((a, b) => b.score - a.score);
+        const best = scored.filter(s => s.score >= 10);
+        if (best.length > 0) {
+            const chosen = best.slice(0, 3).map(s => s.text).join('\n');
+            const ctx = {
+                intent,
+                summary: `[Decisions]\n${chosen}`,
+                recentDecisions: best.slice(0, 3).map(s => s.text),
+                warnings: warnings.length > 0 ? warnings : undefined,
+                projectMapSummary: projectMapSummary || undefined,
+            };
+            setCached(message, optionsMask, ctx);
+            return ctx;
         }
-        if (recentDecisions.length > 0) {
-            summary += `\nDecisions: ${recentDecisions.slice(0, 3).join('; ')}`;
+        const graphDecisions = matchedNodes.filter(n => n.kind === 'decision');
+        if (graphDecisions.length > 0) {
+            const lines = graphDecisions.slice(0, 3).map(n => `${n.label}: ${n.summary || ''}`).join('\n');
+            const ctx = {
+                intent,
+                summary: `[Decisions]\n${lines}`,
+                warnings: warnings.length > 0 ? warnings : undefined,
+                projectMapSummary: projectMapSummary || undefined,
+            };
+            setCached(message, optionsMask, ctx);
+            return ctx;
         }
+        const noDecision = {
+            intent,
+            summary: '[Decisions]\n  No relevant decision found for your query.',
+            warnings: ['No relevant decision found.'],
+        };
+        setCached(message, optionsMask, noDecision);
+        return noDecision;
     }
-    else if (intent === 'provider_history') {
-        const providerNodes = relevantGraphNodes.filter(n => n.startsWith('provider:') || n.startsWith('model:') || n.startsWith('event:provider'));
-        const snippet = providerNodes.slice(0, 8).join(', ');
-        summary = `[Provider History]\n${snippet || 'No provider events recorded.'}`;
-    }
-    else if (intent === 'bug_history' || intent === 'browser_history') {
-        const bugNodes = relevantGraphNodes.filter(n => n.startsWith('bug:') || n.startsWith('fix:') || n.startsWith('event:'));
-        const snippet = bugNodes.slice(0, 8).join(', ');
-        summary = `[Bug/Fix History]\n${snippet || 'No bug/fix records found.'}`;
-    }
-    else if (intent === 'lesson_history') {
-        if (recentLessons.length > 0) {
-            summary = `[Lessons]\n${recentLessons.join('\n')}`;
+    if (intent === 'lesson_history') {
+        const scored = allLessons.map(l => ({
+            text: l,
+            score: computeRelevance(l, keywords, message),
+        }));
+        scored.sort((a, b) => b.score - a.score);
+        const best = scored.filter(s => s.score >= 10);
+        if (best.length > 0) {
+            const chosen = best.slice(0, 3).map(s => s.text).join('\n');
+            const ctx = { intent, summary: `[Lessons]\n${chosen}`, recentLessons: best.slice(0, 3).map(s => s.text) };
+            setCached(message, optionsMask, ctx);
+            return ctx;
         }
-        else {
+        if (allLessons.length > 0) {
+            const ctx = { intent, summary: `[Lessons]\n${allLessons.slice(0, 2).join('\n')}`, recentLessons: allLessons.slice(0, 2), warnings: ['Weak relevance — showing most recent lessons.'] };
+            setCached(message, optionsMask, ctx);
+            return ctx;
+        }
+        const noLessons = { intent, summary: '[Lessons]\n  No lessons recorded yet.', warnings: ['No lessons found.'] };
+        setCached(message, optionsMask, noLessons);
+        return noLessons;
+    }
+    if (intent === 'provider_history') {
+        const formatted = formatProviderNodes(matchedNodes);
+        const queryLower = message.toLowerCase();
+        const hasFallbackContext = queryLower.includes('ollama') || queryLower.includes('fallback') || queryLower.includes('local') || queryLower.includes('cooldown') || queryLower.includes('rate') || queryLower.includes('limit') || queryLower.includes('provider') || queryLower.includes('model');
+        // Build explanation into the summary
+        const explanationBlock = `\n\n${formatted.explanation}`;
+        let extra = '';
+        let relLessons = [];
+        let relDecisions = [];
+        if (hasFallbackContext) {
+            relLessons = allLessons
+                .map(l => ({ text: l, score: computeRelevance(l, keywords, message, true) }))
+                .filter(l => l.score >= 10)
+                .slice(0, 2);
+            relDecisions = allDecisions
+                .map(d => ({ text: d, score: computeRelevance(d, keywords, message, true) }))
+                .filter(d => d.score >= 10)
+                .slice(0, 2);
+            if (relLessons.length > 0) {
+                extra += '\n\nRelated lessons:\n' + relLessons.map(l => `  • ${l.text}`).join('\n');
+            }
+            if (relDecisions.length > 0) {
+                extra += '\n\nRelated decisions:\n' + relDecisions.map(d => `  • ${d.text}`).join('\n');
+            }
+        }
+        const graphNodeLabels = matchedNodes
+            .filter(n => n.kind === 'provider' || n.kind === 'model')
+            .map(n => `${n.kind}:${n.label}`);
+        const provCtx = {
+            intent,
+            summary: formatted.summary + explanationBlock + extra,
+            relevantGraphNodes: graphNodeLabels.length > 0 ? graphNodeLabels.slice(0, 15) : undefined,
+            relevantGraphEdges: graphEdgeStrs.length > 0 ? graphEdgeStrs.slice(0, 10) : undefined,
+            warnings: warnings.length > 0 ? warnings : undefined,
+            projectMapSummary: projectMapSummary || undefined,
+            recentDecisions: relDecisions.length > 0 ? relDecisions.map(d => d.text) : undefined,
+            recentLessons: relLessons.length > 0 ? relLessons.map(l => l.text) : undefined,
+        };
+        setCached(message, optionsMask, provCtx);
+        return provCtx;
+    }
+    if (intent === 'bug_history' || intent === 'browser_history') {
+        const summary = formatBugNodes(matchedNodes);
+        const bugLabels = matchedNodes
+            .filter(n => n.kind === 'bug' || n.kind === 'fix' || n.kind === 'event')
+            .map(n => `${n.kind}:${n.label}`);
+        const bugCtx = {
+            intent,
+            summary,
+            relevantGraphNodes: bugLabels.length > 0 ? bugLabels.slice(0, 10) : undefined,
+            relevantGraphEdges: graphEdgeStrs.length > 0 ? graphEdgeStrs.slice(0, 5) : undefined,
+            warnings: warnings.length > 0 ? warnings : undefined,
+            projectMapSummary: projectMapSummary || undefined,
+        };
+        setCached(message, optionsMask, bugCtx);
+        return bugCtx;
+    }
+    if (intent === 'project_context') {
+        const summaryLines = [];
+        if (projectMapSummary) {
+            summaryLines.push(`[Project Context]\n${projectMapSummary}`);
+        }
+        if (allLessons.length > 0) {
+            summaryLines.push(`\nLessons: ${allLessons.slice(0, 2).join('; ')}`);
+        }
+        if (allDecisions.length > 0) {
+            summaryLines.push(`\nDecisions: ${allDecisions.slice(0, 2).join('; ')}`);
+        }
+        const graphLabels = matchedNodes
+            .filter(n => n.kind !== 'event' || !n.label.includes('provider_succeeded'))
+            .map(n => `${n.kind}:${n.label}`);
+        if (graphLabels.length > 0) {
+            summaryLines.push(`\nGraph: ${graphLabels.slice(0, 5).join(', ')}`);
+        }
+        if (summaryLines.length === 0 && !projectMapSummary)
             return null;
+        const projCtx = {
+            intent,
+            summary: summaryLines.join('\n'),
+            projectMapSummary,
+            recentLessons: allLessons.length > 0 ? allLessons.slice(0, 2) : undefined,
+            recentDecisions: allDecisions.length > 0 ? allDecisions.slice(0, 2) : undefined,
+            relevantGraphNodes: graphLabels.length > 0 ? graphLabels.slice(0, 10) : undefined,
+        };
+        setCached(message, optionsMask, projCtx);
+        return projCtx;
+    }
+    if (intent === 'skill_history') {
+        const skillLabels = matchedNodes
+            .filter(n => n.kind === 'skill')
+            .map(n => `${n.kind}:${n.label}`);
+        if (skillLabels.length > 0) {
+            const skillCtx = { intent, summary: `[Skills]\n  ${skillLabels.slice(0, 5).join(', ')}`, relevantGraphNodes: skillLabels.slice(0, 5) };
+            setCached(message, optionsMask, skillCtx);
+            return skillCtx;
         }
+        const noSkill = { intent, summary: '[Skills]\n  No skill records found.' };
+        setCached(message, optionsMask, noSkill);
+        return noSkill;
     }
-    else if (intent === 'decision_history') {
-        if (recentDecisions.length > 0) {
-            summary = `[Decisions]\n${recentDecisions.join('\n')}`;
-        }
-        else {
-            return null;
-        }
-    }
-    else if (intent === 'skill_history') {
-        const skillNodes = relevantGraphNodes.filter(n => n.startsWith('skill:'));
-        summary = `[Skills]\n${skillNodes.slice(0, 5).join(', ') || 'No skill records found.'}`;
-    }
-    else {
-        // Fallback for project_context + misc
-        if (summaries.length === 0)
-            return null;
-        summary = `[Project Memory]\n${summaries.join('\n')}`;
-    }
-    // Truncate by tokens (rough estimate: 4 chars per token)
-    const maxChars = maxTokens * 4;
-    if (summary.length > maxChars) {
-        summary = summary.slice(0, maxChars - 50) + '\n...(truncated)';
-    }
-    if (!summary)
-        return null;
-    // Track which sources were used
-    const sources = [];
+    // Fallback
+    const fallbackParts = [];
     if (projectMapSummary)
-        sources.push('project-map');
-    if (recentLessons.length > 0)
-        sources.push('lessons');
-    if (recentDecisions.length > 0)
-        sources.push('decisions');
-    if (relevantGraphNodes.length > 0 || relevantGraphEdges.length > 0)
-        sources.push('graph');
-    return {
+        fallbackParts.push(`Project: ${projectMapSummary}`);
+    if (allLessons.length > 0)
+        fallbackParts.push(`Lessons: ${allLessons.slice(0, 2).join('; ')}`);
+    if (allDecisions.length > 0)
+        fallbackParts.push(`Decisions: ${allDecisions.slice(0, 2).join('; ')}`);
+    if (matchedNodes.length > 0) {
+        const labels = matchedNodes.map(n => `${n.kind}:${n.label}`).slice(0, 5);
+        fallbackParts.push(`Graph: ${labels.join(', ')}`);
+    }
+    if (fallbackParts.length === 0)
+        return null;
+    const fbCtx = {
         intent,
-        summary,
+        summary: `[Project Memory]\n${fallbackParts.join('\n')}`,
         projectMapSummary,
-        recentLessons: recentLessons.length > 0 ? recentLessons : undefined,
-        recentDecisions: recentDecisions.length > 0 ? recentDecisions : undefined,
-        relevantGraphNodes: relevantGraphNodes.length > 0 ? relevantGraphNodes : undefined,
-        relevantGraphEdges: relevantGraphEdges.length > 0 ? relevantGraphEdges : undefined,
-        warnings: warnings.length > 0 ? warnings : undefined,
+        recentLessons: allLessons.length > 0 ? allLessons.slice(0, 3) : undefined,
+        recentDecisions: allDecisions.length > 0 ? allDecisions.slice(0, 3) : undefined,
+        relevantGraphNodes: matchedNodes.map(n => `${n.kind}:${n.label}`).slice(0, 10),
     };
+    setCached(message, optionsMask, fbCtx);
+    return fbCtx;
 }
 export function formatRecallContext(ctx) {
     const redacted = redact(ctx.summary);

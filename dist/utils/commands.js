@@ -65,4 +65,23 @@ export function classifyCommand(command) {
     }
     return 'unknown';
 }
+export function withTimeout(promise, ms, label) {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+            const id = setTimeout(() => {
+                clearTimeout(id);
+                reject(new Error(`${label || 'Operation'} timed out after ${ms}ms`));
+            }, ms);
+        }),
+    ]);
+}
+export function formatCommandOutput(stdout, maxLines = 80) {
+    const lines = stdout.split('\n');
+    if (lines.length <= maxLines)
+        return stdout;
+    const head = lines.slice(0, Math.floor(maxLines / 2));
+    const tail = lines.slice(-Math.floor(maxLines / 2));
+    return [...head, `... (${lines.length - maxLines} lines truncated)`, ...tail].join('\n');
+}
 //# sourceMappingURL=commands.js.map

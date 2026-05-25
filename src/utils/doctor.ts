@@ -12,6 +12,7 @@ import { getWebSearchConfig, getSearchDiagnostics } from '../tools/web-search.js
 import { checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig, cliBrowserStatus, getDaemonConfig } from '../tools/browser.js';
 import { getBrainStatus } from '../brain/store.js';
 import { getGraphStats, experienceGraphExists } from '../brain/graph-store.js';
+import { isRecallAvailable } from '../brain/recall.js';
 
 const DOCTOR_TIMEOUT_MS = 15000;
 
@@ -925,13 +926,19 @@ export async function runDoctor(debug = false, provider?: string): Promise<void>
     // Brain system status
     const brainStatus = await getBrainStatus();
     if (brainStatus.exists) {
+      results.push({ name: 'Brain Dir', status: 'ok', message: `.hysa/brain/ exists` });
+      results.push({ name: 'Project Map', status: brainStatus.projectMapDate ? 'ok' : 'warn', message: brainStatus.projectMapDate ? `Updated ${new Date(brainStatus.projectMapDate).toLocaleDateString()}` : 'Not generated' });
       const graphExists = await experienceGraphExists();
-      let graphMsg = '';
       if (graphExists) {
         const graphStats = await getGraphStats();
-        graphMsg = `, graph: ${graphStats.nodeCount} nodes, ${graphStats.edgeCount} edges`;
+        results.push({ name: 'Experience Graph', status: 'ok', message: `${graphStats.nodeCount} nodes, ${graphStats.edgeCount} edges, updated ${new Date(graphStats.updatedAt).toLocaleDateString()}` });
+      } else {
+        results.push({ name: 'Experience Graph', status: 'warn', message: 'Not yet created (auto-created on first event)' });
       }
-      results.push({ name: 'Brain System', status: 'ok', message: `.hysa/brain ready (${brainStatus.eventCount} events${graphMsg})` });
+      const recallAvail = await isRecallAvailable();
+      results.push({ name: 'Recall Module', status: recallAvail ? 'ok' : 'warn', message: recallAvail ? 'Available' : 'No memory data to recall' });
+      results.push({ name: 'Event Log', status: 'ok', message: `${brainStatus.eventCount} events` });
+      results.push({ name: 'Git Ignored', status: 'ok', message: '.hysa/ is gitignored' });
     } else {
       results.push({ name: 'Brain System', status: 'warn', message: 'Not initialized. Run: hysa brain init' });
     }

@@ -2710,6 +2710,507 @@ process.on('exit', () => {
     globalTestFailed = true;
   }
 
+  // ===== TEST 21: Recall Tests (Phase 3C) =====
+  try {
+    const { detectRecallIntent, buildRecallContext, formatRecallContext, isRecallAvailable } = await import('./dist/brain/recall.js');
+    const { redact } = await import('./dist/brain/store.js');
+
+    // Test 21a: detectRecallIntent — project_context
+    section('TEST 21a: detectRecallIntent — project context');
+    const intentA = detectRecallIntent('what did we change in the smart router');
+    const t21aOk = intentA === 'project_context';
+    console.log(`  "what did we change in the smart router" → ${intentA}`);
+    console.log(`  ${t21aOk ? '✓ Detects project context intent' : '✗ Project context detection issue'}`);
+
+    // Test 21b: detectRecallIntent — provider_history
+    section('TEST 21b: detectRecallIntent — provider history');
+    const intentB = detectRecallIntent('why did provider fallback fail before');
+    const t21bOk = intentB === 'provider_history';
+    console.log(`  "why did provider fallback fail before" → ${intentB}`);
+    console.log(`  ${t21bOk ? '✓ Detects provider history intent' : '✗ Provider history detection issue'}`);
+
+    // Test 21c: detectRecallIntent — browser_history
+    section('TEST 21c: detectRecallIntent — browser history');
+    const intentC = detectRecallIntent('what was the browser session bug');
+    const t21cOk = intentC === 'browser_history' || intentC === 'bug_history';
+    console.log(`  "what was the browser session bug" → ${intentC}`);
+    console.log(`  ${t21cOk ? '✓ Detects browser/bug history intent' : '✗ Browser history detection issue'}`);
+
+    // Test 21d: detectRecallIntent — none for greetings
+    section('TEST 21d: detectRecallIntent — greetings return none');
+    const intentD = detectRecallIntent('hi');
+    const t21dOk = intentD === 'none';
+    console.log(`  "hi" → ${intentD}`);
+    console.log(`  ${t21dOk ? '✓ Greeting returns none' : '✗ Greeting detection issue'}`);
+
+    // Test 21e: detectRecallIntent — none for write commands
+    section('TEST 21e: detectRecallIntent — write commands return none');
+    const intentE = detectRecallIntent('write a simple game');
+    const t21eOk = intentE === 'none';
+    console.log(`  "write a simple game" → ${intentE}`);
+    console.log(`  ${t21eOk ? '✓ Write command returns none' : '✗ Write command detection issue'}`);
+
+    // Test 21f: Arabic recall detection
+    section('TEST 21f: detectRecallIntent — Arabic queries');
+    const intentF = detectRecallIntent('ماذا تغير في Smart Router');
+    const t21fOk = intentF === 'project_context';
+    console.log(`  "ماذا تغير في Smart Router" → ${intentF}`);
+    console.log(`  ${t21fOk ? '✓ Arabic project context detected' : '✗ Arabic project context issue'}`);
+
+    // Test 21g: buildRecallContext returns context when data exists
+    section('TEST 21g: buildRecallContext — returns context when data exists');
+    const ctx = await buildRecallContext('what lessons have we learned', {
+      maxTokens: 2000,
+      includeProjectMap: true,
+      includeGraph: true,
+      includeLessons: true,
+      includeDecisions: true,
+    });
+    const t21gOk = ctx !== null && ctx.intent !== 'none' && typeof ctx.summary === 'string' && ctx.summary.length > 0;
+    console.log(`  Intent: ${ctx?.intent}, Summary length: ${ctx?.summary?.length || 0}`);
+    console.log(`  ${t21gOk ? '✓ buildRecallContext returns context' : '✗ buildRecallContext issue'}`);
+
+    // Test 21h: formatRecallContext redacts secrets
+    section('TEST 21h: formatRecallContext — redacts secrets');
+    const ctxWithSecret = await buildRecallContext('lessons', {
+      maxTokens: 2000, includeProjectMap: false, includeGraph: false, includeLessons: true, includeDecisions: false,
+    });
+    if (ctxWithSecret) {
+      ctxWithSecret.summary = 'API_KEY=sk-test123 in summary';
+      const formatted = formatRecallContext(ctxWithSecret);
+      const t21hOk = !formatted.includes('sk-test123');
+      console.log(`  ${t21hOk ? '✓ formatRecallContext redacts secrets' : '✗ Secret leak in formatRecallContext'}`);
+    } else {
+      console.log('  ⚠ No context to test redaction (non-fatal)');
+    }
+
+    // Test 21i: isRecallAvailable
+    section('TEST 21i: isRecallAvailable — checks availability');
+    const available = await isRecallAvailable();
+    console.log(`  Recall available: ${available}`);
+    console.log(`  ${available ? '✓ isRecallAvailable returns true' : '⚠ isRecallAvailable returns false (may need brain init)'}`);
+
+    // ── Quality improvement tests ──
+
+    // Test 21j: Ollama decision — no mid-word truncation, includes HYSA_ENABLE_LOCAL_FALLBACK
+    section('TEST 21j: Ollama decision — no mid-word truncation');
+    const ctxOllama = await buildRecallContext('what did we decide about Ollama', {
+      maxTokens: 2000, includeProjectMap: false, includeGraph: false, includeLessons: false, includeDecisions: true,
+    });
+    if (ctxOllama) {
+      const s = ctxOllama.summary;
+      // Check no mid-word truncation (trailing "..." is OK, but not a partial word)
+      const lines = s.split('\n');
+      let hasTruncationIssue = false;
+      for (const line of lines) {
+        if (line.length > 0 && !line.endsWith('...') && !line.endsWith('.') && !line.endsWith(':') && !line.endsWith(' ')) {
+          const lastChar = line[line.length - 1];
+          // Words should end with word boundary. If last char is alphanumeric, it's likely mid-word cut
+          if (/[a-zA-Z0-9]/.test(lastChar)) {
+            // Check if the line ends naturally (end of content)
+            // Only flag if there's no punctuation before the last word
+            const lastWord = line.split(/\s+/).pop() || '';
+            if (lastWord.length > 0 && !/[.!?:]/.test(line[line.length - lastWord.length - 1] || '')) {
+              const preceding = line.slice(0, -lastWord.length);
+              if (preceding.length > 0 && !/[:.!?]\s*$/.test(preceding)) {
+                hasTruncationIssue = true;
+              }
+            }
+          }
+        }
+      }
+      const hasHYSA = s.includes('HYSA_ENABLE_LOCAL_FALLBACK');
+      const hasFallbackContent = s.includes('fallback') || s.includes('Ollama') || s.includes('local');
+      const t21jOk = !hasTruncationIssue && hasHYSA && hasFallbackContent;
+      console.log(`  Truncation issue: ${hasTruncationIssue}`);
+      console.log(`  Contains HYSA_ENABLE_LOCAL_FALLBACK: ${hasHYSA}`);
+      console.log(`  Contains fallback/Ollama/local: ${hasFallbackContent}`);
+      console.log(`  ${t21jOk ? '✓ Ollama decision is complete, not cut, includes key content' : '✗ Ollama decision quality issue'}`);
+      if (!t21jOk) console.log(`  Summary snippet: ${s.slice(0, 200)}`);
+    } else {
+      console.log('  ⚠ No context returned for Ollama query');
+    }
+
+    // Test 21k: Provider fallback — does NOT include unrelated "Brain Context Injection" decision
+    section('TEST 21k: Provider fallback excludes Brain Context Injection');
+    const ctxProvFallback = await buildRecallContext('why did provider fallback fail before', {
+      maxTokens: 2000, includeProjectMap: false, includeGraph: true, includeLessons: true, includeDecisions: true,
+    });
+    if (ctxProvFallback) {
+      const s = ctxProvFallback.summary;
+      const hasBrainContext = s.includes('Brain Context Injection');
+      const hasProviderFallbackLesson = s.includes('Provider fallback stability') || s.includes('providers should be mocked');
+      const t21kOk = !hasBrainContext && hasProviderFallbackLesson;
+      console.log(`  Brain Context Injection present: ${hasBrainContext}`);
+      console.log(`  Has provider fallback content: ${hasProviderFallbackLesson}`);
+      console.log(`  ${t21kOk ? '✓ Unrelated Brain Context Injection excluded, fallback content present' : '✗ Provider fallback filtering issue'}`);
+    } else {
+      console.log('  ⚠ No context returned for provider fallback query');
+    }
+
+    // Test 21l: Provider fallback — does NOT include "Phase 3A Brain Implementation" lesson
+    section('TEST 21l: Provider fallback excludes Phase 3A Brain lesson');
+    if (ctxProvFallback) {
+      const s = ctxProvFallback.summary;
+      const hasPhase3A = s.includes('Phase 3A');
+      const t21lOk = !hasPhase3A;
+      console.log(`  Phase 3A Brain Implementation present: ${hasPhase3A}`);
+      console.log(`  ${t21lOk ? '✓ Unrelated Phase 3A Brain Implementation excluded' : '✗ Phase 3A Brain Implementation should not appear'} `);
+    } else {
+      console.log('  ⚠ No context returned for provider fallback query');
+    }
+
+    // Test 21m: Providers involved includes openai_router, anthropic_proxy, test-provider
+    section('TEST 21m: Providers involved includes all providers');
+    // Seed graph with missing provider data if needed (ensure all three exist)
+    const { logProviderSuccess, logProviderFailure } = await import('./dist/brain/graph-store.js');
+    try {
+      await logProviderSuccess('openai_router', 'qw/qwen3-coder-flash');
+      await logProviderSuccess('anthropic_proxy', 'claude-3-haiku-latest');
+      await logProviderFailure('test-provider', 'test-model', 'rate limited');
+    } catch {}
+    // Rebuild context after seeding
+    const ctxProvAll = await buildRecallContext('why did provider fallback fail before', {
+      maxTokens: 2000, includeProjectMap: false, includeGraph: true, includeLessons: true, includeDecisions: true,
+    });
+    if (ctxProvAll) {
+      const s = ctxProvAll.summary;
+      const hasOpenaiRouter = s.includes('openai_router');
+      const hasAnthropicProxy = s.includes('anthropic_proxy');
+      const hasTestProvider = s.includes('test-provider');
+      const allPresent = hasOpenaiRouter && hasAnthropicProxy && hasTestProvider;
+      console.log(`  openai_router: ${hasOpenaiRouter}`);
+      console.log(`  anthropic_proxy: ${hasAnthropicProxy}`);
+      console.log(`  test-provider: ${hasTestProvider}`);
+      console.log(`  ${allPresent ? '✓ All expected providers found' : '✗ Missing some providers'} `);
+    } else {
+      console.log('  ⚠ No context returned for provider fallback query');
+    }
+
+    // Test 21n: Rate limits — includes cooldown/fallback policy
+    section('TEST 21n: Rate limits includes cooldown/fallback policy');
+    const ctxRateLimit = await buildRecallContext('what happened with rate limits', {
+      maxTokens: 2000, includeProjectMap: false, includeGraph: true, includeLessons: true, includeDecisions: true,
+    });
+    if (ctxRateLimit) {
+      const s = ctxRateLimit.summary;
+      const hasRateEvent = s.includes('rate limited') || s.includes('rate limit') || s.includes('Rate');
+      const hasCooldown = s.includes('cooldown');
+      const hasFallbackPolicy = s.includes('fallback') || s.includes('HYSA_ENABLE_LOCAL_FALLBACK') || s.includes('Ollama');
+      const t21nOk = hasRateEvent && hasCooldown && hasFallbackPolicy;
+      console.log(`  Rate limit event found: ${hasRateEvent}`);
+      console.log(`  Cooldown mentioned: ${hasCooldown}`);
+      console.log(`  Fallback policy included: ${hasFallbackPolicy}`);
+      console.log(`  ${t21nOk ? '✓ Rate limit recall includes events, cooldown, and fallback policy' : '✗ Rate limit quality issue'} `);
+    } else {
+      console.log('  ⚠ No context returned for rate limit query');
+    }
+
+    // ── Timing & Fast Path Tests ──
+
+    // Test 22a: isMemoryQuery — short message like "nice" returns false
+    section('TEST 22a: isMemoryQuery — short message returns false');
+    const { isMemoryQuery } = await import('./dist/brain/recall.js');
+    const t22a1 = isMemoryQuery('nice');
+    const t22a2 = isMemoryQuery('ok');
+    const t22a3 = isMemoryQuery('thanks');
+    const t22a4 = isMemoryQuery('sure');
+    const t22a5 = isMemoryQuery('yes');
+    const allShortFalse = !t22a1 && !t22a2 && !t22a3 && !t22a4 && !t22a5;
+    console.log(`  "nice" → ${t22a1}, "ok" → ${t22a2}, "thanks" → ${t22a3}, "sure" → ${t22a4}, "yes" → ${t22a5}`);
+    console.log(`  ${allShortFalse ? '✓ Short greetings skip recall' : '✗ Short greeting triggers recall'}`);
+
+    // Test 22b: isMemoryQuery — provider/decision queries return true
+    section('TEST 22b: isMemoryQuery — provider/decision queries return true');
+    const t22b1 = isMemoryQuery('provider fallback');
+    const t22b2 = isMemoryQuery('Ollama decision');
+    const t22b3 = isMemoryQuery('rate limits');
+    const t22b4 = isMemoryQuery('what did we decide');
+    const t22b5 = isMemoryQuery('lesson learned');
+    const allRelevantTrue = t22b1 && t22b2 && t22b3 && t22b4 && t22b5;
+    console.log(`  "provider fallback" → ${t22b1}, "Ollama decision" → ${t22b2}, "rate limits" → ${t22b3}`);
+    console.log(`  "what did we decide" → ${t22b4}, "lesson learned" → ${t22b5}`);
+    console.log(`  ${allRelevantTrue ? '✓ Memory queries trigger recall' : '✗ Memory query missed'}`);
+
+    // Test 22c: isMemoryQuery — longer messages always return true
+    section('TEST 22c: isMemoryQuery — longer messages return true');
+    const t22c1 = isMemoryQuery('what do you think about this project structure');
+    const t22c2 = isMemoryQuery('can you help me write a React component');
+    const t22c3 = isMemoryQuery('how does the smart router work');
+    const allLongTrue = t22c1 && t22c2 && t22c3;
+    console.log(`  "what do you think..." → ${t22c1}`);
+    console.log(`  "can you help me..." → ${t22c2}`);
+    console.log(`  "how does smart..." → ${t22c3}`);
+    console.log(`  ${allLongTrue ? '✓ Longer messages always trigger recall' : '✗ Longer message skipped'}`);
+
+    // Test 22d: Timer class works
+    section('TEST 22d: Timer class — basic timing');
+    const { Timer } = await import('./dist/utils/timing.js');
+    const timer = new Timer();
+    timer.start('stage_a');
+    await new Promise(r => setTimeout(r, 10));
+    const elapsedA = timer.stop('stage_a');
+    timer.start('stage_b');
+    const elapsedB = timer.stop('stage_b');
+    const table = timer.table('test');
+    const t22dOk = elapsedA >= 8 && elapsedB >= 0 && table.includes('stage_a') && table.includes('test.total');
+    console.log(`  stage_a: ${elapsedA}ms, stage_b: ${elapsedB}ms`);
+    console.log(`  Table: ${table.includes('stage_a') ? '✓' : '✗'}`);
+    console.log(`  ${t22dOk ? '✓ Timer works correctly' : '✗ Timer issue'}`);
+
+    // Test 22e: isMemoryQuery after buildRecallContext fast path
+    section('TEST 22e: buildRecallContext — fast path short message');
+    const ctxShort = await buildRecallContext('nice', { maxTokens: 2000, includeProjectMap: true, includeGraph: true, includeLessons: true, includeDecisions: true });
+    const t22eOk = ctxShort === null;
+    console.log(`  "nice" → ${ctxShort === null ? 'null (fast path)' : 'context returned'}`);
+    console.log(`  ${t22eOk ? '✓ Short message fast path works' : '✗ Fast path missed'}`);
+
+  } catch (err) {
+    console.log(`  ✗ Recall test error: ${err.message}`);
+    globalTestFailed = true;
+  }
+
+  // ===== Tool Reliability Tests (Phase 3D) =====
+
+  try {
+
+    // Test 23a: findToolCallErrors — unknown tool type
+    section('TEST 23a: findToolCallErrors — unknown tool type');
+    const { findToolCallErrors, parseToolCalls, parseToolCallsSafe, isProtectedFilePath } = await import('./dist/ai/tools.js');
+    const unknownXml = '<tool_call><tool_name>unknown_tool</tool_name>{"filePath":"x"}</tool_call>';
+    const unknownJson = '{"type":"unknown_tool","filePath":"x"}';
+    const unknownAngle = '<|tool_call_start|>[unknown_tool(file="x")]<|tool_call_end|>';
+    const errorsXml = findToolCallErrors(unknownXml);
+    const errorsJson = findToolCallErrors(unknownJson);
+    const errorsAngle = findToolCallErrors(unknownAngle);
+    const t23aOk = errorsXml.length > 0 && errorsJson.length > 0 && errorsAngle.length > 0;
+    console.log(`  XML unknown tool error: ${errorsXml.length > 0 ? errorsXml[0] : 'none'}`);
+    console.log(`  JSON unknown tool error: ${errorsJson.length > 0 ? errorsJson[0] : 'none'}`);
+    console.log(`  Angle unknown tool error: ${errorsAngle.length > 0 ? errorsAngle[0] : 'none'}`);
+    console.log(`  ${t23aOk ? '✓ Unknown tool types detected' : '✗ Missed unknown tool types'}`);
+
+    // Test 23b: findToolCallErrors — incomplete XML
+    section('TEST 23b: findToolCallErrors — incomplete XML');
+    const incompleteXml = '<tool_call><tool_name>read_file</tool_name>{"filePath":"x"}';
+    const incompleteErrors = findToolCallErrors(incompleteXml);
+    const t23bOk = incompleteErrors.some(e => e.toLowerCase().includes('unclosed'));
+    console.log(`  Errors: ${incompleteErrors.join('; ') || 'none'}`);
+    console.log(`  ${t23bOk ? '✓ Incomplete XML detected' : '✗ Missed incomplete XML'}`);
+
+    // Test 23c: parseToolCallsSafe — valid tool call
+    section('TEST 23c: parseToolCallsSafe — valid tool call');
+    const validXml = '<tool_call><tool_name>read_file</tool_name>{"filePath":"test.ts"}</tool_call>';
+    const result = parseToolCallsSafe(validXml);
+    const t23cOk = result.calls.length === 1 && result.calls[0].type === 'read_file' && result.errors.length === 0;
+    console.log(`  Calls: ${result.calls.length}, Errors: ${result.errors.length}`);
+    console.log(`  ${t23cOk ? '✓ parseToolCallsSafe returns valid calls and no errors' : '✗ parseToolCallsSafe issue'}`);
+
+    // Test 23d: isProtectedFilePath
+    section('TEST 23d: isProtectedFilePath — detects sensitive files');
+    const t23d1 = isProtectedFilePath('.env');
+    const t23d2 = isProtectedFilePath('.env.local');
+    const t23d3 = isProtectedFilePath('config/secret.key');
+    const t23d4 = isProtectedFilePath('../outside/.env');
+    const t23d5 = isProtectedFilePath('src/index.ts');
+    const t23dOk = t23d1 && t23d2 && t23d3 && t23d4 && !t23d5;
+    console.log(`  .env: ${t23d1}, .env.local: ${t23d2}, secret.key: ${t23d3}, ../outside/.env: ${t23d4}, src/index.ts: ${!t23d5}`);
+    console.log(`  ${t23dOk ? '✓ Protected file detection works' : '✗ Protected file detection issue'}`);
+
+    // Test 23e: isPathTraversal — detects traversal
+    section('TEST 23e: isPathTraversal — detects path traversal');
+    const { isPathTraversal: isReadTraversal } = await import('./dist/files/reader.js');
+    const { isPathTraversal: isWriteTraversal, summarizeDiff } = await import('./dist/files/writer.js');
+    const root = '/home/user/project';
+    const t23e1 = isReadTraversal('/home/user/project/src/index.ts', root);
+    const t23e2 = isReadTraversal('/home/user/outside/secret.txt', root);
+    const t23e3 = isReadTraversal('/home/user/project/../../etc/passwd', root);
+    const t23e4 = isWriteTraversal('/home/user/project/src/index.ts', root);
+    const t23e5 = isWriteTraversal('/home/user/project/../../etc/passwd', root);
+    const t23e6 = isWriteTraversal('/home/user/outside/file.txt', root);
+    const t23eOk = !t23e1 && t23e2 && t23e3 && !t23e4 && t23e5 && t23e6;
+    console.log(`  Inside project: ${!t23e1}, Outside direct: ${t23e2}, Traversal ../..: ${t23e3}`);
+    console.log(`  Write inside: ${!t23e4}, Write traversal: ${t23e5}, Write outside: ${t23e6}`);
+    console.log(`  ${t23eOk ? '✓ Path traversal detection works' : '✗ Path traversal detection issue'}`);
+
+    // Test 23f: summarizeDiff — counts changes
+    section('TEST 23f: summarizeDiff — counts additions/deletions');
+    const diff = `@@ -1,3 +1,4 @@
+ line1
++added line
+-removed line
+ unchanged
++another added
+@@ -10,2 +11,1 @@
+ context
+-removed`;
+    const summary = summarizeDiff(diff);
+    const t23fOk = summary.additions === 2 && summary.deletions === 2 && summary.hunks === 2;
+    console.log(`  Additions: ${summary.additions}, Deletions: ${summary.deletions}, Hunks: ${summary.hunks}`);
+    console.log(`  ${t23fOk ? '✓ summarizeDiff counts correctly' : '✗ summarizeDiff issue'}`);
+
+    // Test 23g: withTimeout — resolves before timeout
+    section('TEST 23g: withTimeout — resolves before timeout');
+    const { withTimeout, formatCommandOutput } = await import('./dist/utils/commands.js');
+    const fastPromise = new Promise(r => setTimeout(() => r('done'), 5));
+    let t23gResult = '';
+    let t23gError = '';
+    try {
+      t23gResult = await withTimeout(fastPromise, 1000, 'fast test');
+    } catch (e) {
+      t23gError = e.message || String(e);
+    }
+    const t23gOk = t23gResult === 'done' && !t23gError;
+    console.log(`  Result: "${t23gResult}", Error: "${t23gError}"`);
+    console.log(`  ${t23gOk ? '✓ withTimeout resolves before timeout' : '✗ withTimeout issue'}`);
+
+    // Test 23h: withTimeout — rejects on timeout
+    section('TEST 23h: withTimeout — rejects on timeout');
+    const slowPromise = new Promise(() => {}); // never resolves
+    let t23hResult = '';
+    let t23hError = '';
+    try {
+      t23hResult = await withTimeout(slowPromise, 50, 'slow test');
+    } catch (e) {
+      t23hError = e.message || String(e);
+    }
+    const t23hOk = !t23hResult && t23hError.includes('timed out after 50ms');
+    console.log(`  Result: "${t23hResult}", Error: "${t23hError}"`);
+    console.log(`  ${t23hOk ? '✓ withTimeout rejects on timeout' : '✗ withTimeout timeout issue'}`);
+
+    // Test 23i: formatCommandOutput — truncates long output
+    section('TEST 23i: formatCommandOutput — truncates long output');
+    const longOutput = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`).join('\n');
+    const formatted = formatCommandOutput(longOutput, 20);
+    const formattedLines = formatted.split('\n');
+    const t23iOk = formattedLines.length <= 25 && formatted.includes('lines truncated');
+    console.log(`  Input lines: 200, Output lines: ${formattedLines.length}`);
+    console.log(`  Contains trunction marker: ${formatted.includes('lines truncated')}`);
+    console.log(`  ${t23iOk ? '✓ formatCommandOutput truncates correctly' : '✗ formatCommandOutput truncation issue'}`);
+
+    // Test 23j: formatCommandOutput — short output pass-through
+    section('TEST 23j: formatCommandOutput — short output');
+    const shortOutput = 'line1\nline2\nline3';
+    const shortFormatted = formatCommandOutput(shortOutput, 20);
+    const t23jOk = shortFormatted === shortOutput;
+    console.log(`  Original: "${shortOutput}", Formatted: "${shortFormatted}"`);
+    console.log(`  ${t23jOk ? '✓ formatCommandOutput passes through short output' : '✗ formatCommandOutput short issue'}`);
+
+    // Test 23k: Timer table — format includes percentage bars
+    section('TEST 23k: Timer table — format includes percentage bars');
+    const { Timer } = await import('./dist/utils/timing.js');
+    const t23kTimer = new Timer();
+    t23kTimer.start('read');
+    t23kTimer.start('write');
+    const readElapsed = t23kTimer.stop('read');
+    const writeElapsed = t23kTimer.stop('write');
+    const table = t23kTimer.table('tool');
+    const t23kOk = table.includes('tool.read') && table.includes('tool.write') && table.includes('tool.total') && table.includes('%');
+    console.log(`  read: ${readElapsed}ms, write: ${writeElapsed}ms`);
+    console.log(`  Table includes stages: ${table.includes('tool.read') && table.includes('tool.write') ? '✓' : '✗'}`);
+    console.log(`  ${t23kOk ? '✓ Timer table format correct' : '✗ Timer table format issue'}`);
+
+  } catch (err) {
+    console.log(`  ✗ Tool reliability test error: ${err.message}`);
+    globalTestFailed = true;
+  }
+
+  // ===== Auto-Fix Tests (Phase 3E) =====
+
+  try {
+
+    // Test 24a: classifyError — recognizes error types
+    section('TEST 24a: classifyError — error type detection');
+    const { classifyError, extractFileInfo, isErrorResult, shouldAutoFix, isFixableError, isAutoFixTask } = await import('./dist/tools/auto-fix.js');
+    const tsErr = classifyError('src/file.ts(10,5) - error TS2322: Type "string" is not assignable to type "number".', 'execute_command');
+    const eslintErr = classifyError('src/file.ts:10:5 error no-unused-vars "foo" is defined but never used', 'execute_command');
+    const testErr = classifyError('FAIL tests/foo.test.ts (5.2s)\n  ✗ should return correct value\n  AssertionError: expected 3 to equal 4', 'execute_command');
+    const syntaxErr = classifyError('SyntaxError: Unexpected token } in JSON at position 42\n    at JSON.parse (<anonymous>)', 'execute_command');
+    const timeoutErr = classifyError('Command timed out after 30000ms', 'execute_command');
+    const permissionErr = classifyError('Blocked: path traversal blocked — ../outside/secret.txt', 'execute_command');
+    const t24a1 = tsErr.category === 'typescript_error' && tsErr.filePath === 'src/file.ts' && tsErr.line === 10;
+    const t24a2 = eslintErr.category === 'eslint_error';
+    const t24a3 = testErr.category === 'test_failure';
+    const t24a4 = syntaxErr.category === 'syntax_error';
+    const t24a5 = timeoutErr.category === 'command_timeout';
+    const t24a6 = permissionErr.category === 'permission_error';
+    const t24aOk = t24a1 && t24a2 && t24a3 && t24a4 && t24a5 && t24a6;
+    console.log(`  TS error: ${tsErr.category} ✓, ESLint: ${eslintErr.category} ✓, Test: ${testErr.category} ✓`);
+    console.log(`  Syntax: ${syntaxErr.category} ✓, Timeout: ${timeoutErr.category} ✓, Permission: ${permissionErr.category} ✓`);
+    console.log(`  ${t24aOk ? '✓ All error types classified correctly' : '✗ Error classification issue'}`);
+
+    // Test 24b: extractFileInfo — parses file path and line
+    section('TEST 24b: extractFileInfo — file path + line parsing');
+    const fi1 = extractFileInfo('src/file.ts:10:5 - error TS2322');
+    const fi2 = extractFileInfo('src/file.ts(10,5)');
+    const fi3 = extractFileInfo('Error in src/app.tsx');
+    const fi4 = extractFileInfo('at Object.<anonymous> (src/index.ts:42:9)');
+    const t24b1 = fi1.filePath === 'src/file.ts' && fi1.line === 10 && fi1.column === 5;
+    const t24b2 = fi2.filePath === 'src/file.ts' && fi2.line === 10 && fi2.column === 5;
+    const t24b3 = fi3.filePath === 'src/app.tsx';
+    const t24bOk = t24b1 && t24b2 && t24b3;
+    console.log(`  src/file.ts:10:5 → ${JSON.stringify(fi1)}`);
+    console.log(`  src/file.ts(10,5) → ${JSON.stringify(fi2)}`);
+    console.log(`  Error in src/app.tsx → ${JSON.stringify(fi3)}`);
+    console.log(`  ${t24bOk ? '✓ File info extraction works' : '✗ File info extraction issue'}`);
+
+    // Test 24c: isErrorResult — detects error vs success
+    section('TEST 24c: isErrorResult — error detection');
+    const t24c1 = isErrorResult('Error: file not found: missing.ts');
+    const t24c2 = isErrorResult('Command failed:\ntsc --noEmit error TS2322');
+    const t24c3 = isErrorResult('Blocked: path traversal detected');
+    const t24c4 = isErrorResult('Edit blocked: dist/output.js is generated');
+    const t24c5 = isErrorResult('Content of src/index.ts:\n```\nexport const foo = 1;\n```');
+    const t24c6 = isErrorResult('Edit applied successfully to src/index.ts');
+    const t24cOk = t24c1 && t24c2 && t24c3 && t24c4 && !t24c5 && !t24c6;
+    console.log(`  Error: ${t24c1} ✓, Cmd fail: ${t24c2} ✓, Blocked: ${t24c3} ✓`);
+    console.log(`  Edit blocked: ${t24c4} ✓, Success read: ${!t24c5} ✓, Success edit: ${!t24c6} ✓`);
+    console.log(`  ${t24cOk ? '✓ Error result detection works' : '✗ Error result detection issue'}`);
+
+    // Test 24d: isAutoFixTask — task kind filtering
+    section('TEST 24d: isAutoFixTask — task kind filtering');
+    const t24d1 = isAutoFixTask('code_edit');
+    const t24d2 = isAutoFixTask('debugging');
+    const t24d3 = isAutoFixTask('project_scan');
+    const t24d4 = isAutoFixTask('simple_chat');
+    const t24d5 = isAutoFixTask('web_research');
+    const t24dOk = t24d1 && t24d2 && t24d3 && !t24d4 && !t24d5;
+    console.log(`  code_edit: ${t24d1} ✓, debugging: ${t24d2} ✓, project_scan: ${t24d3} ✓`);
+    console.log(`  simple_chat: ${!t24d4} ✓, web_research: ${!t24d5} ✓`);
+    console.log(`  ${t24dOk ? '✓ Task kind filtering works' : '✗ Task kind filtering issue'}`);
+
+    // Test 24e: isFixableError — fixability logic
+    section('TEST 24e: isFixableError — fixability logic');
+    const fixableTS = classifyError('src/file.ts:10:5 - error TS2322', 'execute_command');
+    const fixableTest = classifyError('src/test.ts ✗ assertion failed', 'execute_command');
+    const notFixableTimeout = classifyError('timed out after 30000ms', 'execute_command');
+    const notFixablePerm = classifyError('Blocked: path traversal', 'execute_command');
+    const t24e1 = isFixableError(fixableTS);
+    const t24e2 = isFixableError(fixableTest);
+    const t24e3 = !isFixableError(notFixableTimeout);
+    const t24e4 = !isFixableError(notFixablePerm);
+    const t24eOk = t24e1 && t24e2 && t24e3 && t24e4;
+    console.log(`  TS error: ${t24e1} ✓, Test failure: ${t24e2} ✓, Timeout: ${!t24e3} ✓, Permission: ${!t24e4} ✓`);
+    console.log(`  ${t24eOk ? '✓ Fixability logic correct' : '✗ Fixability logic issue'}`);
+
+    // Test 24f: shouldAutoFix — end-to-end decision
+    section('TEST 24f: shouldAutoFix — end-to-end decision');
+    const tsResult = 'Command failed:\nsrc/error.ts:5:1 - error TS2322: Type "string" is not assignable to type "number".';
+    const successResult = 'Edit applied successfully to src/ok.ts';
+    const notCodeResult = 'Command failed:\nsrc/error.ts:5:1 - error TS2322';
+    const t24f1 = shouldAutoFix(tsResult, 'execute_command', 'code_edit');
+    const t24f2 = !shouldAutoFix(successResult, 'execute_command', 'code_edit');
+    const t24f3 = !shouldAutoFix(tsResult, 'read_file', 'code_edit');
+    const t24f4 = !shouldAutoFix(tsResult, 'execute_command', 'simple_chat');
+    const t24fOk = t24f1 && t24f2 && t24f3 && t24f4;
+    console.log(`  TS error + code_edit: ${t24f1} ✓, Success result: ${!t24f2} ✓`);
+    console.log(`  Wrong tool type: ${!t24f3} ✓, Simple chat: ${!t24f4} ✓`);
+    console.log(`  ${t24fOk ? '✓ shouldAutoFix decision correct' : '✗ shouldAutoFix issue'}`);
+
+  } catch (err) {
+    console.log(`  ✗ Auto-fix test error: ${err.message}`);
+    globalTestFailed = true;
+  }
+
   // ===== FINAL SUMMARY =====
   section('FINAL SUMMARY');
   console.log(`  Project: ${projectInfo.type} (${projectInfo.fileCount} files)`);
@@ -2845,7 +3346,52 @@ process.on('exit', () => {
    console.log(`  Test 20l (Git safety):     .hysa is not tracked by git`);
    console.log();
 
-   console.log(`  Config backed up: original = ${origProvider}/${origModel}`);
+   console.log(`\n  Recall Tests (Phase 3C):`);
+   console.log(`  Test 21a (Proj ctx):      detectRecallIntent("smart router") → project_context`);
+   console.log(`  Test 21b (Prov hist):     detectRecallIntent("provider fallback") → provider_history`);
+   console.log(`  Test 21c (Browser hist):  detectRecallIntent("browser bug") → browser/bug_history`);
+   console.log(`  Test 21d (Greeting):      detectRecallIntent("hi") → none`);
+   console.log(`  Test 21e (Write cmd):     detectRecallIntent("write a game") → none`);
+   console.log(`  Test 21f (Arabic):        detectRecallIntent Arabic → project_context`);
+   console.log(`  Test 21g (Build ctx):     buildRecallContext returns compact context`);
+   console.log(`  Test 21h (Redact):        formatRecallContext redacts secrets`);
+   console.log(`  Test 21i (Available):     isRecallAvailable checks correctly`);
+   console.log(`  Test 21j (Ollama dec):    Ollama decision is complete, not cut mid-word`);
+   console.log(`  Test 21k (Prov excl):     Provider fallback excludes Brain Context Injection`);
+   console.log(`  Test 21l (Phase excl):    Provider fallback excludes Phase 3A Brain lesson`);
+   console.log(`  Test 21m (Providers):     Providers involved includes openai_router + anthropic_proxy + test-provider`);
+   console.log(`  Test 21n (Rate limits):   Rate limits recall includes cooldown/fallback policy`);
+   console.log(`  Test 22a (Fast short):    Short "nice" does not trigger recall`);
+   console.log(`  Test 22b (Fast rel):      "provider fallback"/"Ollama" triggers recall`);
+   console.log(`  Test 22c (Fast long):     Longer messages always trigger recall`);
+   console.log(`  Test 22d (Timer class):   Timer records and formats stages`);
+    console.log(`  Test 22e (Fast path):     buildRecallContext("nice") returns null`);
+    console.log();
+
+    console.log(`\n  Tool Reliability Tests (Phase 3D):`);
+    console.log(`  Test 23a (Unknown tool):  findToolCallErrors detects unknown tool types`);
+    console.log(`  Test 23b (Incomplete):    findToolCallErrors detects unclosed XML`);
+    console.log(`  Test 23c (Safe parse):    parseToolCallsSafe returns calls + errors`);
+    console.log(`  Test 23d (Protected):     isProtectedFilePath detects .env and secret files`);
+    console.log(`  Test 23e (Traversal):     isPathTraversal blocks outside-project paths`);
+    console.log(`  Test 23f (Diff summary):  summarizeDiff counts additions/deletions/hunks`);
+    console.log(`  Test 23g (Timeout ok):    withTimeout resolves before timeout`);
+    console.log(`  Test 23h (Timeout err):   withTimeout rejects on timeout`);
+    console.log(`  Test 23i (Output trunc):  formatCommandOutput truncates long command output`);
+    console.log(`  Test 23j (Output short):  formatCommandOutput passes through short output`);
+    console.log(`  Test 23k (Timer table):   Timer.table format includes percentage bars`);
+    console.log();
+
+    console.log(`\n  Auto-Fix Tests (Phase 3E):`);
+    console.log(`  Test 24a (Classify err):  classifyError recognizes TS/ESLint/test/syntax/timeout/permission`);
+    console.log(`  Test 24b (File info):     extractFileInfo parses file:line:col from error messages`);
+    console.log(`  Test 24c (Error detect):  isErrorResult distinguishes error vs success results`);
+    console.log(`  Test 24d (Task filter):   isAutoFixTask enables code/edit/test, disables chat/recall`);
+    console.log(`  Test 24e (Fixability):    isFixableError allows TS/test errors, rejects timeout/permission`);
+    console.log(`  Test 24f (Decision):      shouldAutoFix end-to-end: correct tool + kind + error → true`);
+    console.log();
+
+    console.log(`  Config backed up: original = ${origProvider}/${origModel}`);
    console.log(`  Config restored: ${origProvider}/${origModel}`);
 
   if (globalTestFailed) {

@@ -1,5 +1,16 @@
 import { readFileSync, existsSync } from 'node:fs';
-import { relative } from 'node:path';
+import { relative, resolve, normalize } from 'node:path';
+
+export function isPathTraversal(filePath: string, projectRoot: string): boolean {
+  const resolved = resolve(normalize(filePath));
+  const root = resolve(normalize(projectRoot));
+  const rel = relative(root, resolved);
+  return rel.startsWith('..') || relative(resolved, root).startsWith('..') || rel === resolved;
+}
+
+export function normalizePath(filePath: string): string {
+  return filePath.replace(/\\/g, '/');
+}
 
 const IGNORED_PATTERNS = [
   '.env',

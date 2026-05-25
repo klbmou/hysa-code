@@ -51,6 +51,8 @@
     "dev": "tsx src/index.ts",
     "dev:web": "cd web && npx vite",
     "check": "node ./node_modules/typescript/bin/tsc --noEmit",
+    "test": "npx tsx --test --test-reporter=spec tests/*.test.ts",
+    "test:memory": "npx tsx --test --test-reporter=spec tests/memory-writer.test.ts",
     "prepublishOnly": "npm run build && npm run build:web && npm run check",
     "version": "node -e \"const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.version=process.env.npm_package_version;fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n')\""
   },

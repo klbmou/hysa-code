@@ -1,8 +1,32 @@
 import { writeFileSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve, normalize, relative } from 'node:path';
 import { homedir } from 'node:os';
 import { structuredPatch } from 'diff';
 import { readFile } from './reader.js';
+export function isPathTraversal(filePath, projectRoot) {
+    const resolved = resolve(normalize(filePath));
+    const root = resolve(normalize(projectRoot));
+    const rel = relative(root, resolved);
+    return rel.startsWith('..') || relative(resolved, root).startsWith('..') || rel === resolved;
+}
+export function normalizePath(filePath) {
+    return filePath.replace(/\\/g, '/');
+}
+export function summarizeDiff(diff) {
+    const lines = diff.split('\n');
+    let additions = 0;
+    let deletions = 0;
+    let hunks = 0;
+    for (const line of lines) {
+        if (line.startsWith('@@'))
+            hunks++;
+        else if (line.startsWith('+') && !line.startsWith('+++'))
+            additions++;
+        else if (line.startsWith('-') && !line.startsWith('---'))
+            deletions++;
+    }
+    return { additions, deletions, hunks };
+}
 const BACKUP_DIR = join(homedir(), '.hysa', 'backups');
 function ensureBackupDir() {
     if (!existsSync(BACKUP_DIR)) {

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.0] - 2025-05-25
+
+### Added
+- **Persistent Project Memory** — experience graph stores decisions, lessons, and provider events with importance/confidence scoring. Auto-learns from fixes, failures, and user input. Dual storage (graph JSON + markdown files).
+- **Memory Quality & Cleanup** — fuzzy deduplication via Jaccard similarity (threshold >0.4), label normalization, cleanup commands (dry-run default, `--apply` to execute). New CLI: `hysa brain inspect`, `hysa brain cleanup`, `hysa brain forget`, `hysa brain merge`, `hysa brain pin`.
+- **Smart Context Injection** — relevant memories are scored by keyword relevance (0.4), importance (0.25), confidence (0.2), and recency (0.15), then injected within per-task token budgets (simple:800, code:2000, planning:3000, provider:1500 chars). Provider-only tasks filter for provider events; pinned memories always preserved.
+- **Session Tracking** — records commands, file edits, tools, errors, auto-fix attempts, provider fallbacks, and memory injections. `hysa session summary`, `hysa session save`, `hysa session clear` CLI commands. Auto-saves important outcomes to Brain (decisions, lessons, provider fallbacks). Trivial sessions are skipped. Secrets redacted from all records.
+- **39 automated tests** across 4 suites (memory-writer, brain-quality, context-selector, session-tracker).
+
+### Changed
+- Experience graph version bumped to 2 (backward-compatible — old graphs read via fallback).
+- Context injection now uses ranked selection instead of broad recall context.
+- `writeMemory()` now handles scoring (importance/confidence) and fuzzy deduplication.
+
+### Fixed
+- Type error in context-selector.ts (unused `intent` variable and comparison against non-existent `'code'` intent).
+- CLI session commands no longer call `getOrCreateSession()` before `saveSessionToBrain()`, which would overwrite saved session data.
+
 ## [0.5.1] - 2025-05-23
 
 ### Fixed

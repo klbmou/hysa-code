@@ -1,3 +1,4 @@
+export declare function isMemoryQuery(message: string): boolean;
 export type RecallIntent = 'none' | 'project_context' | 'bug_history' | 'provider_history' | 'browser_history' | 'decision_history' | 'lesson_history' | 'skill_history';
 export type RecallContext = {
     intent: RecallIntent;

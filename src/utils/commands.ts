@@ -67,3 +67,23 @@ export function classifyCommand(command: string): CommandSafety {
   }
   return 'unknown';
 }
+
+export function withTimeout<T>(promise: Promise<T>, ms: number, label?: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      const id = setTimeout(() => {
+        clearTimeout(id);
+        reject(new Error(`${label || 'Operation'} timed out after ${ms}ms`));
+      }, ms);
+    }),
+  ]);
+}
+
+export function formatCommandOutput(stdout: string, maxLines: number = 80): string {
+  const lines = stdout.split('\n');
+  if (lines.length <= maxLines) return stdout;
+  const head = lines.slice(0, Math.floor(maxLines / 2));
+  const tail = lines.slice(-Math.floor(maxLines / 2));
+  return [...head, `... (${lines.length - maxLines} lines truncated)`, ...tail].join('\n');
+}

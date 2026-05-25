@@ -306,6 +306,68 @@ export function parseToolCalls(content) {
         return true;
     });
 }
+export function findToolCallErrors(content) {
+    const errors = [];
+    // Detect unknown tool types in XML tool_call blocks
+    const xmlBlockRegex = /<tool_call>([\s\S]*?)<\/tool_call>/g;
+    let m;
+    while ((m = xmlBlockRegex.exec(content)) !== null) {
+        const nameMatch = m[1].match(/<tool_name>\s*(\w+)\s*<\/tool_name>/);
+        if (nameMatch) {
+            const toolType = nameMatch[1].trim();
+            if (!VALID_TOOL_TYPES.has(toolType)) {
+                errors.push(`Unknown tool type "${toolType}" in <tool_call> block`);
+            }
+        }
+        else if (m[1].includes('<tool_name>')) {
+            // Has tool_name tag but couldn't parse — likely malformed
+            errors.push('Malformed <tool_name> tag in <tool_call> block');
+        }
+    }
+    // Detect unknown tool types in angle-bracket format
+    const angleRegex = /<\|tool_call_start\|>\s*\[(\w+)\(/g;
+    while ((m = angleRegex.exec(content)) !== null) {
+        const toolType = m[1].trim();
+        if (!VALID_TOOL_TYPES.has(toolType)) {
+            errors.push(`Unknown tool type "${toolType}" in angle-bracket format`);
+        }
+    }
+    // Detect unknown tool types in JSON format
+    const jsonRegex = /"type"\s*:\s*"(\w+)"/g;
+    while ((m = jsonRegex.exec(content)) !== null) {
+        const toolType = m[1].trim();
+        if (!VALID_TOOL_TYPES.has(toolType)) {
+            errors.push(`Unknown tool type "${toolType}" in JSON format`);
+        }
+    }
+    // Detect partial/incomplete tool_call tags (opening without closing)
+    const openCount = (content.match(/<tool_call>/g) || []).length;
+    const closeCount = (content.match(/<\/tool_call>/g) || []).length;
+    if (openCount > closeCount) {
+        errors.push(`Incomplete <tool_call>: ${openCount - closeCount} unclosed tag(s)`);
+    }
+    // Detect unclosed JSON braces after tool names
+    const toolNameRegex = /<tool_name>\s*\w+\s*<\/tool_name>/g;
+    while ((m = toolNameRegex.exec(content)) !== null) {
+        const after = content.slice(m.index + m[0].length);
+        const braceStart = after.indexOf('{');
+        if (braceStart !== -1) {
+            const afterBrace = after.slice(braceStart);
+            const openBraces = (afterBrace.match(/\{/g) || []).length;
+            const closeBraces = (afterBrace.match(/\}/g) || []).length;
+            if (openBraces > closeBraces) {
+                const snippet = afterBrace.slice(0, 60).replace(/\n/g, '\\n');
+                errors.push(`Incomplete JSON after <tool_name>: \`${snippet}…\` (${openBraces - closeBraces} unclosed brace(s))`);
+            }
+        }
+    }
+    return errors;
+}
+export function parseToolCallsSafe(content) {
+    const calls = parseToolCalls(content);
+    const errors = findToolCallErrors(content);
+    return { calls, errors };
+}
 export function stripToolCallBlocks(content) {
     let result = content;
     // Remove <tool_call>...</tool_call> blocks
