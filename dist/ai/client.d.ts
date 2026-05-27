@@ -8,8 +8,6 @@ interface FallbackCandidate {
     label: string;
 }
 export declare function getFallbackCandidates(current: ProviderType, config: HysaConfig): FallbackCandidate[];
-export declare function isOnlyGreeting(text: string): boolean;
-export declare function getCasualResponse(text: string): string | null;
 export declare function createClient(config: HysaConfig, signal?: AbortSignal): AIClient;
 export { createSingleClient } from './client-factory.js';
 export type { AIClient } from './types.js';

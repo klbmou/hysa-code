@@ -38,25 +38,6 @@ const LOCAL_TIMEOUT_MS = 15000;
 const PROVIDER_FAILURE_COOLDOWN_THRESHOLD = 3;
 const ONLINE_FREE_UNAVAILABLE_MESSAGE = 'All configured online free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.';
 
-const GREETINGS = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'thanks', 'thank you', 'ok', 'okay', 'nice', 'good', 'great', 'perfect', 'yes', 'no', 'sure', 'bye', 'goodbye'];
-const CASUAL_RESPONSES: Record<string, string> = {
-  bro: "Yo — what do you want to build or fix?",
-  thanks: "You're welcome! What's next?",
-  ok: "Got it. What do you need help with?",
-  lol: "Let me know what you want to build or fix.",
-};
-
-function isOnlyGreeting(text: string): boolean {
-  const trimmed = text.trim().toLowerCase();
-  if (CASUAL_RESPONSES[trimmed]) return true;
-  return GREETINGS.some(g => trimmed === g || trimmed === `${g}!` || trimmed === `${g},` || (trimmed.startsWith(g + ' ') && trimmed.split(/\s+/).length <= 3));
-}
-
-function getCasualResponse(text: string): string | null {
-  const trimmed = text.trim().toLowerCase();
-  return CASUAL_RESPONSES[trimmed] || null;
-}
-
 let requestCounter = 0;
 
 function getEnvInt(key: string, defaultVal: number): number {
@@ -92,13 +73,6 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
 
       const lastUser = [...messages].reverse().find(m => m.role === 'user');
       const lastText = typeof lastUser?.content === 'string' ? lastUser.content : '';
-
-      // ── Local greeting ──
-      if (lastUser && isOnlyGreeting(lastText)) {
-        const casual = getCasualResponse(lastText);
-        if (debug) console.log(`${LOG}[req:${reqId}] Task: local_greeting — no provider call`);
-        return { message: casual || 'Hi! How can I help with this project?', toolCalls: [] };
-      }
 
       // ── Classify task ──
       const taskKind: TaskKind = classifyTask(messages);
@@ -290,14 +264,6 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
 
       const lastUser = [...messages].reverse().find(m => m.role === 'user');
       const lastText = typeof lastUser?.content === 'string' ? lastUser.content : '';
-
-      if (lastUser && isOnlyGreeting(lastText)) {
-        const casual = getCasualResponse(lastText);
-        const msg = casual || 'Hi! How can I help with this project?';
-        onEvent({ type: 'token', text: msg });
-        onEvent({ type: 'done', fullText: msg, toolCalls: [] });
-        return { message: msg, toolCalls: [] };
-      }
 
       const taskKind: TaskKind = classifyTask(messages);
       if (debug) console.log(`${LOG}[req:${reqId}] Stream task: ${taskKind}`);

@@ -1,5 +1,6 @@
 import { appendBrainEvent, appendLesson, appendDecision, containsSecret } from '../brain/store.js';
 import { upsertNode, logProviderSuccess, logProviderFailure, searchGraph, readExperienceGraph, linkEventToFiles } from '../brain/graph-store.js';
+import { invalidateRecallCache } from '../brain/recall-cache.js';
 import type { MemorySource } from '../brain/graph-types.js';
 
 const MAX_SUMMARY_LENGTH = 2000;
@@ -111,6 +112,9 @@ export async function writeMemory(
       await linkEventToFiles(node.id, files);
     }
   }
+
+  // Invalidate recall cache so fresh data is picked up
+  invalidateRecallCache();
 }
 
 // ── Auto-fix result writer ──

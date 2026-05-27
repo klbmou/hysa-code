@@ -1,5 +1,6 @@
 import { getModePromptAddendum } from '../agent/modes.js';
 import { COMPACT_PROMPT_PROVIDERS } from '../config/keys.js';
+import { shellInfo } from '../utils/shell.js';
 // ── Mode resolution ──────────────────────────────────
 export function resolvePromptMode(promptMode = 'auto', provider, isSimple) {
     const env = process.env.HYSA_PROMPT_MODE;
@@ -47,9 +48,10 @@ Format:
 
 Rules:
 - Use tools only when needed.
-- For greetings, reply normally.
 - Never edit .env or secrets.
-- Always read a file before editing it.`);
+- Always read a file before editing it.
+- Platform: ${shellInfo()}
+- On Windows, avoid Unix-specific commands (head, tail, grep, find, cat, ls). Prefer Node.js tools for file operations.`);
     return parts.join('\n');
 }
 // ── Full prompt (complex / edit / tool tasks) ─────────
@@ -86,10 +88,7 @@ function buildFullSystemPrompt(projectInfo, agentMode) {
     parts.push(`- If text is visible in the image, read and mention it.`);
     parts.push(`- If the user asks in Arabic, answer in Arabic without English headings.`);
     parts.push(`- Do not write long generic paragraphs. Be direct and informative.`);
-    parts.push(`\n## Greeting Rule`);
-    parts.push(`If the user sends a simple greeting like "hi", "hello", "hey", "salam", or any Arabic greeting, respond normally.`);
-    parts.push(`Do NOT call read_file or any other tool for greeting messages.`);
-    parts.push(`Only call read_file when the user asks to read, explain, edit, debug, or inspect code/project files.`);
+    parts.push(`- Only call read_file when the user asks to read, explain, edit, debug, or inspect code/project files.`);
     parts.push(`\n## Available Tools`);
     parts.push(`You MUST use the exact XML format below. Multiple tool calls are allowed in a single response.`);
     parts.push(`
@@ -127,11 +126,14 @@ Available tools:
 <arguments>{"filePath": "path/to/file.ts", "newContent": "full new file content here"}</arguments>
 </tool_call>
 
-3. Execute a shell command:
+ 3. Execute a shell command:
 <tool_call>
 <tool_name>execute_command</tool_name>
 <arguments>{"command": "npm test"}</arguments>
 </tool_call>
+
+Platform info: ${shellInfo()}
+When on Windows, avoid Unix-specific commands (head, tail, grep, find, cat, ls). Use the Node.js tools (read_file, list_symbols, find_references) instead of shell commands for file operations.
 
 4. List symbols in a file:
 <tool_call>
@@ -170,11 +172,6 @@ Available tools:
 4. Then make edits
 
 You do NOT need to do everything in one step. Read first, then edit after understanding.`);
-    parts.push(`\n## Greeting Guard`);
-    parts.push(`If the user's message is only a greeting (hi, hello, hey, salam, etc.):`);
-    parts.push(`- Respond with a friendly greeting.`);
-    parts.push(`- Do NOT call read_file or any other tool.`);
-    parts.push(`- Do NOT inspect or read any project files.`);
     parts.push(`\n## Edit Planning`);
     parts.push(`Before editing files, you MUST:
 1. Explain which files need to change

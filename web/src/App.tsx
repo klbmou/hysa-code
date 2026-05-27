@@ -15,6 +15,28 @@ const TIMEOUT_MS = 30000;
 const CONFIRM_PATTERNS = [/^(ok\s*)?do\s*it$/i, /^yes$/i, /^apply$/i, /^go\s*ahead$/i, /^proceed$/i, /^yeah\s*do\s*it$/i];
 const PROPOSAL_PATTERNS = [/should I/i, /would you like/i, /i can start/i, /shall I/i];
 
+type LoadingPhase = 'thinking' | 'reading' | 'running' | 'continuing' | 'finalizing' | '';
+
+const PHASE_LABELS: Record<Exclude<LoadingPhase, ''>, string> = {
+  thinking: 'Thinking...',
+  reading: 'Reading project files...',
+  running: 'Running safe command...',
+  continuing: 'Continuing after tool result...',
+  finalizing: 'Finalizing answer...',
+};
+
+interface TimingData {
+  classification?: number;
+  project_scan?: number;
+  context_select?: number;
+  provider?: number;
+  total?: number;
+  tool_steps?: number;
+  routing_mode?: string;
+  project_mode?: boolean;
+  files_selected?: number;
+}
+
 const LOG = '[HYSA Web Chat]';
 
 function getAssistantText(data: any): string {
@@ -41,7 +63,8 @@ type ChatItem = {
   | { kind: 'ai_msg'; content: string }
   | { kind: 'tool_event'; eventType: 'read' | 'edit' | 'done' | 'run' | 'error' | 'fallback'; message: string }
   | { kind: 'diff_card'; filePath: string; content: string; diff: string }
-  | { kind: 'command_card'; command: string }
+  | { kind: 'command_card'; command: string; toolCall?: ToolCall }
+  | { kind: 'tool_result'; content: string }
 );
 
 type RightTab = 'code' | 'diff' | 'terminal';
@@ -88,6 +111,8 @@ export default function App() {
   const [yolo, setYolo] = useState(false);
   const [elapsedSecs, setElapsedSecs] = useState(0);
   const [thinkingWarning, setThinkingWarning] = useState('');
+  const [loadingPhase, setLoadingPhase] = useState<LoadingPhase>('');
+  const [timingData, setTimingData] = useState<TimingData | null>(null);
   const [debug, setDebug] = useState(false);
   const [lastRawResponse, setLastRawResponse] = useState<string | null>(null);
   const [showIntro, setShowIntro] = useState(true);
@@ -101,16 +126,26 @@ export default function App() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const revealTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pendingMsgsRef = useRef<{ role: string; content: string }[] | null>(null);
+  const treeCacheRef = useRef<{ files: string[]; fileCount: number } | null>(null);
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatItems]);
   useEffect(() => { if (loading) chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [loading]);
 
   useEffect(() => {
     fetch('/api/status').then(r => r.json()).then(setStatus).catch(() => {});
-    fetch('/api/project/tree').then(r => r.json()).then(data => {
-      setFiles(data.files || []);
-      setFileCount(data.fileCount || 0);
-    }).catch(() => {});
+    // Use cached tree if available
+    if (treeCacheRef.current) {
+      setFiles(treeCacheRef.current.files);
+      setFileCount(treeCacheRef.current.fileCount);
+    } else {
+      fetch('/api/project/tree').then(r => r.json()).then(data => {
+        const result = { files: data.files || [], fileCount: data.fileCount || 0 };
+        treeCacheRef.current = result;
+        setFiles(result.files);
+        setFileCount(result.fileCount);
+      }).catch(() => {});
+    }
     fetch('/api/yolo').then(r => r.json()).then(data => {
       if (data && typeof data.enabled === 'boolean') setYolo(data.enabled);
     }).catch(() => {});
@@ -180,6 +215,62 @@ export default function App() {
     return msgs;
   }, []);
 
+  const continueAfterTool = useCallback(async (tc: ToolCall, result: string) => {
+    const msgs = pendingMsgsRef.current || buildMessages(chatItems);
+    setLoading(true);
+    setLoadingPhase('continuing');
+    try {
+      const res = await fetch('/api/chat/continue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: msgs,
+          toolCalls: [tc],
+          toolResults: [result],
+        }),
+      });
+      const data = await res.json();
+
+      if (data.message) {
+        setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: data.message }]);
+        pendingMsgsRef.current = msgs ? [...msgs, { role: 'assistant', content: data.message }] : null;
+      }
+
+      if (data.toolCalls && data.toolCalls.length > 0) {
+        const toolItems: ChatItem[] = [];
+        for (const t of data.toolCalls as ToolCall[]) {
+          if (t.type === 'read_file') {
+            toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'done', message: `Read ${t.params.filePath || ''}` });
+            openFile(t.params.filePath || '');
+          } else if (t.type === 'edit_file') {
+            const fp = t.params.filePath || '';
+            const nc = t.params.newContent || t.params.content || '';
+            toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'edit', message: `Proposed edit for ${fp}` });
+            try {
+              const previewRes = await fetch('/api/file/preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: fp, content: nc }) });
+              const previewData = await previewRes.json();
+              toolItems.push({ id: nextId(), kind: 'diff_card', filePath: fp, content: nc, diff: previewData.diff || 'No diff available' });
+            } catch { toolItems.push({ id: nextId(), kind: 'diff_card', filePath: fp, content: nc, diff: 'Error generating diff' }); }
+          } else if (t.type === 'execute_command') {
+            toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'run', message: `Command: ${t.params.command || ''}` });
+            toolItems.push({ id: nextId(), kind: 'command_card', command: t.params.command || '', toolCall: t });
+          } else {
+            toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'run', message: `Tool: ${t.type}` });
+          }
+        }
+        setChatItems(prev => [...prev, ...toolItems]);
+      } else {
+        pendingMsgsRef.current = null;
+      }
+    } catch {
+      setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: 'Continuation failed. Please try again.' }]);
+      pendingMsgsRef.current = null;
+    } finally {
+      setLoading(false);
+      setLoadingPhase('');
+    }
+  }, [chatItems, buildMessages, openFile]);
+
   const toggleYolo = useCallback(async () => {
     const newVal = !yolo; setYolo(newVal);
     try { await fetch('/api/yolo', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: newVal }) }); } catch {}
@@ -193,6 +284,7 @@ export default function App() {
     setLoading(false);
     setElapsedSecs(0);
     setThinkingWarning('');
+    setLoadingPhase('');
     setRevealingId(null);
     setRevealPos(0);
   }, []);
@@ -248,6 +340,8 @@ export default function App() {
     const userItem: ChatItem = { id: nextId(), kind: 'user_msg', content: finalInput, attachments };
     setChatItems(prev => [...prev, userItem]);
     setLoading(true);
+    setLoadingPhase('thinking');
+    setTimingData(null);
     setElapsedSecs(0);
     setThinkingWarning('');
 
@@ -354,12 +448,20 @@ export default function App() {
                         ? { ...item, content: accumulatedText }
                         : item
                     ));
+                  } else if (event.type === 'tool_result' && event.status === 'executing') {
+                    setLoadingPhase('running');
+                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'done', message: `Step ${event.step}/${event.total}: Auto-executing tools...` }]);
+                  } else if (event.type === 'tool_result' && event.status === 'done') {
+                    setLoadingPhase('finalizing');
+                    const resultItem: ChatItem = { id: nextId(), kind: 'tool_result', content: event.results || '' };
+                    setChatItems(prev => [...prev, resultItem]);
                   } else if (event.type === 'fallback' && debug) {
                     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
                   } else if (event.type === 'done') {
                     streamDone = true;
                     accumulatedText = event.fullText || accumulatedText;
                     finalToolCalls = event.toolCalls || [];
+                    if (event.timing) setTimingData(event.timing);
                   } else if (event.type === 'error') {
                     streamError = event.message || '';
                   }
@@ -374,12 +476,17 @@ export default function App() {
               const event = JSON.parse(trimmed.slice(6));
               if (event.type === 'token') {
                 accumulatedText += event.text;
+              } else if (event.type === 'tool_result' && event.status === 'executing') {
+                setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'done', message: `Step ${event.step}/${event.total}: Auto-executing tools...` }]);
+              } else if (event.type === 'tool_result' && event.status === 'done') {
+                setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_result', content: event.results || '' }]);
               } else if (event.type === 'fallback' && debug) {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
               } else if (event.type === 'done') {
                 streamDone = true;
                 accumulatedText = event.fullText || accumulatedText;
                 finalToolCalls = event.toolCalls || [];
+                if (event.timing) setTimingData(event.timing);
               } else if (event.type === 'error') {
                 streamError = event.message || '';
               }
@@ -419,8 +526,8 @@ export default function App() {
                 } catch { toolItems.push({ id: nextId(), kind: 'diff_card', filePath: fp, content: nc, diff: 'Error generating diff' }); }
               } else if (tc.type === 'execute_command') {
                 const cmd = tc.params.command || '';
-                toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'run', message: `Proposed command: ${cmd}` });
-                toolItems.push({ id: nextId(), kind: 'command_card', command: cmd });
+                toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'run', message: `Command: ${cmd}` });
+                toolItems.push({ id: nextId(), kind: 'command_card', command: cmd, toolCall: tc });
               } else {
                 toolItems.push({ id: nextId(), kind: 'tool_event', eventType: 'run', message: `Tool: ${tc.type}` });
               }
@@ -428,6 +535,12 @@ export default function App() {
             if (toolItems.length > 0) {
               setChatItems(prev => [...prev, ...toolItems]);
             }
+            // Save pending messages for continuation (include streaming AI response)
+            const streamMsgs = buildMessages(chatItems);
+            if (accumulatedText) {
+              streamMsgs.push({ role: 'assistant', content: accumulatedText });
+            }
+            pendingMsgsRef.current = streamMsgs;
           }
         } else {
           setStreamingId(null);
@@ -460,6 +573,7 @@ export default function App() {
 
       const assistantText = getAssistantText(data);
       const hasToolCalls = data.toolCalls && data.toolCalls.length > 0;
+      if (data.timing) setTimingData(data.timing);
 
       if (data.error && !assistantText && !hasToolCalls) {
         const newItems: ChatItem[] = [];
@@ -550,12 +664,19 @@ export default function App() {
             } catch { newItems.push({ id: nextId(), kind: 'diff_card', filePath: fp, content: nc, diff: 'Error generating diff' }); }
           } else if (tc.type === 'execute_command') {
             const cmd = tc.params.command || '';
-            newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'run', message: `Proposed command: ${cmd}` });
-            newItems.push({ id: nextId(), kind: 'command_card', command: cmd });
+            newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'run', message: `Command: ${cmd}` });
+            newItems.push({ id: nextId(), kind: 'command_card', command: cmd, toolCall: tc });
           } else {
             newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'run', message: `Tool: ${tc.type}` });
           }
         }
+        // Save pending messages for continuation
+        const msgsBefore = buildMessages(chatItems);
+        msgsBefore.push({ role: 'user', content: finalInput });
+        if (assistantText) {
+          msgsBefore.push({ role: 'assistant', content: assistantText });
+        }
+        pendingMsgsRef.current = msgsBefore;
       }
 
       setChatItems(prev => [...prev, ...newItems]);
@@ -596,6 +717,7 @@ export default function App() {
       setLoading(false);
       setElapsedSecs(0);
       setThinkingWarning('');
+      setLoadingPhase('');
       console.debug(LOG, '=== sendMessage end ===');
     }
   }, [chatItems, openFile, buildMessages, clearState, addError, debug, loading]);
@@ -673,10 +795,47 @@ export default function App() {
                       return <ToolEvent key={item.id} type={item.eventType} message={item.message} />;
                     }
                     if (item.kind === 'diff_card') {
-                      return <DiffCard key={item.id} filePath={item.filePath} diff={item.diff} content={item.content} onApply={applyEdit} onOpenFile={openFile} />;
+                      return (
+                        <DiffCard
+                          key={item.id}
+                          filePath={item.filePath}
+                          diff={item.diff}
+                          content={item.content}
+                          onApply={applyEdit}
+                          onOpenFile={openFile}
+                          yolo={yolo}
+                          onComplete={(ok) => {
+                            if (ok && pendingMsgsRef.current) {
+                              continueAfterTool(
+                                { type: 'edit_file', params: { filePath: item.filePath, content: item.content } },
+                                'Edit applied successfully'
+                              );
+                            }
+                          }}
+                        />
+                      );
                     }
                     if (item.kind === 'command_card') {
-                      return <CommandCard key={item.id} command={item.command} onRun={runCommand} />;
+                      return (
+                        <CommandCard
+                          key={item.id}
+                          command={item.command}
+                          onRun={runCommand}
+                          yolo={yolo}
+                          autoRun={yolo && item.command ? false : undefined}
+                          onComplete={item.toolCall ? (result) => {
+                            const output = result.output || result.error || '';
+                            if (output) continueAfterTool(item.toolCall!, output);
+                          } : undefined}
+                        />
+                      );
+                    }
+                    if (item.kind === 'tool_result') {
+                      return (
+                        <div className="tool-result" key={item.id}>
+                          <pre className="tool-result-pre">{item.content}</pre>
+                        </div>
+                      );
                     }
                     return null;
                   })}
@@ -688,14 +847,16 @@ export default function App() {
             {loading && (() => {
               const lastUser = [...chatItems].reverse().find(i => i.kind === 'user_msg');
               const lastUserArabic = lastUser?.kind === 'user_msg' && isArabic(lastUser.content);
-              const thinkingText = lastUserArabic ? 'جارٍ نسج الرد...' : 'Weaving response...';
+              const phaseText = loadingPhase ? PHASE_LABELS[loadingPhase] : (
+                lastUserArabic ? 'جارٍ نسج الرد...' : 'Weaving response...'
+              );
               const warnText = lastUserArabic
                 ? elapsedSecs >= 20 ? 'قد يكون المزود بطيئًا أو محدود المعدل. جرّب OpenRouter أو Gemini أو HYSA AI.' : elapsedSecs >= 8 ? 'لا يزال قيد العمل... قد يكون المزود بطيئًا.' : ''
                 : thinkingWarning;
               return (
-                <div className="thinking-bar">
+                <div className={`thinking-bar${loadingPhase ? ` phase-${loadingPhase}` : ''}`}>
                   <span className="tb-pixel-icon">&gt;</span>
-                  <span className="tb-text">{thinkingText}</span>
+                  <span className="tb-text">{phaseText}</span>
                   <span className="tb-timer">{elapsedSecs}s</span>
                   {warnText && <span className={`tb-warn ${elapsedSecs >= 25 ? 'tb-slow' : ''}`}>{warnText}</span>}
                   <button className="tb-cancel" onClick={cancelThinking}>Cancel</button>
@@ -710,6 +871,25 @@ export default function App() {
                   <button className="debug-panel-close" onClick={() => setLastRawResponse(null)}>x</button>
                 </div>
                 <pre className="debug-panel-body">{lastRawResponse}</pre>
+              </div>
+            )}
+            {debug && timingData && (
+              <div className="debug-panel timing-panel">
+                <div className="debug-panel-header">
+                  <span>Timing &amp; Routing</span>
+                  <button className="debug-panel-close" onClick={() => setTimingData(null)}>x</button>
+                </div>
+                <div className="timing-grid">
+                  {timingData.routing_mode !== undefined && <div className="timing-row"><span className="timing-label">Routing mode</span><span className="timing-value">{timingData.routing_mode}</span></div>}
+                  {timingData.project_mode !== undefined && <div className="timing-row"><span className="timing-label">Project mode</span><span className="timing-value">{String(timingData.project_mode)}</span></div>}
+                  {timingData.files_selected !== undefined && <div className="timing-row"><span className="timing-label">Files selected</span><span className="timing-value">{timingData.files_selected}</span></div>}
+                  {timingData.tool_steps !== undefined && <div className="timing-row"><span className="timing-label">Tool steps</span><span className="timing-value">{timingData.tool_steps}</span></div>}
+                  {timingData.classification !== undefined && <div className="timing-row"><span className="timing-label">Classification</span><span className="timing-value">{timingData.classification}ms</span></div>}
+                  {timingData.project_scan !== undefined && <div className="timing-row"><span className="timing-label">Project scan</span><span className="timing-value">{timingData.project_scan}ms</span></div>}
+                  {timingData.context_select !== undefined && <div className="timing-row"><span className="timing-label">Context select</span><span className="timing-value">{timingData.context_select}ms</span></div>}
+                  {timingData.provider !== undefined && <div className="timing-row"><span className="timing-label">Provider</span><span className="timing-value">{timingData.provider}ms</span></div>}
+                  {timingData.total !== undefined && <div className="timing-row timing-total"><span className="timing-label">Total</span><span className="timing-value">{timingData.total}ms</span></div>}
+                </div>
               </div>
             )}
             <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />

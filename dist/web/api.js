@@ -4,15 +4,21 @@ import { getProjectInfo } from '../context/builder.js';
 import { readFile, shouldIgnore } from '../files/reader.js';
 import { writeFileWithBackup, previewEdit } from '../files/writer.js';
 import { getGitInfo } from '../utils/git.js';
-import { createClient, createSingleClient, isOnlyGreeting, categorizeError } from '../ai/client.js';
+import { createClient, createSingleClient, categorizeError } from '../ai/client.js';
 import { buildSystemPrompt, resolvePromptMode } from '../prompts/system.js';
+import { classifyTask } from '../ai/task-classifier.js';
+import { shouldInjectProjectContext } from '../ai/provider-policy.js';
+import { rankFiles } from '../context/ranker.js';
+import { decideProjectMode } from '../context/project-router.js';
 import { getYolo, setYolo } from '../utils/session.js';
 import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents, getLastSuccessfulProvider, getLastSuccessfulModel, getAllHealth } from '../ai/model-health.js';
 import { detectSecrets } from '../utils/secrets.js';
+import { translateCommand } from '../utils/shell.js';
 import { searchWeb, formatSearchResults, getSearchDiagnostics, isCapabilityQuestion, getCapabilityResponse } from '../tools/web-search.js';
 import { shouldSearchEntity } from '../tools/entity-detector.js';
 import { estimateTokens } from '../context/tokens.js';
-import { buildRecallContext, formatRecallContext } from '../brain/recall.js';
+import { selectContext, formatSelectedContext } from '../brain/context-selector.js';
+import { classifyCommand } from '../utils/commands.js';
 const LOG = '[HYSA Chat]';
 let apiRequestCounter = 0;
 // ── Language detection ──────────────────────────────────
@@ -49,10 +55,63 @@ function isSimpleQuestion(text) {
     const trimmed = text.trim().toLowerCase();
     if (trimmed.length > 60)
         return false;
-    const actionWords = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe|apply|remove|delete|rename|move|copy|refactor)\b/i;
+    const actionWords = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe|apply|remove|delete|rename|move|copy|refactor|explain|summarize|analyze|inspect|improve|implement|build|compile|deploy|test|investigate|review|audit)\b/i;
     if (actionWords.test(trimmed))
         return false;
     return true;
+}
+// ── Project intent detection ─────────────────────────────
+const PROJECT_INTENT_PATTERNS = [
+    /(?:explain|describe|summarize|show|tell)\s+(?:me\s+)?(?:about\s+)?(?:the\s+)?(?:project|codebase|repo|app|structure|architecture)/i,
+    /(?:find|look\s+for|search\s+for|detect|identify|spot)\s+(?:a\s+)?(?:small\s+)?(?:bug|issue|problem|improvement|vulnerability|mistake)/i,
+    /(?:improve|enhance|optimize|refactor|clean\s+up)\s+(?:this|the|my)\s+(?:code|project|app|repo|file|implementation)/i,
+    /(?:inspect|analyze|audit|scan|review)\s+(?:the\s+)?(?:repo|project|codebase|files|code|app|source)/i,
+    /(?:fix|correct|resolve|solve)\s+(?:this|the|my)\s+(?:code|bug|issue|problem|error|implementation)/i,
+    /(?:what|how)\s+(?:changed|is\s+the\s+structure|does\s+this\s+project|are\s+the\s+files|is\s+in\s+the)\s+(?:in|of|the)/i,
+    /(?:generate|create|write|add)\s+(?:tests?|unit\s+tests?|test\s+cases?|specs?)/i,
+    /(?:do\s+not|don'?t)\s+(?:edit|change|modify|alter)\s+(?:files|anything)/i,
+    /what\s+(?:does|is)\s+(?:this|the)\s+(?:project|code|repo|app)\s+(?:do|about)/i,
+    /(?:analyze|check|look\s+at)\s+(?:my|the|this)\s+(?:code|project|repo)/i,
+    /tell\s+me\s+(?:about|what)\s+(?:this\s+)?(?:project|codebase|repo)\s+(?:does|is|contains)/i,
+];
+const PROJECT_SKIP_PATTERNS = [
+    /^(?:hi|hello|hey|yo|sup|salam|مرحبا|اهلا|شكرا|thanks?)\b/i,
+    /^(?:who|what|where|when|why|how)\s+(?:is|are|was|were|created|invented|discovered)\s+/i,
+    /^(?:tell\s+me\s+about|who\s+is|what\s+is)\s+(?!the\s+project|this\s+project|the\s+code|the\s+repo)/i,
+    /^(?:history\s+of|meaning\s+of|definition\s+of)/i,
+    /^(?:من\s+هو|ما\s+هي|ما\s+هو|اين|متى|كيف|لماذا)\s/i,
+];
+function detectProjectIntent(message) {
+    const trimmed = message.trim();
+    if (!trimmed)
+        return false;
+    const lower = trimmed.toLowerCase();
+    if (PROJECT_SKIP_PATTERNS.some(p => p.test(trimmed)))
+        return false;
+    if (PROJECT_INTENT_PATTERNS.some(p => p.test(trimmed)))
+        return true;
+    return false;
+}
+class TimingTracker {
+    spans = [];
+    completed = [];
+    start(name) {
+        this.spans.push({ name, start: performance.now() });
+    }
+    stop(name) {
+        const idx = this.spans.findIndex(s => s.name === name);
+        if (idx !== -1) {
+            const span = this.spans.splice(idx, 1)[0];
+            this.completed.push({ name, ms: Math.round(performance.now() - span.start) });
+        }
+    }
+    report() {
+        const result = {};
+        for (const c of this.completed) {
+            result[c.name] = c.ms;
+        }
+        return result;
+    }
 }
 function withTimeout(promise, ms) {
     return Promise.race([
@@ -405,10 +464,6 @@ export async function handleChatStream(req, writeEvent) {
             }
         }
         const lastMessage = req.messages[req.messages.length - 1];
-        if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastMessage.content)) {
-            writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: 'Hi! How can I help with this project?', toolCalls: [] })}\n\n`);
-            return;
-        }
         // Format messages for vision if image attachments exist
         let visionMessages = req.messages;
         if (hasImages && visionAvailable) {
@@ -436,6 +491,19 @@ export async function handleChatStream(req, writeEvent) {
             content: m.content,
         }));
         injectLanguageInstruction(messages);
+        const streamLastUserRaw = req.messages.filter(m => m.role === 'user').pop()?.content || '';
+        const streamLastContent = typeof streamLastUserRaw === 'string' ? streamLastUserRaw : '';
+        // ── Timing / task classification ─────────────────
+        const timer = new TimingTracker();
+        timer.start('total');
+        timer.start('classification');
+        const taskKind = classifyTask(visionMessages, req.attachments);
+        const projectDecision = decideProjectMode(streamLastContent, true, taskKind);
+        const isProjectQuery = detectProjectIntent(streamLastContent);
+        const useProjectCtx = projectDecision.projectMode || shouldInjectProjectContext(streamLastContent, taskKind) || isProjectQuery;
+        const simpleMode = !projectDecision.projectMode && (isSimpleQuestion(streamLastContent) || taskKind === 'simple_chat');
+        timer.stop('classification');
+        console.log(LOG, `[req:${reqId}] task=${taskKind} projectMode=${projectDecision.projectMode} reason=${projectDecision.reason} simple=${simpleMode}`);
         // ── Capability question detection ────────────────
         const capLastMsg = messages[messages.length - 1];
         const capContent = typeof capLastMsg?.content === 'string' ? capLastMsg.content : '';
@@ -447,33 +515,105 @@ export async function handleChatStream(req, writeEvent) {
             writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response, toolCalls: [] })}\n\n`);
             return;
         }
-        const lastUserMsgRaw = visionMessages.filter(m => m.role === 'user').pop()?.content || '';
-        const lastUserMsgStr = typeof lastUserMsgRaw === 'string' ? lastUserMsgRaw : '';
-        const isSimpleQ = isSimpleQuestion(lastUserMsgStr);
-        const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, isSimpleQ);
+        const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, simpleMode);
         let perQueryPrompt = buildSystemPrompt({
             type: projectInfo.type,
-            entryPoints: projectInfo.entryPoints,
-            configFiles: projectInfo.configFiles,
+            entryPoints: useProjectCtx ? projectInfo.entryPoints : [],
+            configFiles: useProjectCtx ? projectInfo.configFiles : [],
             fileCount: projectInfo.fileCount,
-            tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
+            tree: useProjectCtx && projectInfo.tree.length < 3000 ? projectInfo.tree : '',
         }, config.agentMode || 'chat', lightActive, config.currentProvider, resolvedMode);
-        // ── Recall context injection ──
-        if (!isSimpleQ) {
+        if (config.debug) {
+            console.log(LOG, `[debug] Stream: task=${taskKind}, projectCtx=${useProjectCtx}, mode=${resolvedMode}`);
+        }
+        // ── Project file injection ──────────────────────
+        timer.start('project_scan');
+        const lastUserMsgRaw = visionMessages.filter(m => m.role === 'user').pop()?.content || '';
+        const lastUserMsgStr = typeof lastUserMsgRaw === 'string' ? lastUserMsgRaw : '';
+        let fileInjection = '';
+        if (useProjectCtx && (isProjectQuery || taskKind === 'project_scan' || taskKind === 'code_review' || taskKind === 'debugging' || taskKind === 'code_edit' || taskKind === 'coding_qa')) {
+            const allFiles = projectInfo.tree.split('\n').filter(f => !f.endsWith('/') && f.length > 0);
+            const ranked = rankFiles(allFiles, lastUserMsgStr, 8);
+            const topFiles = ranked.filter(r => r.score > 5).map(r => r.path).slice(0, 5);
+            const fileParts = [];
+            for (const file of topFiles) {
+                const fullPath = resolve(workingDir, file);
+                if (shouldIgnore(fullPath, workingDir))
+                    continue;
+                const content = readFile(fullPath);
+                if (content) {
+                    const lines = content.split('\n').length;
+                    fileParts.push(`\n--- ${file} (${lines} lines) ---\n${content.slice(0, 3000)}\n`);
+                }
+            }
+            if (fileParts.length > 0) {
+                fileInjection = fileParts.join('');
+                const est = estimateTokens(fileInjection);
+                if (est < 2000) {
+                    const fileMsg = { role: 'user', content: `Relevant project files:\n${fileInjection}\n\nUser request: ${lastUserMsgStr}` };
+                    messages[messages.length - 1] = fileMsg;
+                    console.log(LOG, `[req:${reqId}] Injected ${topFiles.length} relevant files (~${est} tokens)`);
+                }
+            }
+        }
+        timer.stop('project_scan');
+        // ── Brain context injection (scored selection) ──
+        timer.start('context_select');
+        if (!simpleMode) {
             try {
-                const recallCtx = await buildRecallContext(lastUserMsgStr, { maxTokens: 800 });
-                if (recallCtx) {
-                    perQueryPrompt += formatRecallContext(recallCtx);
+                const selected = await selectContext({
+                    message: lastUserMsgStr,
+                    taskKind,
+                    maxItems: 5,
+                    debug: !!config.debug,
+                });
+                if (selected.items.length > 0) {
+                    perQueryPrompt += formatSelectedContext(selected);
                 }
             }
             catch { /* skip */ }
         }
-        const response = await client.sendMessageStream(messages, perQueryPrompt, (event) => {
+        timer.stop('context_select');
+        // ── Timing log ──
+        timer.stop('total');
+        const timingReport = timer.report();
+        if (config.debug) {
+            console.log(LOG, `[timing] classification=${timingReport.classification}ms, project_scan=${timingReport.project_scan}ms, context_select=${timingReport.context_select}ms, total=${timingReport.total}ms`);
+        }
+        let response = await client.sendMessageStream(messages, perQueryPrompt, (event) => {
             if (event.type === 'token') {
                 writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
             }
         });
-        writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls })}\n\n`);
+        // ── YOLO tool continuation loop (streaming) ──
+        let steps = 0;
+        let streamMessages = [...messages];
+        while (steps < MAX_TOOL_STEPS && response.toolCalls.length > 0) {
+            const yoloMode = getYolo();
+            if (!yoloMode)
+                break;
+            const autoTools = response.toolCalls.filter(tc => tc.type === 'read_file' ||
+                (tc.type === 'execute_command' && classifyCommand(tc.params.command || '') === 'safe'));
+            if (autoTools.length < response.toolCalls.length)
+                break;
+            steps++;
+            if (config?.debug) {
+                console.log(LOG, `[req:${reqId}] YOLO stream tool loop step ${steps}/${MAX_TOOL_STEPS}: ${autoTools.length} tools`);
+            }
+            writeEvent(`data: ${JSON.stringify({ type: 'tool_result', step: steps, total: autoTools.length, status: 'executing' })}\n\n`);
+            const { results } = await executeToolCalls(autoTools, true);
+            const feedText = response.message
+                ? `${response.message}\n\nTool results:\n${formatToolResults(autoTools, results)}`
+                : `Tool results:\n${formatToolResults(autoTools, results)}`;
+            streamMessages.push({ role: 'assistant', content: feedText });
+            writeEvent(`data: ${JSON.stringify({ type: 'tool_result', step: steps, total: autoTools.length, status: 'done', results: formatToolResults(autoTools, results) })}\n\n`);
+            response = await client.sendMessageStream(streamMessages, perQueryPrompt, (event) => {
+                if (event.type === 'token') {
+                    writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
+                }
+            });
+        }
+        writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls, timing: timingReport })}\n\n`);
     }
     catch (err) {
         const e = err;
@@ -497,6 +637,79 @@ export async function handleChatStream(req, writeEvent) {
         }
         writeEvent(`data: ${JSON.stringify({ type: 'token', text: friendlyMsg })}\n\n`);
         writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: friendlyMsg, toolCalls: [] })}\n\n`);
+    }
+}
+export const MAX_TOOL_STEPS = 5;
+export function formatToolResults(toolCalls, results) {
+    return toolCalls.map((tc, i) => {
+        const label = tc.type === 'read_file' ? `Read ${tc.params.filePath}` :
+            tc.type === 'execute_command' ? `Command: ${tc.params.command}` :
+                `Tool: ${tc.type}`;
+        return `${label}\n${results[i] || '(no output)'}`;
+    }).join('\n\n');
+}
+export async function executeToolCalls(toolCalls, yolo) {
+    const results = [];
+    let dangerous = false;
+    for (const tc of toolCalls) {
+        if (tc.type === 'read_file') {
+            const fullPath = resolve(workingDir, tc.params.filePath || '');
+            const content = await import('../files/reader.js').then(m => m.readFile(fullPath));
+            results.push(content ? content.slice(0, 5000) : 'File not found or empty');
+            continue;
+        }
+        if (tc.type === 'execute_command') {
+            const cmd = tc.params.command || '';
+            if (!yolo) {
+                const safety = classifyCommand(cmd);
+                if (safety !== 'safe') {
+                    dangerous = true;
+                    results.push('Requires manual approval');
+                    continue;
+                }
+            }
+            try {
+                const { execSync } = await import('node:child_process');
+                const translated = translateCommand(cmd);
+                const shell = process.platform === 'win32'
+                    ? (translated !== cmd && (translated.includes('Get-') || translated.includes('Select-'))
+                        ? 'powershell.exe -NoProfile -Command'
+                        : process.env.ComSpec || 'cmd.exe')
+                    : undefined;
+                const stdout = execSync(translated, { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024, cwd: workingDir, shell });
+                results.push(stdout.trim().slice(0, 5000) || '(empty output)');
+            }
+            catch (err) {
+                const e = err;
+                results.push(`Error: ${e.stderr || e.message || 'Command failed'}`);
+            }
+            continue;
+        }
+        // Non-auto tools (edit_file, etc.) — skip for YOLO loop, let client handle
+        dangerous = true;
+        results.push('Requires manual review');
+    }
+    return { results, dangerous };
+}
+export async function continueChat(messages, toolCalls, toolResults) {
+    const config = loadConfig();
+    if (!config)
+        return { message: '', toolCalls: [], error: 'No configuration' };
+    const prov = config.currentProvider;
+    const client = createClient(config);
+    const systemPrompt = buildSystemPrompt(undefined, 'chat', false, config.currentProvider);
+    const resultText = '\n\nTool results:\n' + formatToolResults(toolCalls, toolResults);
+    messages.push({ role: 'assistant', content: resultText });
+    try {
+        const response = await client.sendMessage(messages, systemPrompt);
+        return {
+            message: response.message,
+            toolCalls: response.toolCalls.map(tc => ({ type: tc.type, params: tc.params })),
+        };
+    }
+    catch (err) {
+        const e = err;
+        return { message: `Tool continuation failed: ${e.message}`, toolCalls: [] };
     }
 }
 export async function handleChat(req) {
@@ -620,11 +833,6 @@ export async function handleChat(req) {
             visionMessages = buildVisionMessages(req.messages, req.attachments);
         }
         const lastMessage = visionMessages[visionMessages.length - 1];
-        const lastContent = typeof lastMessage?.content === 'string' ? lastMessage.content : '';
-        if (lastMessage && lastMessage.role === 'user' && isOnlyGreeting(lastContent)) {
-            console.log(LOG, 'Greeting detected, returning casual response');
-            return { message: 'Hi! How can I help with this project?', toolCalls: [] };
-        }
         const label = PROVIDER_DEFAULTS[prov]?.label || prov;
         console.log(LOG, `Starting chat with provider: ${label}, model: ${config.currentModel}`);
         const client = createClient(config);
@@ -644,6 +852,18 @@ export async function handleChat(req) {
             content: m.content,
         }));
         injectLanguageInstruction(messages);
+        // ── Timing / task classification ─────────────────
+        const timer = new TimingTracker();
+        timer.start('total');
+        timer.start('classification');
+        const lastContent = typeof lastMessage?.content === 'string' ? lastMessage.content : '';
+        const taskKind = classifyTask(visionMessages, req.attachments);
+        const projectDecision = decideProjectMode(lastContent, true, taskKind);
+        const isProjectQuery = detectProjectIntent(lastContent);
+        const useProjectCtx = projectDecision.projectMode || shouldInjectProjectContext(lastContent, taskKind) || isProjectQuery;
+        const isSimpleQ = !projectDecision.projectMode && (isSimpleQuestion(lastContent) || taskKind === 'simple_chat');
+        timer.stop('classification');
+        console.log(LOG, `[req:${reqId}] task=${taskKind} projectMode=${projectDecision.projectMode} reason=${projectDecision.reason} simple=${isSimpleQ} projectQuery=${isProjectQuery}`);
         // ── Capability question detection ────────────────
         const capLastMsg = messages[messages.length - 1];
         const capContent = typeof capLastMsg?.content === 'string' ? capLastMsg.content : '';
@@ -656,14 +876,14 @@ export async function handleChat(req) {
         // ── Per-query prompt mode resolution ────────────────
         const lastUserMsgRaw = visionMessages.filter(m => m.role === 'user').pop()?.content || '';
         const lastUserMsg = typeof lastUserMsgRaw === 'string' ? lastUserMsgRaw : '';
-        const isSimpleQ = isSimpleQuestion(lastUserMsg);
-        const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, isSimpleQ);
+        const simpleMode = isSimpleQ;
+        const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, simpleMode);
         let perQueryPrompt = buildSystemPrompt({
             type: projectInfo.type,
-            entryPoints: projectInfo.entryPoints,
-            configFiles: projectInfo.configFiles,
+            entryPoints: useProjectCtx ? projectInfo.entryPoints : [],
+            configFiles: useProjectCtx ? projectInfo.configFiles : [],
             fileCount: projectInfo.fileCount,
-            tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
+            tree: useProjectCtx && projectInfo.tree.length < 3000 ? projectInfo.tree : '',
         }, config.agentMode || 'chat', lightActive, config.currentProvider, resolvedMode);
         if (config.debug) {
             const systemTokens = estimateTokens(perQueryPrompt);
@@ -673,28 +893,24 @@ export async function handleChat(req) {
                     historyTokens += estimateTokens(m.content);
                 }
                 else {
-                    historyTokens += 100; // rough estimate for image
+                    historyTokens += 100;
                 }
             }
             const totalTokens = systemTokens + historyTokens;
-            console.log(LOG, `[debug] Prompt mode: ${resolvedMode}`);
+            console.log(LOG, `[debug] Task: ${taskKind}, projectCtx=${useProjectCtx}, mode: ${resolvedMode}`);
             console.log(LOG, `[debug] System prompt: ~${systemTokens} tokens`);
             console.log(LOG, `[debug] History/messages: ~${historyTokens} tokens`);
             console.log(LOG, `[debug] Total estimated: ~${totalTokens} tokens`);
-            if (lightActive && totalTokens > 2000) {
-                console.log(LOG, `[debug] Local prompt trimmed from ~${totalTokens} tokens to ~2000 tokens.`);
-            }
         }
         // ── Web search detection ────────────────────────
         const searchLastMsg = messages[messages.length - 1];
         const searchLastContent = typeof searchLastMsg?.content === 'string' ? searchLastMsg.content : '';
         const isExplicitSearchCmd = /^hysa\s+(?:search|websearch)\s+/i.test(searchLastContent);
         const searchPatterns = [
-            // Explicit hysa search/websearch commands — check FIRST
             /^hysa\s+(?:search|websearch)\s+"(.+?)"$/i,
             /^hysa\s+(?:search|websearch)\s+'(.+?)'$/i,
             /^hysa\s+(?:search|websearch)\s+(.+)$/i,
-            /^(?:search|find|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
+            /^(?:search|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
             /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
             /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
             /^(?:where\s+can\s+(?:I|we)\s+(?:watch|find|get)\s+)/i,
@@ -748,7 +964,6 @@ export async function handleChat(req) {
         }
         // ── Entity detection for unknown names/handles ─────
         if (!searchQuery) {
-            // Find previous user message for follow-up context
             let previousUserMessage;
             for (let i = messages.length - 2; i >= 0; i--) {
                 if (messages[i].role === 'user' && typeof messages[i].content === 'string') {
@@ -783,19 +998,93 @@ export async function handleChat(req) {
                 }
             }
         }
-        // ── Recall context injection ──
+        // ── Project file injection ──────────────────────
+        timer.start('project_scan');
+        let fileInjection = '';
+        if (!searchQuery && useProjectCtx && (isProjectQuery || taskKind === 'project_scan' || taskKind === 'code_review' || taskKind === 'debugging' || taskKind === 'code_edit' || taskKind === 'coding_qa')) {
+            // Rank project files by relevance to the query
+            const allFiles = projectInfo.tree.split('\n').filter(f => !f.endsWith('/') && f.length > 0);
+            const ranked = rankFiles(allFiles, lastUserMsg, 8);
+            const topFiles = ranked.filter(r => r.score > 5).map(r => r.path).slice(0, 5);
+            const fileParts = [];
+            for (const file of topFiles) {
+                const fullPath = resolve(workingDir, file);
+                if (shouldIgnore(fullPath, workingDir))
+                    continue;
+                const content = readFile(fullPath);
+                if (content) {
+                    const lines = content.split('\n').length;
+                    fileParts.push(`\n--- ${file} (${lines} lines) ---\n${content.slice(0, 3000)}\n`);
+                }
+            }
+            if (fileParts.length > 0) {
+                fileInjection = fileParts.join('');
+                const est = estimateTokens(fileInjection);
+                if (est < 2000) {
+                    // Inject file content as a separate user message before the last message
+                    const fileMsg = { role: 'user', content: `Relevant project files:\n${fileInjection}\n\nUser request: ${lastUserMsg}` };
+                    messages[messages.length - 1] = fileMsg;
+                    console.log(LOG, `[req:${reqId}] Injected ${topFiles.length} relevant files (~${est} tokens)`);
+                }
+            }
+        }
+        timer.stop('project_scan');
+        // ── Brain context injection (scored selection) ──
+        timer.start('context_select');
         if (!isSimpleQ && !searchQuery) {
             try {
-                const recallCtx = await buildRecallContext(lastUserMsg, { maxTokens: 800 });
-                if (recallCtx) {
-                    perQueryPrompt += formatRecallContext(recallCtx);
+                const selected = await selectContext({
+                    message: lastUserMsg,
+                    taskKind,
+                    maxItems: 5,
+                    debug: !!config.debug,
+                });
+                if (selected.items.length > 0) {
+                    perQueryPrompt += formatSelectedContext(selected);
+                    if (config.debug) {
+                        console.log(LOG, `[debug] Context selection: ${selected.items.length} items (${selected.totalChars}/${selected.budget} chars)`);
+                    }
                 }
             }
             catch { /* skip */ }
         }
+        timer.stop('context_select');
+        // ── Timing log ──
+        timer.stop('total');
+        const timingReport = timer.report();
+        if (config.debug) {
+            console.log(LOG, `[timing] classification=${timingReport.classification}ms, project_scan=${timingReport.project_scan}ms, context_select=${timingReport.context_select}ms, total=${timingReport.total}ms`);
+        }
         console.log(LOG, `Sending ${messages.length} messages to provider`);
-        const response = await client.sendMessage(messages, perQueryPrompt);
+        let response = await client.sendMessage(messages, perQueryPrompt);
         console.log(LOG, 'Provider response received successfully');
+        // ── YOLO tool continuation loop ──────────────
+        let steps = 0;
+        let currentMessages = [...messages];
+        while (steps < MAX_TOOL_STEPS && response.toolCalls.length > 0) {
+            const yoloMode = getYolo();
+            if (!yoloMode)
+                break;
+            const autoTools = response.toolCalls.filter(tc => tc.type === 'read_file' ||
+                (tc.type === 'execute_command' && classifyCommand(tc.params.command || '') === 'safe'));
+            // If any tool needs manual approval, stop and return remaining
+            if (autoTools.length < response.toolCalls.length)
+                break;
+            steps++;
+            if (config.debug) {
+                console.log(LOG, `[req:${reqId}] YOLO tool loop step ${steps}/${MAX_TOOL_STEPS}: ${autoTools.length} tools`);
+            }
+            const { results } = await executeToolCalls(autoTools, true);
+            const feedText = response.message
+                ? `${response.message}\n\nTool results:\n${formatToolResults(autoTools, results)}`
+                : `Tool results:\n${formatToolResults(autoTools, results)}`;
+            currentMessages.push({ role: 'assistant', content: feedText });
+            response = await client.sendMessage(currentMessages, perQueryPrompt);
+        }
+        // If still has tool calls after loop, return them to client
+        if (response.toolCalls.length > 0 && steps > 0) {
+            console.log(LOG, `[req:${reqId}] Tool loop stopped after ${steps} steps, ${response.toolCalls.length} remaining tools`);
+        }
         const fbEvents = getFallbackEvents();
         const fallbackEvents = fbEvents.map(e => e.reason);
         const actualProvider = getLastSuccessfulProvider();
@@ -809,6 +1098,7 @@ export async function handleChat(req) {
             fallbackEvents: fallbackEvents.length > 0 ? fallbackEvents : undefined,
             provider: actualProvider ? (PROVIDER_DEFAULTS[actualProvider]?.label || actualProvider) : (PROVIDER_DEFAULTS[prov]?.label || prov),
             model: actualModel || config.currentModel,
+            timing: timingReport,
         };
     }
     catch (err) {
@@ -850,11 +1140,16 @@ export async function handleChat(req) {
 export async function runCommand(command) {
     try {
         const { execSync } = await import('node:child_process');
-        const stdout = execSync(command, {
+        const translated = translateCommand(command);
+        const needsPowerShell = translated !== command && (translated.includes('Get-') || translated.includes('Select-'));
+        const shell = process.platform === 'win32'
+            ? (needsPowerShell ? 'powershell.exe -NoProfile -Command' : process.env.ComSpec || 'cmd.exe')
+            : undefined;
+        const stdout = execSync(translated, {
             encoding: 'utf-8',
             maxBuffer: 10 * 1024 * 1024,
             cwd: workingDir,
-            shell: process.platform === 'win32' ? process.env.ComSpec || 'cmd.exe' : undefined,
+            shell,
         });
         return { stdout: stdout.trim(), stderr: '' };
     }

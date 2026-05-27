@@ -1,4 +1,3 @@
-import { isOnlyGreeting } from '../ai/client.js';
 const COMMON_PROGRAMMING_CONCEPTS = new Set([
     'react', 'vue', 'angular', 'svelte', 'ember', 'backbone', 'lit',
     'node', 'node.js', 'deno', 'bun',
@@ -210,7 +209,7 @@ export function extractEntityName(message) {
 const ACTION_WORDS = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|scan|symbol|import|open|check|remove|delete|rename|move|copy|refactor|install|upgrade|build|compile|test|deploy)\b/i;
 export function shouldSearchEntity(message, previousUserMessage) {
     const trimmed = message.trim();
-    if (isOnlyGreeting(trimmed)) {
+    if (trimmed.split(/\s+/).filter(Boolean).length < 4) {
         return { shouldSearch: false, query: null };
     }
     if (ACTION_WORDS.test(trimmed)) {

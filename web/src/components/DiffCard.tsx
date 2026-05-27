@@ -6,9 +6,11 @@ interface DiffCardProps {
   content: string;
   onApply: (filePath: string, content: string) => Promise<string | null>;
   onOpenFile: (filePath: string) => void;
+  yolo?: boolean;
+  onComplete?: (ok: boolean) => void;
 }
 
-export default function DiffCard({ filePath, diff, content, onApply, onOpenFile }: DiffCardProps) {
+export default function DiffCard({ filePath, diff, content, onApply, onOpenFile, yolo, onComplete }: DiffCardProps) {
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [applying, setApplying] = useState(false);
 
@@ -18,8 +20,10 @@ export default function DiffCard({ filePath, diff, content, onApply, onOpenFile 
     setApplying(false);
     if (err) {
       setResult({ ok: false, msg: err });
+      onComplete?.(false);
     } else {
       setResult({ ok: true, msg: 'Edit applied' });
+      onComplete?.(true);
     }
   };
 
@@ -32,10 +36,11 @@ export default function DiffCard({ filePath, diff, content, onApply, onOpenFile 
   });
 
   return (
-    <div className="diff-card">
+      <div className={`diff-card${yolo ? ' yolo' : ''}`}>
       <div className="diff-card-inner">
         <div className="diff-card-header">
           <span>{filePath}</span>
+          {yolo && !result && <span className="diff-yolo-badge">YOLO: needs approval</span>}
         </div>
         <div className="diff-card-body">
           {diffLines.map(({ line, cls, key }) => (

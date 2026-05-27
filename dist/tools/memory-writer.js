@@ -1,5 +1,6 @@
 import { appendBrainEvent, appendLesson, appendDecision, containsSecret } from '../brain/store.js';
 import { upsertNode, logProviderSuccess, logProviderFailure, searchGraph, readExperienceGraph, linkEventToFiles } from '../brain/graph-store.js';
+import { invalidateRecallCache } from '../brain/recall-cache.js';
 const MAX_SUMMARY_LENGTH = 2000;
 const MAX_TITLE_LENGTH = 120;
 // ── Size / safety helpers ──
@@ -94,6 +95,8 @@ export async function writeMemory(kind, title, summary, tags = [], files, source
             await linkEventToFiles(node.id, files);
         }
     }
+    // Invalidate recall cache so fresh data is picked up
+    invalidateRecallCache();
 }
 // ── Auto-fix result writer ──
 export async function writeAutoFixMemory(fixResult, userRequest) {

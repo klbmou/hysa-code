@@ -1,5 +1,4 @@
 export type TaskKind =
-  | 'local_greeting'
   | 'simple_chat'
   | 'code_review'
   | 'search'
@@ -31,7 +30,7 @@ function isGreeting(text: string): boolean {
 
 const SEARCH_PATTERNS = [
   /^hysa\s+(?:search|websearch)\s+/i,
-  /^(?:search|find|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?/i,
+  /^(?:search|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?/i,
   /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
   /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
   /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+)/i,

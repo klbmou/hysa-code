@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getBrainDir, redact } from './store.js';
+import { invalidateRecallCache } from './recall-cache.js';
 const GRAPH_FILE = 'experience-graph.json';
 function graphPath() {
     return join(getBrainDir(), GRAPH_FILE);
@@ -27,6 +28,7 @@ export async function writeExperienceGraph(graph) {
     graph.updatedAt = new Date().toISOString();
     const redacted = redact(graph);
     await writeFile(graphPath(), JSON.stringify(redacted, null, 2), 'utf8');
+    invalidateRecallCache();
 }
 // ── Label normalization for dedup ──
 export function normalizeLabel(label) {

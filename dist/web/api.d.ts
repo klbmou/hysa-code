@@ -25,6 +25,7 @@ interface ChatResult {
     fallbackEvents?: string[];
     provider?: string;
     model?: string;
+    timing?: Record<string, number>;
 }
 export declare function getStatus(): {
     provider: string;
@@ -53,6 +54,25 @@ export declare function saveFile(path: string, content: string): {
     diff?: string;
 };
 export declare function handleChatStream(req: ChatRequest, writeEvent: (event: string) => void): Promise<void>;
+export declare const MAX_TOOL_STEPS = 5;
+export declare function formatToolResults(toolCalls: {
+    type: string;
+    params: Record<string, string>;
+}[], results: string[]): string;
+export declare function executeToolCalls(toolCalls: {
+    type: string;
+    params: Record<string, string>;
+}[], yolo: boolean): Promise<{
+    results: string[];
+    dangerous: boolean;
+}>;
+export declare function continueChat(messages: {
+    role: string;
+    content: string;
+}[], toolCalls: {
+    type: string;
+    params: Record<string, string>;
+}[], toolResults: string[]): Promise<ChatResult>;
 export declare function handleChat(req: ChatRequest): Promise<ChatResult>;
 export declare function runCommand(command: string): Promise<{
     stdout: string;

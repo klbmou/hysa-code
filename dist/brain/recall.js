@@ -3,30 +3,72 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { getBrainDir, readProjectMap, redact } from './store.js';
 import { readExperienceGraph, searchGraph } from './graph-store.js';
-const recallCache = new Map();
-const CACHE_TTL_MS = 30_000;
-function cacheKey(message, optionsMask) {
-    const kw = message.toLowerCase().split(/\s+/).filter(w => w.length > 2).sort().join(',');
-    return `${kw}|${optionsMask}`;
-}
-function getCached(message, optionsMask) {
-    const key = cacheKey(message, optionsMask);
-    const entry = recallCache.get(key);
-    if (entry && Date.now() - entry.timestamp < CACHE_TTL_MS) {
-        return entry.result;
+import { getCached, setCached } from './recall-cache.js';
+// ── Lightweight stemmer ──
+function stem(word) {
+    if (word.length < 4)
+        return word;
+    let s = word.toLowerCase();
+    // -tion → t (e.g., "implementation" -> "implementat", matches "implement")
+    if (s.endsWith('tion') && s.length > 5)
+        s = s.slice(0, -3);
+    // -ing → (e.g., "running" -> "runn", matches "run" partially; also "formatting" -> "formatt")
+    if (s.endsWith('ing') && s.length > 4)
+        s = s.slice(0, -3);
+    // -ed → (e.g., "changed" -> "chang", matches "change")
+    if (s.endsWith('ed') && s.length > 4 && !s.endsWith('eed'))
+        s = s.slice(0, -2);
+    // -ly → (e.g., "recently" -> "recent")
+    if (s.endsWith('ly') && s.length > 4)
+        s = s.slice(0, -2);
+    // -es → (e.g., "changes" -> "chang", matches "change")
+    if (s.endsWith('es') && s.length > 4)
+        s = s.slice(0, -2);
+    // -s (but not ss) → (e.g., "projects" -> "project")
+    if (s.endsWith('s') && !s.endsWith('ss') && s.length > 3)
+        s = s.slice(0, -1);
+    // -er → (e.g., "provider" -> "provid", matches "provide" loosely)
+    if (s.endsWith('er') && s.length > 4) {
+        const without = s.slice(0, -2);
+        if (without.endsWith('id') || without.endsWith('ov') || without.endsWith('form')) {
+            // keep er for common stems
+        }
+        else {
+            s = without;
+        }
     }
-    if (entry)
-        recallCache.delete(key);
-    return undefined;
+    return s;
 }
-function setCached(message, optionsMask, result) {
-    const key = cacheKey(message, optionsMask);
-    recallCache.set(key, { result, timestamp: Date.now() });
-    if (recallCache.size > 50) {
-        const oldest = [...recallCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)[0];
-        if (oldest)
-            recallCache.delete(oldest[0]);
+function stemToken(token) {
+    return stem(token.replace(/[^a-zA-Z0-9]/g, ''));
+}
+// ── Token overlap scoring ──
+function tokenOverlap(query, text) {
+    const queryTokens = query.toLowerCase().split(/\s+/).filter(t => t.length > 2).map(stemToken);
+    const textTokens = text.toLowerCase().split(/\s+/).filter(t => t.length > 2).map(stemToken);
+    if (queryTokens.length === 0 || textTokens.length === 0)
+        return 0;
+    const overlap = queryTokens.filter(qt => textTokens.some(tt => tt === qt || tt.includes(qt) || qt.includes(tt))).length;
+    const unique = new Set([...queryTokens, ...textTokens]).size;
+    return Math.round((overlap / unique) * 100);
+}
+// ── Partial match score ──
+function partialMatchScore(query, text) {
+    const queryWords = query.toLowerCase().split(/\s+/).filter(t => t.length > 2);
+    const lowerText = text.toLowerCase();
+    let score = 0;
+    for (const qw of queryWords) {
+        if (lowerText.includes(qw)) {
+            score += 10;
+        }
+        else {
+            const stemmed = stemToken(qw);
+            if (stemmed.length > 2 && lowerText.includes(stemmed)) {
+                score += 5;
+            }
+        }
     }
+    return score;
 }
 // ── Fast path: detect if query clearly asks about memory ──
 const MEMORY_KEYWORDS = [
@@ -45,21 +87,18 @@ export function isMemoryQuery(message) {
         return false;
     const lower = trimmed.toLowerCase();
     const words = lower.split(/\s+/);
-    // Very short messages (1-3 words) are unlikely to be memory queries
-    // unless they directly contain a memory keyword (as substring)
     if (words.length <= 3) {
         return MEMORY_KEYWORDS.some(kw => lower.includes(kw));
     }
     return true;
 }
+// ── Intent detection ──
 const INTENT_PATTERNS = [
     {
         intent: 'lesson_history',
         patterns: [
             /(?:what|any|the)\s+lessons?/i,
             /lessons?\s+(?:learn(?:t|ed)?|about)/i,
-            /ما\s+آخر\s+(?:الدروس|التعلم)/i,
-            /(?:ماذا|ماذا\s+ذا)\s+تعلم/i,
             /rate\s+limit\s+lesson/i,
         ],
     },
@@ -69,9 +108,17 @@ const INTENT_PATTERNS = [
             /(?:what|any|the)\s+decisi(?:on|ons)/i,
             /(?:decide?|decisi(?:on|ons))\s+(?:about|on|regarding|for)/i,
             /what\s+did\s+(?:we|you)\s+decide/i,
-            /ماذا\s+قرر(?:نا)?\s+(?:بخصوص|عن|في)/i,
             /decision/i,
             /architecture\s+decision/i,
+        ],
+    },
+    {
+        intent: 'session_recall',
+        patterns: [
+            /(?:last|previous|recent)\s+session/i,
+            /what\s+(?:happened|changed)\s+(?:in|during|last)\s+(?:session|the\s+session)/i,
+            /what\s+did\s+(?:we|you)\s+do\s+(?:last\s+time|in\s+the\s+last\s+session|yesterday)/i,
+            /what\s+did\s+(?:we|you)\s+fix\s+(?:yesterday|last\s+time)/i,
         ],
     },
     {
@@ -81,16 +128,15 @@ const INTENT_PATTERNS = [
             /(?:bug|bugs)\s+(?:in|with|about|fix(?:ed)?)/i,
             /what\s+(?:was|were|is)\s+(?:the|that)\s+(?:bug|issue|problem)/i,
             /(?:bug|issue|problem)\s+in\s+(?:the\s+)?browser/i,
-            /ماذا\s+(?:أصلح|صلح)(?:نا)?\s+(?:في|بخصوص)/i,
             /what\s+(?:did\s+)?we\s+fix/i,
             /what\s+was\s+(?:the\s+)?(?:browser|session)\s+(?:bug|issue|problem)/i,
+            /how\s+did\s+(?:we|you)\s+(?:fix|resolve|solve)/i,
         ],
     },
     {
         intent: 'browser_history',
         patterns: [
             /browser\s+(?:session|daemon|bug|issue|problem|status|history)/i,
-            /ما\s+مشكلة\s+(?:المتصفح|browser)/i,
             /browser\s+was/i,
         ],
     },
@@ -99,23 +145,24 @@ const INTENT_PATTERNS = [
         patterns: [
             /(?:provider|model|fallback)\s+(?:fail|failure|error|issue|problem|history|slow|rate.limit)/i,
             /why\s+(?:did|was|is)\s+(?:the\s+)?(?:provider|model|fallback)/i,
-            /لماذا\s+كان\s+fallback/i,
             /provider\s+(?:cooldown|health|status)/i,
             /rate\s+limit/i,
             /quota/i,
+            /what\s+happened\s+(?:with|to)\s+(?:fallback|provider)/i,
         ],
     },
     {
         intent: 'project_context',
         patterns: [
-            /(?:what|summarize|tell|describe)\s+(?:recent|about|the|current|project|changes|update)/i,
+            /(?:tell|show|give|list)\s+(?:me\s+)?(?:about|what)\s+(?:the\s+)?(?:project|changes?|update|session|work)/i,
+            /(?:what|summarize|tell|describe)\s+(?:me\s+)?(?:recent|about|the|current|project|changes|update)/i,
             /what\s+(?:did|have)\s+(?:we|you)\s+(?:change|done|update|modify)/i,
             /(?:recent|latest)\s+(?:change|changes|update|updates)/i,
             /what\s+files?\s+(?:are|were|is)\s+(?:important|changed|modify)/i,
             /smart\s+router/i,
             /project\s+(?:structure|memory|map|context)/i,
-            /ماذا\s+تغير\s+في/i,
             /what\s+(?:did\s+)?we\s+(?:do|work\s+on)/i,
+            /what\s+changed\s+recently/i,
         ],
     },
     {
@@ -127,7 +174,7 @@ const INTENT_PATTERNS = [
     },
 ];
 const NEGATIVE_PATTERNS = [
-    /^(?:hi|hello|hey|yo|sup|bye|goodbye|cya|salam|مرحبا|اهلا)\b/i,
+    /^(?:hi|hello|hey|yo|sup|bye|goodbye|cya|salam)\b/i,
     /^(?:thanks?|thank\s+you|ok|okay|nice|good|great|perfect|yes|no|sure|lol)\b/i,
     /^write\s+(?:a|an|the)\s+(?:simple\s+)?(?:game|app|program|function|component|script)/i,
     /^explain\s+(?:React|JavaScript|TypeScript|Python|CSS|HTML)/i,
@@ -152,7 +199,6 @@ export function detectRecallIntent(message) {
 function truncateText(text, maxLen) {
     if (text.length <= maxLen)
         return text;
-    // Try sentence boundary within range [maxLen-40, maxLen]
     const searchStart = Math.max(0, maxLen - 40);
     const searchArea = text.slice(searchStart, maxLen);
     const sentenceEnd = searchArea.search(/[.!?]\s/);
@@ -160,12 +206,10 @@ function truncateText(text, maxLen) {
         const cutPos = searchStart + sentenceEnd + 1;
         return text.slice(0, cutPos) + '...';
     }
-    // Try last word boundary within 10 chars before maxLen
     const wordBoundary = text.lastIndexOf(' ', maxLen - 1);
     if (wordBoundary > maxLen - 10) {
         return text.slice(0, wordBoundary) + '...';
     }
-    // Hard truncate at maxLen
     return text.slice(0, maxLen - 3) + '...';
 }
 // ── Parse lessons/decisions with smart truncation ──
@@ -259,9 +303,17 @@ function extractKeywords(message) {
 function computeRelevance(text, keywords, queryMessage, providerOnly) {
     const lower = text.toLowerCase();
     let score = 0;
+    // Direct keyword match
     for (const kw of keywords) {
         if (lower.includes(kw)) {
             score += 10;
+        }
+        else {
+            // Try stemmed match
+            const stemmed = stemToken(kw);
+            if (stemmed.length > 2 && lower.includes(stemmed)) {
+                score += 5;
+            }
         }
     }
     // Title match bonus (text before first colon)
@@ -270,7 +322,16 @@ function computeRelevance(text, keywords, queryMessage, providerOnly) {
         if (titlePart.includes(kw)) {
             score += 5;
         }
+        else {
+            const stemmed = stemToken(kw);
+            if (stemmed.length > 2 && titlePart.includes(stemmed)) {
+                score += 3;
+            }
+        }
     }
+    // Token overlap bonus
+    const overlap = tokenOverlap(queryMessage, text);
+    score += Math.round(overlap * 0.3);
     // Boost for provider terms when query is provider-related
     if (providerOnly) {
         for (const term of PROVIDER_TERMS) {
@@ -316,21 +377,73 @@ function computeRelevance(text, keywords, queryMessage, providerOnly) {
     }
     return score;
 }
+function computeNodeRelevanceV2(node, queryMessage, keywords) {
+    const nodeText = `${node.label} ${node.summary || ''}`;
+    const lower = nodeText.toLowerCase();
+    // Title direct match
+    let titleScore = 0;
+    const titleLower = node.label.toLowerCase();
+    for (const kw of keywords) {
+        if (titleLower.includes(kw))
+            titleScore += 15;
+    }
+    if (titleScore === 0) {
+        for (const kw of keywords) {
+            const stemmed = stemToken(kw);
+            if (stemmed.length > 2 && titleLower.includes(stemmed))
+                titleScore += 8;
+        }
+    }
+    // Body direct match
+    let bodyScore = 0;
+    const bodyLower = (node.summary || '').toLowerCase();
+    for (const kw of keywords) {
+        if (bodyLower.includes(kw))
+            bodyScore += 10;
+    }
+    if (bodyScore === 0) {
+        for (const kw of keywords) {
+            const stemmed = stemToken(kw);
+            if (stemmed.length > 2 && bodyLower.includes(stemmed))
+                bodyScore += 5;
+        }
+    }
+    // Fuzzy token overlap
+    const fuzzyScore = tokenOverlap(queryMessage, nodeText);
+    // Recency boost (0-20)
+    const age = Date.now() - new Date(node.createdAt).getTime();
+    const DAY_MS = 86_400_000;
+    let recencyBoost = 0;
+    if (age < DAY_MS)
+        recencyBoost = 20;
+    else if (age < 7 * DAY_MS)
+        recencyBoost = 15;
+    else if (age < 30 * DAY_MS)
+        recencyBoost = 10;
+    else if (age < 90 * DAY_MS)
+        recencyBoost = 5;
+    // Pinned boost
+    const pinnedBoost = node.pinned ? 20 : 0;
+    // Importance/confidence weighting
+    const imp = (node.importance ?? 50) / 50;
+    const conf = (node.confidence ?? 50) / 50;
+    const importanceConfidenceBoost = Math.round((imp * conf - 1) * 15);
+    const total = titleScore + bodyScore + fuzzyScore + recencyBoost + pinnedBoost + importanceConfidenceBoost;
+    return { titleScore, bodyScore, fuzzyScore, recencyBoost, pinnedBoost, importanceConfidenceBoost, total };
+}
 // ── Provider nodes: extract providers from event labels too ──
 function extractProvidersFromAllNodes(nodes) {
     const providers = new Set();
-    // From kind=provider nodes
     for (const n of nodes) {
         if (n.kind === 'provider') {
             providers.add(n.label);
         }
     }
-    // From event labels like provider_failed:anthropic_proxy/claude-3-haiku-latest
     for (const n of nodes) {
         if (n.kind === 'event' && n.label) {
             const colonIdx = n.label.indexOf(':');
             if (colonIdx !== -1) {
-                const rest = n.label.slice(colonIdx + 1); // e.g. "anthropic_proxy/claude-3-haiku-latest"
+                const rest = n.label.slice(colonIdx + 1);
                 const slashIdx = rest.indexOf('/');
                 if (slashIdx !== -1) {
                     providers.add(rest.slice(0, slashIdx));
@@ -378,7 +491,6 @@ function formatProviderNodes(nodes) {
     }
     const providers = extractProvidersFromAllNodes(nodes);
     const models = [...new Set(nodes.filter(n => n.kind === 'model').map(n => n.label))];
-    // Build explanation paragraph
     const explanationParts = [];
     if (hasRateLimit)
         explanationParts.push('some online/free providers previously hit rate limits');
@@ -431,23 +543,88 @@ function formatBugNodes(nodes) {
         return '[Bug/Fix History]\n  No bug/fix records found.';
     return `[Bug/Fix History]\n${lines.join('\n')}`;
 }
+// ── Session recall ──
+async function formatSessionRecall() {
+    try {
+        const { loadSession, generateSummary, isTrivialSession } = await import('./session-tracker.js');
+        const state = await loadSession();
+        if (!state || isTrivialSession(state)) {
+            return '[Session]\n  No previous session data found.';
+        }
+        const summary = await generateSummary();
+        const lines = ['[Last Session]'];
+        lines.push(`  Duration: ${summary.duration}`);
+        lines.push(`  Status: ${summary.finalStatus}`);
+        if (summary.commandsRun.length > 0) {
+            lines.push(`  Commands: ${summary.commandsRun.join(', ')}`);
+        }
+        if (summary.filesChanged.length > 0) {
+            lines.push(`  Files changed: ${summary.filesChanged.join(', ')}`);
+        }
+        if (summary.decisionsMade.length > 0) {
+            lines.push(`  Decisions: ${summary.decisionsMade.join('; ')}`);
+        }
+        if (summary.lessonsLearned.length > 0) {
+            lines.push(`  Lessons: ${summary.lessonsLearned.join('; ')}`);
+        }
+        if (summary.unresolvedIssues.length > 0) {
+            lines.push(`  Unresolved: ${summary.unresolvedIssues.join('; ')}`);
+        }
+        lines.push(`  Build/Tests: ${summary.testsBuildStatus}`);
+        return lines.join('\n');
+    }
+    catch {
+        return '[Session]\n  Unable to load session data.';
+    }
+}
+// ── Main recall builder ──
 export async function buildRecallContext(message, options) {
     const intent = detectRecallIntent(message);
-    if (intent === 'none')
+    const debugMode = options?.debugMode ?? false;
+    const debugInfo = {
+        query: message,
+        intent,
+        intentDetected: intent !== 'none',
+        cacheHit: false,
+    };
+    if (intent === 'none') {
+        if (debugMode) {
+            return {
+                intent: 'none',
+                summary: '[No Intent]\n  Query did not match any recall intent pattern.',
+                debugInfo,
+            };
+        }
         return null;
+    }
     // Fast path: if not clearly a memory query, skip broad scanning
-    if (!isMemoryQuery(message))
+    if (!isMemoryQuery(message)) {
+        if (debugMode) {
+            debugInfo.skippedMemories = [{ text: 'all', reason: 'Not a memory query (isMemoryQuery returned false)' }];
+            return {
+                intent,
+                summary: '',
+                debugInfo,
+            };
+        }
         return null;
+    }
     const maxTokens = options?.maxTokens ?? 800;
     const includeProjectMap = options?.includeProjectMap ?? true;
     const includeGraph = options?.includeGraph ?? true;
     const includeLessons = options?.includeLessons ?? true;
     const includeDecisions = options?.includeDecisions ?? true;
     const optionsMask = (includeProjectMap ? 1 : 0) | (includeGraph ? 2 : 0) | (includeLessons ? 4 : 0) | (includeDecisions ? 8 : 0);
-    // Check session cache
+    // Check cache
     const cached = getCached(message, optionsMask);
-    if (cached)
-        return cached;
+    if (cached) {
+        debugInfo.cacheHit = true;
+        const ctx = cached;
+        if (debugMode) {
+            ctx.debugInfo = debugInfo;
+        }
+        return ctx;
+    }
     const keywords = extractKeywords(message);
     const allDecisions = [];
     const allLessons = [];
@@ -510,9 +687,29 @@ export async function buildRecallContext(message, options) {
                         }
                     }
                 }
+                // If no keywords matched, try node-level scoring with V2
+                if (matchedNodes.length === 0 && keywords.length > 0) {
+                    const scored = graph.nodes.map(n => ({
+                        node: n,
+                        score: computeNodeRelevanceV2(n, message, keywords),
+                    })).filter(s => s.score.total > 0)
+                        .sort((a, b) => b.score.total - a.score.total);
+                    matchedNodes = scored.slice(0, 10).map(s => s.node);
+                }
             }
         }
         catch { /* skip */ }
+    }
+    // ── Session recall path ──
+    if (intent === 'session_recall') {
+        const sessionSummary = await formatSessionRecall();
+        const ctx = {
+            intent,
+            summary: sessionSummary,
+            debugInfo: debugMode ? debugInfo : undefined,
+        };
+        setCached(message, optionsMask, ctx);
+        return ctx;
     }
     // ── Intent-specific summaries ──
     if (intent === 'decision_history') {
@@ -530,6 +727,7 @@ export async function buildRecallContext(message, options) {
                 recentDecisions: best.slice(0, 3).map(s => s.text),
                 warnings: warnings.length > 0 ? warnings : undefined,
                 projectMapSummary: projectMapSummary || undefined,
+                debugInfo: debugMode ? debugInfo : undefined,
             };
             setCached(message, optionsMask, ctx);
             return ctx;
@@ -542,6 +740,7 @@ export async function buildRecallContext(message, options) {
                 summary: `[Decisions]\n${lines}`,
                 warnings: warnings.length > 0 ? warnings : undefined,
                 projectMapSummary: projectMapSummary || undefined,
+                debugInfo: debugMode ? debugInfo : undefined,
             };
             setCached(message, optionsMask, ctx);
             return ctx;
@@ -550,6 +749,7 @@ export async function buildRecallContext(message, options) {
             intent,
             summary: '[Decisions]\n  No relevant decision found for your query.',
             warnings: ['No relevant decision found.'],
+            debugInfo: debugMode ? debugInfo : undefined,
         };
         setCached(message, optionsMask, noDecision);
         return noDecision;
@@ -563,16 +763,16 @@ export async function buildRecallContext(message, options) {
         const best = scored.filter(s => s.score >= 10);
         if (best.length > 0) {
             const chosen = best.slice(0, 3).map(s => s.text).join('\n');
-            const ctx = { intent, summary: `[Lessons]\n${chosen}`, recentLessons: best.slice(0, 3).map(s => s.text) };
+            const ctx = { intent, summary: `[Lessons]\n${chosen}`, recentLessons: best.slice(0, 3).map(s => s.text), debugInfo: debugMode ? debugInfo : undefined };
             setCached(message, optionsMask, ctx);
             return ctx;
         }
         if (allLessons.length > 0) {
-            const ctx = { intent, summary: `[Lessons]\n${allLessons.slice(0, 2).join('\n')}`, recentLessons: allLessons.slice(0, 2), warnings: ['Weak relevance — showing most recent lessons.'] };
+            const ctx = { intent, summary: `[Lessons]\n${allLessons.slice(0, 2).join('\n')}`, recentLessons: allLessons.slice(0, 2), warnings: ['Weak relevance — showing most recent lessons.'], debugInfo: debugMode ? debugInfo : undefined };
             setCached(message, optionsMask, ctx);
             return ctx;
         }
-        const noLessons = { intent, summary: '[Lessons]\n  No lessons recorded yet.', warnings: ['No lessons found.'] };
+        const noLessons = { intent, summary: '[Lessons]\n  No lessons recorded yet.', warnings: ['No lessons found.'], debugInfo: debugMode ? debugInfo : undefined };
         setCached(message, optionsMask, noLessons);
         return noLessons;
     }
@@ -580,7 +780,6 @@ export async function buildRecallContext(message, options) {
         const formatted = formatProviderNodes(matchedNodes);
         const queryLower = message.toLowerCase();
         const hasFallbackContext = queryLower.includes('ollama') || queryLower.includes('fallback') || queryLower.includes('local') || queryLower.includes('cooldown') || queryLower.includes('rate') || queryLower.includes('limit') || queryLower.includes('provider') || queryLower.includes('model');
-        // Build explanation into the summary
         const explanationBlock = `\n\n${formatted.explanation}`;
         let extra = '';
         let relLessons = [];
@@ -613,6 +812,7 @@ export async function buildRecallContext(message, options) {
             projectMapSummary: projectMapSummary || undefined,
             recentDecisions: relDecisions.length > 0 ? relDecisions.map(d => d.text) : undefined,
             recentLessons: relLessons.length > 0 ? relLessons.map(l => l.text) : undefined,
+            debugInfo: debugMode ? debugInfo : undefined,
         };
         setCached(message, optionsMask, provCtx);
         return provCtx;
@@ -629,6 +829,7 @@ export async function buildRecallContext(message, options) {
             relevantGraphEdges: graphEdgeStrs.length > 0 ? graphEdgeStrs.slice(0, 5) : undefined,
             warnings: warnings.length > 0 ? warnings : undefined,
             projectMapSummary: projectMapSummary || undefined,
+            debugInfo: debugMode ? debugInfo : undefined,
         };
         setCached(message, optionsMask, bugCtx);
         return bugCtx;
@@ -650,8 +851,12 @@ export async function buildRecallContext(message, options) {
         if (graphLabels.length > 0) {
             summaryLines.push(`\nGraph: ${graphLabels.slice(0, 5).join(', ')}`);
         }
-        if (summaryLines.length === 0 && !projectMapSummary)
+        if (summaryLines.length === 0 && !projectMapSummary) {
+            if (debugMode) {
+                return { intent, summary: '', debugInfo };
+            }
             return null;
+        }
         const projCtx = {
             intent,
             summary: summaryLines.join('\n'),
@@ -659,6 +864,7 @@ export async function buildRecallContext(message, options) {
             recentLessons: allLessons.length > 0 ? allLessons.slice(0, 2) : undefined,
             recentDecisions: allDecisions.length > 0 ? allDecisions.slice(0, 2) : undefined,
             relevantGraphNodes: graphLabels.length > 0 ? graphLabels.slice(0, 10) : undefined,
+            debugInfo: debugMode ? debugInfo : undefined,
         };
         setCached(message, optionsMask, projCtx);
         return projCtx;
@@ -668,11 +874,11 @@ export async function buildRecallContext(message, options) {
             .filter(n => n.kind === 'skill')
             .map(n => `${n.kind}:${n.label}`);
         if (skillLabels.length > 0) {
-            const skillCtx = { intent, summary: `[Skills]\n  ${skillLabels.slice(0, 5).join(', ')}`, relevantGraphNodes: skillLabels.slice(0, 5) };
+            const skillCtx = { intent, summary: `[Skills]\n  ${skillLabels.slice(0, 5).join(', ')}`, relevantGraphNodes: skillLabels.slice(0, 5), debugInfo: debugMode ? debugInfo : undefined };
             setCached(message, optionsMask, skillCtx);
             return skillCtx;
         }
-        const noSkill = { intent, summary: '[Skills]\n  No skill records found.' };
+        const noSkill = { intent, summary: '[Skills]\n  No skill records found.', debugInfo: debugMode ? debugInfo : undefined };
         setCached(message, optionsMask, noSkill);
         return noSkill;
     }
@@ -688,8 +894,12 @@ export async function buildRecallContext(message, options) {
         const labels = matchedNodes.map(n => `${n.kind}:${n.label}`).slice(0, 5);
         fallbackParts.push(`Graph: ${labels.join(', ')}`);
     }
-    if (fallbackParts.length === 0)
+    if (fallbackParts.length === 0) {
+        if (debugMode) {
+            return { intent, summary: '', debugInfo };
+        }
         return null;
+    }
     const fbCtx = {
         intent,
         summary: `[Project Memory]\n${fallbackParts.join('\n')}`,
@@ -697,6 +907,7 @@ export async function buildRecallContext(message, options) {
         recentLessons: allLessons.length > 0 ? allLessons.slice(0, 3) : undefined,
         recentDecisions: allDecisions.length > 0 ? allDecisions.slice(0, 3) : undefined,
         relevantGraphNodes: matchedNodes.map(n => `${n.kind}:${n.label}`).slice(0, 10),
+        debugInfo: debugMode ? debugInfo : undefined,
     };
     setCached(message, optionsMask, fbCtx);
     return fbCtx;

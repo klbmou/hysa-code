@@ -1,5 +1,3 @@
-import { isOnlyGreeting } from '../ai/client.js';
-
 const COMMON_PROGRAMMING_CONCEPTS = new Set([
   'react', 'vue', 'angular', 'svelte', 'ember', 'backbone', 'lit',
   'node', 'node.js', 'deno', 'bun',
@@ -213,7 +211,7 @@ export function shouldSearchEntity(
 ): { shouldSearch: boolean; query: string | null } {
   const trimmed = message.trim();
 
-  if (isOnlyGreeting(trimmed)) {
+  if (trimmed.split(/\s+/).filter(Boolean).length < 4) {
     return { shouldSearch: false, query: null };
   }
 

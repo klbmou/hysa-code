@@ -8,11 +8,12 @@ import { detectBestProvider, buildConfigFromDetection, detectedProviderLabel } f
 import { runDoctor } from './utils/doctor.js';
 import { fetchOpenRouterModels, filterFreeModels, formatModelsTable } from './ai/openrouter-models.js';
 import { getSettings, updateSettings, updateAgentMode } from './config/settings.js';
-import { createClient, isOnlyGreeting, getCasualResponse, createSingleClient } from './ai/client.js';
+import { createClient, createSingleClient } from './ai/client.js';
 import { classifyTask } from './ai/task-classifier.js';
 import { shouldInjectProjectContext, getAvailableFallbackProviders, getSuggestedFallbackAction } from './ai/provider-policy.js';
 import { getProjectInfo, invalidateCache } from './context/builder.js';
 import { rankFiles } from './context/ranker.js';
+import { decideProjectMode } from './context/project-router.js';
 import { estimateTokens, truncateMessages } from './context/tokens.js';
 import { buildSystemPrompt, resolvePromptMode } from './prompts/system.js';
 import { isProtectedFilePath, PROTECTED_FILE_MESSAGE, normalizeToolParams, containsOnlyToolSyntax, stripToolCallBlocks } from './ai/tools.js';
@@ -29,6 +30,7 @@ import { shouldAutoFix, attemptAutoFix } from './tools/auto-fix.js';
 import { browserOpen, browserScreenshot, browserText, browserSnapshot, browserClick, browserType, browserClose, getBrowserStatus, checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig, cliBrowserOpen, cliBrowserScreenshot, cliBrowserText, cliBrowserSnapshot, cliBrowserClick, cliBrowserType, cliBrowserClose, cliBrowserStatus, getDaemonConfig } from './tools/browser.js';
 import { shouldSearchEntity } from './tools/entity-detector.js';
 import { classifyCommand, withTimeout, formatCommandOutput } from './utils/commands.js';
+import { translateCommand, shellInfo } from './utils/shell.js';
 import { ALL_MODES, MODE_LABELS, MODE_DESCRIPTIONS } from './agent/modes.js';
 import { createTask, getActiveTask } from './agent/tasks.js';
 import { listSymbols, findReferences, searchImports, summarizeFile, explainFunction } from './agent/tools.js';
@@ -459,13 +461,18 @@ function resolveCommand(command) {
     return command;
 }
 function runCommandSync(command) {
-    const resolved = resolveCommand(command);
+    const translated = translateCommand(command);
+    const resolved = resolveCommand(translated);
+    const needsPowerShell = translated !== command && translated.includes('Get-') || translated.includes('Select-');
+    const shell = isWindows()
+        ? (needsPowerShell ? 'powershell.exe -NoProfile -Command' : process.env.ComSpec || 'cmd.exe')
+        : undefined;
     try {
         const stdout = execSync(resolved, {
             encoding: 'utf-8',
             maxBuffer: 10 * 1024 * 1024,
             cwd: resolve('.'),
-            shell: isWindows() ? process.env.ComSpec || 'cmd.exe' : undefined,
+            shell,
         });
         return { stdout, stderr: '' };
     }
@@ -473,7 +480,8 @@ function runCommandSync(command) {
         const err = error;
         const stderr = err.stderr || '';
         if (isWindows() && (stderr.includes('is not recognized') || stderr.includes('not found') || (err.message?.includes('ENOENT')))) {
-            throw new Error(`Command not found: "${command.split(/\s+/)[0]}".\n  On Windows, try running this manually in PowerShell:\n  ${command}`);
+            const bin = command.split(/\s+/)[0];
+            throw new Error(`Command not found: "${bin}".\n  ${shellInfo()}\n  Try using Node.js tools (read_file, list_symbols) instead of shell commands.`);
         }
         throw error;
     }
@@ -790,7 +798,7 @@ function isSimpleQuestion(text) {
     const trimmed = text.trim().toLowerCase();
     if (trimmed.length > 60)
         return false;
-    const actionWords = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe|apply|remove|delete|rename|move|copy|refactor)\b/i;
+    const actionWords = /\b(read|edit|write|update|change|modify|create|add|fix|debug|run|exec|find|search|scan|symbol|import|show|open|check|look|list|tell|describe|apply|remove|delete|rename|move|copy|refactor|explain|summarize|analyze|inspect|improve|implement|build|compile|deploy|test|investigate|review|audit)\b/i;
     if (actionWords.test(trimmed))
         return false;
     return true;
@@ -999,21 +1007,7 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
             inPrompt = false;
         }
         retryContent = null;
-        // ── Strong pre-request casual guard ──────────────
         const trimmed = userInput.trim();
-        if (!trimmed.startsWith('/') && isOnlyGreeting(trimmed)) {
-            const casual = getCasualResponse(trimmed);
-            if (config.debug) {
-                console.log(pc.dim(`  [debug] local casual guard: skipped provider request`));
-            }
-            if (casual) {
-                console.log(pc.cyan(`  ${casual}\n`));
-            }
-            else {
-                console.log(pc.cyan('  Hi! How can I help with this project?\n'));
-            }
-            continue;
-        }
         // ── Built-in commands ────────────────────────────
         if (trimmed.toLowerCase() === '/exit') {
             console.log(pc.yellow('\nGoodbye!\n'));
@@ -1802,16 +1796,66 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
             continue;
         }
         if (trimmed.toLowerCase().startsWith('/brain recall ')) {
-            const query = trimmed.slice('/brain recall '.length).trim();
+            let query = trimmed.slice('/brain recall '.length).trim();
+            let debugMode = false;
+            if (query.startsWith('--debug ')) {
+                debugMode = true;
+                query = query.slice('--debug '.length).trim();
+            }
             if (query) {
                 try {
-                    const recallCtx = await buildRecallContext(query);
+                    const recallCtx = await buildRecallContext(query, { debugMode });
+                    console.log(pc.bold(pc.magenta(`\n🧠 Recall: "${query}"\n`)));
                     if (!recallCtx) {
-                        console.log(pc.dim(`\n  No relevant memory for "${query}".\n`));
+                        console.log(pc.yellow('  No relevant memory found for this query.\n'));
+                        if (debugMode) {
+                            console.log(pc.dim(`  ── Debug Recall ──`));
+                            console.log(pc.dim(`  Intent: none (not detected)`));
+                            console.log(pc.dim(`  No intent pattern matched the query.\n`));
+                        }
                     }
                     else {
-                        console.log(pc.bold(pc.magenta(`\n🧠 "${query}"\n`)));
-                        console.log(`  ${recallCtx.summary.slice(0, 500)}`);
+                        console.log(`  Intent: ${pc.cyan(recallCtx.intent)}`);
+                        if (recallCtx.recentLessons && recallCtx.recentLessons.length > 0) {
+                            console.log(`  Lessons: ${recallCtx.recentLessons.length}`);
+                        }
+                        if (recallCtx.recentDecisions && recallCtx.recentDecisions.length > 0) {
+                            console.log(`  Decisions: ${recallCtx.recentDecisions.length}`);
+                        }
+                        if (recallCtx.relevantGraphNodes && recallCtx.relevantGraphNodes.length > 0) {
+                            console.log(`  Graph nodes: ${recallCtx.relevantGraphNodes.length}`);
+                        }
+                        console.log();
+                        console.log(recallCtx.summary);
+                        console.log();
+                        const sources = [];
+                        if (recallCtx.projectMapSummary)
+                            sources.push('project-map');
+                        if (recallCtx.recentLessons && recallCtx.recentLessons.length > 0)
+                            sources.push('lessons');
+                        if (recallCtx.recentDecisions && recallCtx.recentDecisions.length > 0)
+                            sources.push('decisions');
+                        if (recallCtx.relevantGraphNodes && recallCtx.relevantGraphNodes.length > 0)
+                            sources.push('graph');
+                        console.log(pc.dim(`  Sources: ${sources.join(', ') || 'none'}`));
+                        if (debugMode && recallCtx.debugInfo) {
+                            const di = recallCtx.debugInfo;
+                            console.log(pc.dim(`\n  ── Debug Recall ──`));
+                            console.log(pc.dim(`  Intent: ${di.intent} (detected: ${di.intentDetected})`));
+                            console.log(pc.dim(`  Cache hit: ${di.cacheHit}`));
+                            if (di.skippedMemories && di.skippedMemories.length > 0) {
+                                console.log(pc.dim(`  Skipped:`));
+                                for (const sm of di.skippedMemories) {
+                                    console.log(pc.dim(`    ⏭ ${sm.reason}`));
+                                }
+                            }
+                            if (di.matchedMemories && di.matchedMemories.length > 0) {
+                                console.log(pc.dim(`  Matched memories:`));
+                                for (const mm of di.matchedMemories) {
+                                    console.log(pc.dim(`    • "${mm.text.slice(0, 60)}" score=${mm.totalScore} (title=${mm.titleScore} body=${mm.bodyScore} fuzzy=${mm.fuzzyScore} recency=${mm.recencyBoost} pinned=${mm.pinnedBoost} impConf=${mm.importanceConfidenceBoost})`));
+                                }
+                            }
+                        }
                         console.log();
                     }
                 }
@@ -1999,8 +2043,13 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
         timer?.start('task_classification');
         const taskKind = classifyTask([{ role: 'user', content: trimmed }]);
         timer?.stop('task_classification');
-        const injectProjectContext = shouldInjectProjectContext(trimmed, taskKind);
-        const isSimpleQ = isSimpleQuestion(trimmed) || taskKind === 'simple_chat';
+        // ── Project mode routing ──────────────────────
+        const projectDecision = decideProjectMode(trimmed, true, taskKind);
+        const isSimpleQ = isSimpleQuestion(trimmed) && !projectDecision.projectMode || taskKind === 'simple_chat';
+        if (config.debug) {
+            console.log(pc.dim(`  [debug] task=${taskKind}, projectMode=${projectDecision.projectMode}, reason=${projectDecision.reason}, simpleQ=${isSimpleQ}`));
+        }
+        const injectProjectContext = projectDecision.projectMode || shouldInjectProjectContext(trimmed, taskKind);
         const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, isSimpleQ || !injectProjectContext);
         const promptProjectInfo = injectProjectContext ? {
             type: projectInfo.type,
@@ -2019,7 +2068,7 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
             /^hysa\s+(?:search|websearch)\s+"(.+?)"$/i,
             /^hysa\s+(?:search|websearch)\s+'(.+?)'$/i,
             /^hysa\s+(?:search|websearch)\s+(.+)$/i,
-            /^(?:search|find|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
+            /^(?:search|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
             /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
             /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
             /^(?:where\s+can\s+(?:I|we)\s+(?:watch|find|get)\s+)/i,
@@ -2125,7 +2174,7 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
         // ── Smart context injection ────────────────────
         // Replace broad recall with scored selection by complexity + relevance
         timer?.start('brain_recall');
-        if (!isSimpleQ && !searchQuery && !isOnlyGreeting(trimmed)) {
+        if (!isSimpleQ && !searchQuery && trimmed.split(/\s+/).length < 4) {
             try {
                 const selected = await selectContext({
                     message: trimmed,
@@ -3336,6 +3385,7 @@ export async function start() {
             console.log(`  ${pc.dim(`Events: ${eventCount} | Memory writes: ${result.saved} | Summary: ${summary.charCount} chars`)}`);
             console.log();
             console.log(`  ${pc.dim('Try:')} ${pc.cyan('hysa brain recall "what happened last session?"')}`);
+            console.log(`  ${pc.dim('      ')} ${pc.cyan('hysa brain recall "tell me about changes" --debug-recall')}`);
             console.log();
         }
         catch (err) {
@@ -3896,8 +3946,11 @@ export async function start() {
         .command('recall')
         .description('Recall project memory for a query')
         .argument('<query>', 'Query to search memory')
+        .option('--debug', 'Show detailed recall breakdown (alias for --debug-recall)')
+        .option('--debug-recall', 'Show detailed recall breakdown')
         .option('--debug-timing', 'Show detailed timing breakdown')
         .action(async (query, opts) => {
+        const debugMode = opts?.debug || opts?.debugRecall || false;
         const timer = opts?.debugTiming ? new Timer() : null;
         try {
             timer?.start('build_recall_context');
@@ -3907,13 +3960,28 @@ export async function start() {
                 includeGraph: true,
                 includeLessons: true,
                 includeDecisions: true,
+                debugMode,
             });
+            console.log(pc.bold(pc.magenta(`\n🧠 Recall: "${query}"\n`)));
             if (!recallCtx) {
-                console.log(pc.yellow(`\n  No relevant memory found for "${query}".\n`));
+                console.log(pc.yellow('  No relevant memory found for this query.\n'));
+                if (debugMode) {
+                    console.log(pc.dim(`  ── Debug Recall ──`));
+                    console.log(pc.dim(`  Intent: none (not detected)`));
+                    console.log(pc.dim(`  No intent pattern matched the query.\n`));
+                }
                 return;
             }
-            console.log(pc.bold(pc.magenta(`\n🧠 Recall: "${query}"\n`)));
             console.log(`  Intent: ${pc.cyan(recallCtx.intent)}`);
+            if (recallCtx.recentLessons && recallCtx.recentLessons.length > 0) {
+                console.log(`  Lessons: ${recallCtx.recentLessons.length}`);
+            }
+            if (recallCtx.recentDecisions && recallCtx.recentDecisions.length > 0) {
+                console.log(`  Decisions: ${recallCtx.recentDecisions.length}`);
+            }
+            if (recallCtx.relevantGraphNodes && recallCtx.relevantGraphNodes.length > 0) {
+                console.log(`  Graph nodes: ${recallCtx.relevantGraphNodes.length}`);
+            }
             console.log();
             console.log(recallCtx.summary);
             console.log();
@@ -3927,6 +3995,24 @@ export async function start() {
             if (recallCtx.relevantGraphNodes && recallCtx.relevantGraphNodes.length > 0)
                 sources.push('graph');
             console.log(pc.dim(`  Sources: ${sources.join(', ') || 'none'}`));
+            if (debugMode && recallCtx.debugInfo) {
+                const di = recallCtx.debugInfo;
+                console.log(pc.dim(`\n  ── Debug Recall ──`));
+                console.log(pc.dim(`  Intent: ${di.intent} (detected: ${di.intentDetected})`));
+                console.log(pc.dim(`  Cache hit: ${di.cacheHit}`));
+                if (di.skippedMemories && di.skippedMemories.length > 0) {
+                    console.log(pc.dim(`  Skipped:`));
+                    for (const sm of di.skippedMemories) {
+                        console.log(pc.dim(`    ⏭ ${sm.reason}`));
+                    }
+                }
+                if (di.matchedMemories && di.matchedMemories.length > 0) {
+                    console.log(pc.dim(`  Matched memories:`));
+                    for (const mm of di.matchedMemories) {
+                        console.log(pc.dim(`    • "${mm.text.slice(0, 60)}" score=${mm.totalScore} (title=${mm.titleScore} body=${mm.bodyScore} fuzzy=${mm.fuzzyScore} recency=${mm.recencyBoost} pinned=${mm.pinnedBoost} impConf=${mm.importanceConfidenceBoost})`));
+                    }
+                }
+            }
             console.log();
             timer?.stop('build_recall_context');
             if (opts?.debugTiming && timer) {

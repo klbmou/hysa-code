@@ -3,40 +3,121 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { getBrainDir, readProjectMap, readRecentEvents, redact } from './store.js';
 import { readExperienceGraph, searchGraph } from './graph-store.js';
+import { getCached, setCached, cacheKey } from './recall-cache.js';
 import type { ExperienceGraphNode } from './graph-types.js';
 
-// ── Session recall cache ──
+// ── Types ──
 
-interface CacheEntry {
-  result: RecallContext;
-  timestamp: number;
+export type RecallIntent =
+  | 'none'
+  | 'project_context'
+  | 'bug_history'
+  | 'provider_history'
+  | 'browser_history'
+  | 'decision_history'
+  | 'lesson_history'
+  | 'skill_history'
+  | 'session_recall';
+
+export interface ScoredMemoryDebug {
+  text: string;
+  titleScore: number;
+  bodyScore: number;
+  fuzzyScore: number;
+  recencyBoost: number;
+  pinnedBoost: number;
+  importanceConfidenceBoost: number;
+  totalScore: number;
+  source: string;
 }
 
-const recallCache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 30_000;
-
-function cacheKey(message: string, optionsMask: number): string {
-  const kw = message.toLowerCase().split(/\s+/).filter(w => w.length > 2).sort().join(',');
-  return `${kw}|${optionsMask}`;
+export interface SkippedMemoryDebug {
+  text: string;
+  reason: string;
 }
 
-function getCached(message: string, optionsMask: number): RecallContext | undefined {
-  const key = cacheKey(message, optionsMask);
-  const entry = recallCache.get(key);
-  if (entry && Date.now() - entry.timestamp < CACHE_TTL_MS) {
-    return entry.result;
+export interface RecallDebugInfo {
+  query: string;
+  intent: RecallIntent;
+  intentDetected: boolean;
+  matchedMemories?: ScoredMemoryDebug[];
+  skippedMemories?: SkippedMemoryDebug[];
+  cacheHit: boolean;
+}
+
+export type RecallContext = {
+  intent: RecallIntent;
+  summary: string;
+  projectMapSummary?: string;
+  recentLessons?: string[];
+  recentDecisions?: string[];
+  relevantGraphNodes?: string[];
+  relevantGraphEdges?: string[];
+  warnings?: string[];
+  debugInfo?: RecallDebugInfo;
+};
+
+// ── Lightweight stemmer ──
+
+function stem(word: string): string {
+  if (word.length < 4) return word;
+  let s = word.toLowerCase();
+  // -tion → t (e.g., "implementation" -> "implementat", matches "implement")
+  if (s.endsWith('tion') && s.length > 5) s = s.slice(0, -3);
+  // -ing → (e.g., "running" -> "runn", matches "run" partially; also "formatting" -> "formatt")
+  if (s.endsWith('ing') && s.length > 4) s = s.slice(0, -3);
+  // -ed → (e.g., "changed" -> "chang", matches "change")
+  if (s.endsWith('ed') && s.length > 4 && !s.endsWith('eed')) s = s.slice(0, -2);
+  // -ly → (e.g., "recently" -> "recent")
+  if (s.endsWith('ly') && s.length > 4) s = s.slice(0, -2);
+  // -es → (e.g., "changes" -> "chang", matches "change")
+  if (s.endsWith('es') && s.length > 4) s = s.slice(0, -2);
+  // -s (but not ss) → (e.g., "projects" -> "project")
+  if (s.endsWith('s') && !s.endsWith('ss') && s.length > 3) s = s.slice(0, -1);
+  // -er → (e.g., "provider" -> "provid", matches "provide" loosely)
+  if (s.endsWith('er') && s.length > 4) {
+    const without = s.slice(0, -2);
+    if (without.endsWith('id') || without.endsWith('ov') || without.endsWith('form')) {
+      // keep er for common stems
+    } else {
+      s = without;
+    }
   }
-  if (entry) recallCache.delete(key);
-  return undefined;
+  return s;
 }
 
-function setCached(message: string, optionsMask: number, result: RecallContext): void {
-  const key = cacheKey(message, optionsMask);
-  recallCache.set(key, { result, timestamp: Date.now() });
-  if (recallCache.size > 50) {
-    const oldest = [...recallCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp)[0];
-    if (oldest) recallCache.delete(oldest[0]);
+function stemToken(token: string): string {
+  return stem(token.replace(/[^a-zA-Z0-9]/g, ''));
+}
+
+// ── Token overlap scoring ──
+
+function tokenOverlap(query: string, text: string): number {
+  const queryTokens = query.toLowerCase().split(/\s+/).filter(t => t.length > 2).map(stemToken);
+  const textTokens = text.toLowerCase().split(/\s+/).filter(t => t.length > 2).map(stemToken);
+  if (queryTokens.length === 0 || textTokens.length === 0) return 0;
+  const overlap = queryTokens.filter(qt => textTokens.some(tt => tt === qt || tt.includes(qt) || qt.includes(tt))).length;
+  const unique = new Set([...queryTokens, ...textTokens]).size;
+  return Math.round((overlap / unique) * 100);
+}
+
+// ── Partial match score ──
+
+function partialMatchScore(query: string, text: string): number {
+  const queryWords = query.toLowerCase().split(/\s+/).filter(t => t.length > 2);
+  const lowerText = text.toLowerCase();
+  let score = 0;
+  for (const qw of queryWords) {
+    if (lowerText.includes(qw)) {
+      score += 10;
+    } else {
+      const stemmed = stemToken(qw);
+      if (stemmed.length > 2 && lowerText.includes(stemmed)) {
+        score += 5;
+      }
+    }
   }
+  return score;
 }
 
 // ── Fast path: detect if query clearly asks about memory ──
@@ -57,36 +138,13 @@ export function isMemoryQuery(message: string): boolean {
   if (!trimmed) return false;
   const lower = trimmed.toLowerCase();
   const words = lower.split(/\s+/);
-  // Very short messages (1-3 words) are unlikely to be memory queries
-  // unless they directly contain a memory keyword (as substring)
   if (words.length <= 3) {
     return MEMORY_KEYWORDS.some(kw => lower.includes(kw));
   }
   return true;
 }
 
-// ── Types ──
-
-export type RecallIntent =
-  | 'none'
-  | 'project_context'
-  | 'bug_history'
-  | 'provider_history'
-  | 'browser_history'
-  | 'decision_history'
-  | 'lesson_history'
-  | 'skill_history';
-
-export type RecallContext = {
-  intent: RecallIntent;
-  summary: string;
-  projectMapSummary?: string;
-  recentLessons?: string[];
-  recentDecisions?: string[];
-  relevantGraphNodes?: string[];
-  relevantGraphEdges?: string[];
-  warnings?: string[];
-};
+// ── Intent detection ──
 
 const INTENT_PATTERNS: { intent: RecallIntent; patterns: RegExp[] }[] = [
   {
@@ -94,8 +152,6 @@ const INTENT_PATTERNS: { intent: RecallIntent; patterns: RegExp[] }[] = [
     patterns: [
       /(?:what|any|the)\s+lessons?/i,
       /lessons?\s+(?:learn(?:t|ed)?|about)/i,
-      /ما\s+آخر\s+(?:الدروس|التعلم)/i,
-      /(?:ماذا|ماذا\s+ذا)\s+تعلم/i,
       /rate\s+limit\s+lesson/i,
     ],
   },
@@ -105,9 +161,17 @@ const INTENT_PATTERNS: { intent: RecallIntent; patterns: RegExp[] }[] = [
       /(?:what|any|the)\s+decisi(?:on|ons)/i,
       /(?:decide?|decisi(?:on|ons))\s+(?:about|on|regarding|for)/i,
       /what\s+did\s+(?:we|you)\s+decide/i,
-      /ماذا\s+قرر(?:نا)?\s+(?:بخصوص|عن|في)/i,
       /decision/i,
       /architecture\s+decision/i,
+    ],
+  },
+  {
+    intent: 'session_recall',
+    patterns: [
+      /(?:last|previous|recent)\s+session/i,
+      /what\s+(?:happened|changed)\s+(?:in|during|last)\s+(?:session|the\s+session)/i,
+      /what\s+did\s+(?:we|you)\s+do\s+(?:last\s+time|in\s+the\s+last\s+session|yesterday)/i,
+      /what\s+did\s+(?:we|you)\s+fix\s+(?:yesterday|last\s+time)/i,
     ],
   },
   {
@@ -117,16 +181,15 @@ const INTENT_PATTERNS: { intent: RecallIntent; patterns: RegExp[] }[] = [
       /(?:bug|bugs)\s+(?:in|with|about|fix(?:ed)?)/i,
       /what\s+(?:was|were|is)\s+(?:the|that)\s+(?:bug|issue|problem)/i,
       /(?:bug|issue|problem)\s+in\s+(?:the\s+)?browser/i,
-      /ماذا\s+(?:أصلح|صلح)(?:نا)?\s+(?:في|بخصوص)/i,
       /what\s+(?:did\s+)?we\s+fix/i,
       /what\s+was\s+(?:the\s+)?(?:browser|session)\s+(?:bug|issue|problem)/i,
+      /how\s+did\s+(?:we|you)\s+(?:fix|resolve|solve)/i,
     ],
   },
   {
     intent: 'browser_history',
     patterns: [
       /browser\s+(?:session|daemon|bug|issue|problem|status|history)/i,
-      /ما\s+مشكلة\s+(?:المتصفح|browser)/i,
       /browser\s+was/i,
     ],
   },
@@ -135,23 +198,24 @@ const INTENT_PATTERNS: { intent: RecallIntent; patterns: RegExp[] }[] = [
     patterns: [
       /(?:provider|model|fallback)\s+(?:fail|failure|error|issue|problem|history|slow|rate.limit)/i,
       /why\s+(?:did|was|is)\s+(?:the\s+)?(?:provider|model|fallback)/i,
-      /لماذا\s+كان\s+fallback/i,
       /provider\s+(?:cooldown|health|status)/i,
       /rate\s+limit/i,
       /quota/i,
+      /what\s+happened\s+(?:with|to)\s+(?:fallback|provider)/i,
     ],
   },
   {
     intent: 'project_context',
     patterns: [
-      /(?:what|summarize|tell|describe)\s+(?:recent|about|the|current|project|changes|update)/i,
+      /(?:tell|show|give|list)\s+(?:me\s+)?(?:about|what)\s+(?:the\s+)?(?:project|changes?|update|session|work)/i,
+      /(?:what|summarize|tell|describe)\s+(?:me\s+)?(?:recent|about|the|current|project|changes|update)/i,
       /what\s+(?:did|have)\s+(?:we|you)\s+(?:change|done|update|modify)/i,
       /(?:recent|latest)\s+(?:change|changes|update|updates)/i,
       /what\s+files?\s+(?:are|were|is)\s+(?:important|changed|modify)/i,
       /smart\s+router/i,
       /project\s+(?:structure|memory|map|context)/i,
-      /ماذا\s+تغير\s+في/i,
       /what\s+(?:did\s+)?we\s+(?:do|work\s+on)/i,
+      /what\s+changed\s+recently/i,
     ],
   },
   {
@@ -164,7 +228,7 @@ const INTENT_PATTERNS: { intent: RecallIntent; patterns: RegExp[] }[] = [
 ];
 
 const NEGATIVE_PATTERNS = [
-  /^(?:hi|hello|hey|yo|sup|bye|goodbye|cya|salam|مرحبا|اهلا)\b/i,
+  /^(?:hi|hello|hey|yo|sup|bye|goodbye|cya|salam)\b/i,
   /^(?:thanks?|thank\s+you|ok|okay|nice|good|great|perfect|yes|no|sure|lol)\b/i,
   /^write\s+(?:a|an|the)\s+(?:simple\s+)?(?:game|app|program|function|component|script)/i,
   /^explain\s+(?:React|JavaScript|TypeScript|Python|CSS|HTML)/i,
@@ -193,7 +257,6 @@ export function detectRecallIntent(message: string): RecallIntent {
 function truncateText(text: string, maxLen: number): string {
   if (text.length <= maxLen) return text;
 
-  // Try sentence boundary within range [maxLen-40, maxLen]
   const searchStart = Math.max(0, maxLen - 40);
   const searchArea = text.slice(searchStart, maxLen);
   const sentenceEnd = searchArea.search(/[.!?]\s/);
@@ -202,13 +265,11 @@ function truncateText(text: string, maxLen: number): string {
     return text.slice(0, cutPos) + '...';
   }
 
-  // Try last word boundary within 10 chars before maxLen
   const wordBoundary = text.lastIndexOf(' ', maxLen - 1);
   if (wordBoundary > maxLen - 10) {
     return text.slice(0, wordBoundary) + '...';
   }
 
-  // Hard truncate at maxLen
   return text.slice(0, maxLen - 3) + '...';
 }
 
@@ -310,9 +371,16 @@ function computeRelevance(
   const lower = text.toLowerCase();
   let score = 0;
 
+  // Direct keyword match
   for (const kw of keywords) {
     if (lower.includes(kw)) {
       score += 10;
+    } else {
+      // Try stemmed match
+      const stemmed = stemToken(kw);
+      if (stemmed.length > 2 && lower.includes(stemmed)) {
+        score += 5;
+      }
     }
   }
 
@@ -321,8 +389,17 @@ function computeRelevance(
   for (const kw of keywords) {
     if (titlePart.includes(kw)) {
       score += 5;
+    } else {
+      const stemmed = stemToken(kw);
+      if (stemmed.length > 2 && titlePart.includes(stemmed)) {
+        score += 3;
+      }
     }
   }
+
+  // Token overlap bonus
+  const overlap = tokenOverlap(queryMessage, text);
+  score += Math.round(overlap * 0.3);
 
   // Boost for provider terms when query is provider-related
   if (providerOnly) {
@@ -375,24 +452,81 @@ function computeRelevance(
   return score;
 }
 
+function computeNodeRelevanceV2(
+  node: ExperienceGraphNode,
+  queryMessage: string,
+  keywords: string[],
+): { titleScore: number; bodyScore: number; fuzzyScore: number; recencyBoost: number; pinnedBoost: number; importanceConfidenceBoost: number; total: number } {
+  const nodeText = `${node.label} ${node.summary || ''}`;
+  const lower = nodeText.toLowerCase();
+
+  // Title direct match
+  let titleScore = 0;
+  const titleLower = node.label.toLowerCase();
+  for (const kw of keywords) {
+    if (titleLower.includes(kw)) titleScore += 15;
+  }
+  if (titleScore === 0) {
+    for (const kw of keywords) {
+      const stemmed = stemToken(kw);
+      if (stemmed.length > 2 && titleLower.includes(stemmed)) titleScore += 8;
+    }
+  }
+
+  // Body direct match
+  let bodyScore = 0;
+  const bodyLower = (node.summary || '').toLowerCase();
+  for (const kw of keywords) {
+    if (bodyLower.includes(kw)) bodyScore += 10;
+  }
+  if (bodyScore === 0) {
+    for (const kw of keywords) {
+      const stemmed = stemToken(kw);
+      if (stemmed.length > 2 && bodyLower.includes(stemmed)) bodyScore += 5;
+    }
+  }
+
+  // Fuzzy token overlap
+  const fuzzyScore = tokenOverlap(queryMessage, nodeText);
+
+  // Recency boost (0-20)
+  const age = Date.now() - new Date(node.createdAt).getTime();
+  const DAY_MS = 86_400_000;
+  let recencyBoost = 0;
+  if (age < DAY_MS) recencyBoost = 20;
+  else if (age < 7 * DAY_MS) recencyBoost = 15;
+  else if (age < 30 * DAY_MS) recencyBoost = 10;
+  else if (age < 90 * DAY_MS) recencyBoost = 5;
+
+  // Pinned boost
+  const pinnedBoost = node.pinned ? 20 : 0;
+
+  // Importance/confidence weighting
+  const imp = (node.importance ?? 50) / 50;
+  const conf = (node.confidence ?? 50) / 50;
+  const importanceConfidenceBoost = Math.round((imp * conf - 1) * 15);
+
+  const total = titleScore + bodyScore + fuzzyScore + recencyBoost + pinnedBoost + importanceConfidenceBoost;
+
+  return { titleScore, bodyScore, fuzzyScore, recencyBoost, pinnedBoost, importanceConfidenceBoost, total };
+}
+
 // ── Provider nodes: extract providers from event labels too ──
 
 function extractProvidersFromAllNodes(nodes: ExperienceGraphNode[]): string[] {
   const providers = new Set<string>();
 
-  // From kind=provider nodes
   for (const n of nodes) {
     if (n.kind === 'provider') {
       providers.add(n.label);
     }
   }
 
-  // From event labels like provider_failed:anthropic_proxy/claude-3-haiku-latest
   for (const n of nodes) {
     if (n.kind === 'event' && n.label) {
       const colonIdx = n.label.indexOf(':');
       if (colonIdx !== -1) {
-        const rest = n.label.slice(colonIdx + 1); // e.g. "anthropic_proxy/claude-3-haiku-latest"
+        const rest = n.label.slice(colonIdx + 1);
         const slashIdx = rest.indexOf('/');
         if (slashIdx !== -1) {
           providers.add(rest.slice(0, slashIdx));
@@ -453,7 +587,6 @@ function formatProviderNodes(nodes: ExperienceGraphNode[]): {
     nodes.filter(n => n.kind === 'model').map(n => n.label)
   )];
 
-  // Build explanation paragraph
   const explanationParts: string[] = [];
   if (hasRateLimit) explanationParts.push('some online/free providers previously hit rate limits');
   if (hasConnectionError) explanationParts.push('some providers had connection errors');
@@ -509,6 +642,43 @@ function formatBugNodes(nodes: ExperienceGraphNode[]): string {
   return `[Bug/Fix History]\n${lines.join('\n')}`;
 }
 
+// ── Session recall ──
+
+async function formatSessionRecall(): Promise<string> {
+  try {
+    const { loadSession, generateSummary, isTrivialSession } = await import('./session-tracker.js');
+    const state = await loadSession();
+    if (!state || isTrivialSession(state)) {
+      return '[Session]\n  No previous session data found.';
+    }
+    const summary = await generateSummary();
+    const lines: string[] = ['[Last Session]'];
+    lines.push(`  Duration: ${summary.duration}`);
+    lines.push(`  Status: ${summary.finalStatus}`);
+    if (summary.commandsRun.length > 0) {
+      lines.push(`  Commands: ${summary.commandsRun.join(', ')}`);
+    }
+    if (summary.filesChanged.length > 0) {
+      lines.push(`  Files changed: ${summary.filesChanged.join(', ')}`);
+    }
+    if (summary.decisionsMade.length > 0) {
+      lines.push(`  Decisions: ${summary.decisionsMade.join('; ')}`);
+    }
+    if (summary.lessonsLearned.length > 0) {
+      lines.push(`  Lessons: ${summary.lessonsLearned.join('; ')}`);
+    }
+    if (summary.unresolvedIssues.length > 0) {
+      lines.push(`  Unresolved: ${summary.unresolvedIssues.join('; ')}`);
+    }
+    lines.push(`  Build/Tests: ${summary.testsBuildStatus}`);
+    return lines.join('\n');
+  } catch {
+    return '[Session]\n  Unable to load session data.';
+  }
+}
+
+// ── Main recall builder ──
+
 export async function buildRecallContext(
   message: string,
   options?: {
@@ -517,13 +687,41 @@ export async function buildRecallContext(
     includeGraph?: boolean;
     includeLessons?: boolean;
     includeDecisions?: boolean;
+    debugMode?: boolean;
   },
 ): Promise<RecallContext | null> {
   const intent = detectRecallIntent(message);
-  if (intent === 'none') return null;
+  const debugMode = options?.debugMode ?? false;
+  const debugInfo: RecallDebugInfo = {
+    query: message,
+    intent,
+    intentDetected: intent !== 'none',
+    cacheHit: false,
+  };
+
+  if (intent === 'none') {
+    if (debugMode) {
+      return {
+        intent: 'none',
+        summary: '[No Intent]\n  Query did not match any recall intent pattern.',
+        debugInfo,
+      };
+    }
+    return null;
+  }
 
   // Fast path: if not clearly a memory query, skip broad scanning
-  if (!isMemoryQuery(message)) return null;
+  if (!isMemoryQuery(message)) {
+    if (debugMode) {
+      debugInfo.skippedMemories = [{ text: 'all', reason: 'Not a memory query (isMemoryQuery returned false)' }];
+      return {
+        intent,
+        summary: '',
+        debugInfo,
+      };
+    }
+    return null;
+  }
 
   const maxTokens = options?.maxTokens ?? 800;
   const includeProjectMap = options?.includeProjectMap ?? true;
@@ -532,9 +730,16 @@ export async function buildRecallContext(
   const includeDecisions = options?.includeDecisions ?? true;
   const optionsMask = (includeProjectMap ? 1 : 0) | (includeGraph ? 2 : 0) | (includeLessons ? 4 : 0) | (includeDecisions ? 8 : 0);
 
-  // Check session cache
+  // Check cache
   const cached = getCached(message, optionsMask);
-  if (cached) return cached;
+  if (cached) {
+    debugInfo.cacheHit = true;
+    const ctx = cached as RecallContext;
+    if (debugMode) {
+      ctx.debugInfo = debugInfo;
+    }
+    return ctx;
+  }
 
   const keywords = extractKeywords(message);
   const allDecisions: string[] = [];
@@ -600,8 +805,30 @@ export async function buildRecallContext(
             }
           }
         }
+        // If no keywords matched, try node-level scoring with V2
+        if (matchedNodes.length === 0 && keywords.length > 0) {
+          const scored = graph.nodes.map(n => ({
+            node: n,
+            score: computeNodeRelevanceV2(n, message, keywords),
+          })).filter(s => s.score.total > 0)
+           .sort((a, b) => b.score.total - a.score.total);
+          matchedNodes = scored.slice(0, 10).map(s => s.node);
+        }
       }
     } catch { /* skip */ }
+  }
+
+  // ── Session recall path ──
+
+  if (intent === 'session_recall') {
+    const sessionSummary = await formatSessionRecall();
+    const ctx: RecallContext = {
+      intent,
+      summary: sessionSummary,
+      debugInfo: debugMode ? debugInfo : undefined,
+    };
+    setCached(message, optionsMask, ctx);
+    return ctx;
   }
 
   // ── Intent-specific summaries ──
@@ -622,6 +849,7 @@ export async function buildRecallContext(
         recentDecisions: best.slice(0, 3).map(s => s.text),
         warnings: warnings.length > 0 ? warnings : undefined,
         projectMapSummary: projectMapSummary || undefined,
+        debugInfo: debugMode ? debugInfo : undefined,
       };
       setCached(message, optionsMask, ctx);
       return ctx;
@@ -635,6 +863,7 @@ export async function buildRecallContext(
         summary: `[Decisions]\n${lines}`,
         warnings: warnings.length > 0 ? warnings : undefined,
         projectMapSummary: projectMapSummary || undefined,
+        debugInfo: debugMode ? debugInfo : undefined,
       };
       setCached(message, optionsMask, ctx);
       return ctx;
@@ -644,6 +873,7 @@ export async function buildRecallContext(
       intent,
       summary: '[Decisions]\n  No relevant decision found for your query.',
       warnings: ['No relevant decision found.'],
+      debugInfo: debugMode ? debugInfo : undefined,
     };
     setCached(message, optionsMask, noDecision);
     return noDecision;
@@ -659,18 +889,18 @@ export async function buildRecallContext(
 
     if (best.length > 0) {
       const chosen = best.slice(0, 3).map(s => s.text).join('\n');
-      const ctx: RecallContext = { intent, summary: `[Lessons]\n${chosen}`, recentLessons: best.slice(0, 3).map(s => s.text) };
+      const ctx: RecallContext = { intent, summary: `[Lessons]\n${chosen}`, recentLessons: best.slice(0, 3).map(s => s.text), debugInfo: debugMode ? debugInfo : undefined };
       setCached(message, optionsMask, ctx);
       return ctx;
     }
 
     if (allLessons.length > 0) {
-      const ctx: RecallContext = { intent, summary: `[Lessons]\n${allLessons.slice(0, 2).join('\n')}`, recentLessons: allLessons.slice(0, 2), warnings: ['Weak relevance — showing most recent lessons.'] };
+      const ctx: RecallContext = { intent, summary: `[Lessons]\n${allLessons.slice(0, 2).join('\n')}`, recentLessons: allLessons.slice(0, 2), warnings: ['Weak relevance — showing most recent lessons.'], debugInfo: debugMode ? debugInfo : undefined };
       setCached(message, optionsMask, ctx);
       return ctx;
     }
 
-    const noLessons: RecallContext = { intent, summary: '[Lessons]\n  No lessons recorded yet.', warnings: ['No lessons found.'] };
+    const noLessons: RecallContext = { intent, summary: '[Lessons]\n  No lessons recorded yet.', warnings: ['No lessons found.'], debugInfo: debugMode ? debugInfo : undefined };
     setCached(message, optionsMask, noLessons);
     return noLessons;
   }
@@ -681,7 +911,6 @@ export async function buildRecallContext(
     const queryLower = message.toLowerCase();
     const hasFallbackContext = queryLower.includes('ollama') || queryLower.includes('fallback') || queryLower.includes('local') || queryLower.includes('cooldown') || queryLower.includes('rate') || queryLower.includes('limit') || queryLower.includes('provider') || queryLower.includes('model');
 
-    // Build explanation into the summary
     const explanationBlock = `\n\n${formatted.explanation}`;
 
     let extra = '';
@@ -719,6 +948,7 @@ export async function buildRecallContext(
       projectMapSummary: projectMapSummary || undefined,
       recentDecisions: relDecisions.length > 0 ? relDecisions.map(d => d.text) : undefined,
       recentLessons: relLessons.length > 0 ? relLessons.map(l => l.text) : undefined,
+      debugInfo: debugMode ? debugInfo : undefined,
     };
     setCached(message, optionsMask, provCtx);
     return provCtx;
@@ -737,6 +967,7 @@ export async function buildRecallContext(
       relevantGraphEdges: graphEdgeStrs.length > 0 ? graphEdgeStrs.slice(0, 5) : undefined,
       warnings: warnings.length > 0 ? warnings : undefined,
       projectMapSummary: projectMapSummary || undefined,
+      debugInfo: debugMode ? debugInfo : undefined,
     };
     setCached(message, optionsMask, bugCtx);
     return bugCtx;
@@ -760,7 +991,12 @@ export async function buildRecallContext(
       summaryLines.push(`\nGraph: ${graphLabels.slice(0, 5).join(', ')}`);
     }
 
-    if (summaryLines.length === 0 && !projectMapSummary) return null;
+    if (summaryLines.length === 0 && !projectMapSummary) {
+      if (debugMode) {
+        return { intent, summary: '', debugInfo };
+      }
+      return null;
+    }
 
     const projCtx: RecallContext = {
       intent,
@@ -769,6 +1005,7 @@ export async function buildRecallContext(
       recentLessons: allLessons.length > 0 ? allLessons.slice(0, 2) : undefined,
       recentDecisions: allDecisions.length > 0 ? allDecisions.slice(0, 2) : undefined,
       relevantGraphNodes: graphLabels.length > 0 ? graphLabels.slice(0, 10) : undefined,
+      debugInfo: debugMode ? debugInfo : undefined,
     };
     setCached(message, optionsMask, projCtx);
     return projCtx;
@@ -780,12 +1017,12 @@ export async function buildRecallContext(
       .map(n => `${n.kind}:${n.label}`);
 
     if (skillLabels.length > 0) {
-      const skillCtx: RecallContext = { intent, summary: `[Skills]\n  ${skillLabels.slice(0, 5).join(', ')}`, relevantGraphNodes: skillLabels.slice(0, 5) };
+      const skillCtx: RecallContext = { intent, summary: `[Skills]\n  ${skillLabels.slice(0, 5).join(', ')}`, relevantGraphNodes: skillLabels.slice(0, 5), debugInfo: debugMode ? debugInfo : undefined };
       setCached(message, optionsMask, skillCtx);
       return skillCtx;
     }
 
-    const noSkill: RecallContext = { intent, summary: '[Skills]\n  No skill records found.' };
+    const noSkill: RecallContext = { intent, summary: '[Skills]\n  No skill records found.', debugInfo: debugMode ? debugInfo : undefined };
     setCached(message, optionsMask, noSkill);
     return noSkill;
   }
@@ -800,7 +1037,12 @@ export async function buildRecallContext(
     fallbackParts.push(`Graph: ${labels.join(', ')}`);
   }
 
-  if (fallbackParts.length === 0) return null;
+  if (fallbackParts.length === 0) {
+    if (debugMode) {
+      return { intent, summary: '', debugInfo };
+    }
+    return null;
+  }
 
   const fbCtx: RecallContext = {
     intent,
@@ -809,6 +1051,7 @@ export async function buildRecallContext(
     recentLessons: allLessons.length > 0 ? allLessons.slice(0, 3) : undefined,
     recentDecisions: allDecisions.length > 0 ? allDecisions.slice(0, 3) : undefined,
     relevantGraphNodes: matchedNodes.map(n => `${n.kind}:${n.label}`).slice(0, 10),
+    debugInfo: debugMode ? debugInfo : undefined,
   };
   setCached(message, optionsMask, fbCtx);
   return fbCtx;

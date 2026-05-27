@@ -160,7 +160,7 @@ export function shouldInjectProjectContext(message, taskKind) {
     const hasProjectIntent = CODE_OR_PROJECT_REQUEST.test(trimmed);
     if (words.length < 5 && !hasProjectIntent)
         return false;
-    if (taskKind === 'simple_chat' || taskKind === 'local_greeting')
+    if (taskKind === 'simple_chat')
         return false;
     if (taskKind === 'search' || taskKind === 'web_research')
         return false;
@@ -191,7 +191,7 @@ export function getProviderPreferenceForTask(taskKind, input) {
     if (currentIsLocal) {
         return dedupeProviders([currentProvider, ...local, 'openai_router', 'openrouter', ...cloudFree, ...experimental]);
     }
-    if (taskKind === 'simple_chat' || taskKind === 'local_greeting') {
+    if (taskKind === 'simple_chat') {
         return dedupeProviders([currentOnline, ...(localFallbackEnabled ? ['ollama'] : []), 'openai_router', 'openrouter', ...local, ...cloudFree, ...experimental]);
     }
     if (taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review') {

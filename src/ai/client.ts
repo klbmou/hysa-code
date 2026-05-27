@@ -702,66 +702,6 @@ function throwAllFailedError(lastError: Error | null, primary: ProviderType, pri
   throw new Error(`${prefix}\n${label} exhausted after ${el}s (${totalAttempts} attempts).`);
 }
 
-// ── Greeting guard ──────────────────────────────────
-
-const GREETINGS = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'thanks', 'thank you', 'ok', 'okay', 'nice', 'good', 'great', 'perfect', 'yes', 'no', 'sure', 'bye', 'goodbye', 'السلام', 'صباح', 'مساء', 'مرحبا', 'اهلا', 'اه', 'اوك'];
-const CASUAL_RESPONSES: Record<string, string> = {
-  bro: "Yo — what do you want to build or fix?",
-  thanks: "You're welcome! What's next?",
-  ok: "Got it. What do you need help with?",
-  lol: "😄 Let me know what you want to build or fix.",
-  اوك: "تمام. ماذا تريد أن أعدل أو أشرح في المشروع؟",
-  تمام: "تمام. ماذا تريد أن أعدل أو أشرح في المشروع؟",
-  نعم: "حسناً. ماذا تريد أن تفعل؟",
-  لا: "حسناً. أخبرني إن احتجت شيئاً.",
-  شكرا: "العفو! هل تحتاج شيئاً آخر؟",
-};
-
-export function isOnlyGreeting(text: string): boolean {
-  const trimmed = text.trim().toLowerCase();
-  if (CASUAL_RESPONSES[trimmed]) return true;
-  return GREETINGS.some(g => trimmed === g || trimmed === `${g}!` || trimmed === `${g},` || (trimmed.startsWith(g + ' ') && trimmed.split(/\s+/).length <= 3));
-}
-
-export function getCasualResponse(text: string): string | null {
-  const trimmed = text.trim().toLowerCase();
-  return CASUAL_RESPONSES[trimmed] || null;
-}
-
-function getMessageText(content: string | any[]): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    const textPart = content.find(p => p.type === 'text');
-    return textPart?.text ?? String(content);
-  }
-  return String(content);
-}
-
-function applyGreetingGuard(client: AIClient): AIClient {
-  const guarded: AIClient = {
-    async sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse> {
-      const lastUser = [...messages].reverse().find(m => m.role === 'user');
-      if (lastUser) {
-        const casual = getCasualResponse(getMessageText(lastUser.content));
-        if (casual) return { message: casual, toolCalls: [] };
-      }
-      const result = await client.sendMessage(messages, systemPrompt, signal);
-      const lastUserMsg = [...messages].reverse().find(m => m.role === 'user');
-      if (lastUserMsg && isOnlyGreeting(getMessageText(lastUserMsg.content))) {
-        const hasReadFile = result.toolCalls?.some(tc => tc.type === 'read_file');
-        if (hasReadFile) {
-          return { message: 'Hi! How can I help with this project?', toolCalls: [] };
-        }
-      }
-      return result;
-    },
-  };
-  if (client.sendMessageStream) {
-    guarded.sendMessageStream = client.sendMessageStream.bind(client);
-  }
-  return guarded;
-}
-
 // ── Local provider pre-flight check ────────────────
 
 async function checkLocalProviderReachable(provider: ProviderType, config: HysaConfig): Promise<void> {
@@ -800,7 +740,7 @@ export function createClient(config: HysaConfig, signal?: AbortSignal): AIClient
   clearFallbackEvents();
 
   if (tier === 'free_api' || tier === 'premium_api') {
-    return applyGreetingGuard(createFallbackClient(provider, config));
+    return createFallbackClient(provider, config);
   }
 
   const client = createSingleClient(provider, config.currentModel, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel, config);
@@ -826,11 +766,11 @@ export function createClient(config: HysaConfig, signal?: AbortSignal): AIClient
 
   // For local providers in light mode, skip fallback entirely
   if (isLocal && lightMode) {
-    return applyGreetingGuard(wrapped);
+    return wrapped;
   }
 
   // For local providers, still wrap in fallback for resilience
-  return applyGreetingGuard(createFallbackClient(provider, config));
+  return createFallbackClient(provider, config);
 }
 
 function wrapClient(client: AIClient, provider: ProviderType): AIClient {

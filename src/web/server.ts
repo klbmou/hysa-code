@@ -11,7 +11,7 @@ try {
   _dirname = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
 }
 
-import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus } from './api.js';
+import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, continueChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus } from './api.js';
 import type { Server } from 'node:http';
 
 // Keep server reference alive so GC doesn't close it
@@ -130,6 +130,20 @@ export async function startWebServer(port = 8787): Promise<void> {
 
     await handleChatStream(req.body, writeEvent);
     res.end();
+  });
+
+  app.post('/api/chat/continue', async (req, res) => {
+    try {
+      const { messages, toolCalls, toolResults } = req.body as { messages: { role: string; content: string }[]; toolCalls: { type: string; params: Record<string, string> }[]; toolResults: string[] };
+      if (!messages || !toolCalls || !toolResults) {
+        return res.status(400).json({ error: 'Missing messages, toolCalls, or toolResults' });
+      }
+      const result = await continueChat(messages, toolCalls, toolResults);
+      res.json(result);
+    } catch (err: unknown) {
+      const e = err as Error;
+      res.status(500).json({ error: e.message });
+    }
   });
 
   app.post('/api/run', async (req, res) => {
