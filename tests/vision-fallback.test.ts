@@ -19,26 +19,26 @@ function mockConfig(overrides: Partial<HysaConfig> = {}): HysaConfig {
 }
 
 describe('vision fallback candidates', () => {
-  it('returns Gemini first when Gemini API key is set', () => {
+  it('returns Gemini first when Gemini API key is set', async () => {
     const config = mockConfig({ apiKeys: { gemini: 'test-key', openrouter: 'sk-or-v1-test' } });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     assert.ok(candidates.length >= 1, 'should have at least 1 candidate');
     // Gemini should be first (free, direct provider)
     assert.equal(candidates[0].provider, 'gemini', 'Gemini should be first fallback');
     assert.equal(candidates[0].model, 'gemini-2.5-flash');
   });
 
-  it('returns OpenRouter free vision when only OpenRouter key is set', () => {
+  it('returns OpenRouter free vision when only OpenRouter key is set', async () => {
     const config = mockConfig({ apiKeys: { openrouter: 'sk-or-v1-test', gemini: undefined } });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     assert.ok(candidates.length >= 1, 'should have at least 1 candidate');
     assert.equal(candidates[0].provider, 'openrouter', 'OpenRouter should be first when no Gemini key');
     assert.ok(candidates[0].model.includes('free'), 'first OpenRouter should be free model');
   });
 
-  it('skips providers whose required API keys are missing', () => {
+  it('skips providers whose required API keys are missing', async () => {
     const config = mockConfig({ apiKeys: {} });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     // Without any API keys, openai_router (requiresKey: false) may still be returned
     // but openai_router requires openaiRouterBaseUrl which is not set at runtime
     // The candidates list should only include openai_router at most
@@ -47,41 +47,41 @@ describe('vision fallback candidates', () => {
     }
   });
 
-  it('returns at most 3 candidates', () => {
+  it('returns at most 3 candidates', async () => {
     const config = mockConfig({
       apiKeys: { openrouter: 'sk-or-v1-test', gemini: 'test-key', anthropic_proxy: 'test' },
       anthropicProxyBaseUrl: 'http://proxy:8080',
     });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     assert.ok(candidates.length <= 3, 'max 3 candidates');
   });
 
-  it('each candidate has vision capability', () => {
+  it('each candidate has vision capability', async () => {
     const config = mockConfig({ apiKeys: { openrouter: 'sk-or-v1-test', gemini: 'test-key' } });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     for (const c of candidates) {
       assert.ok(hasVisionCapability(c.provider, c.model), `${c.provider}/${c.model} should be vision-capable`);
     }
   });
 
-  it('includes google/gemini-2.5-flash:free as a free OpenRouter option', () => {
+  it('includes google/gemini-2.5-flash:free as a free OpenRouter option', async () => {
     const config = mockConfig({
       currentProvider: 'deepseek',
       apiKeys: { openrouter: 'sk-or-v1-test', gemini: 'test-key' },
     });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     const hasFree = candidates.some(c => c.model === 'google/gemini-2.5-flash:free');
     assert.ok(hasFree, 'should include free OpenRouter vision model');
   });
 });
 
 describe('vision fallback error messages', () => {
-  it('returns no-config message when failures is empty', () => {
+  it('returns no-config message when failures is empty', async () => {
     const msg = getVisionFallbackErrorMessage('english', [], false);
     assert.ok(msg.includes('No vision-capable models are configured'));
   });
 
-  it('returns invalid key message when all failures are invalid key', () => {
+  it('returns invalid key message when all failures are invalid key', async () => {
     const failures = [
       { label: 'A / m1', reason: 'invalid key' },
       { label: 'A / m2', reason: 'invalid key' },
@@ -92,7 +92,7 @@ describe('vision fallback error messages', () => {
     assert.ok(ar.includes('API'));
   });
 
-  it('returns unavailable message when all failures are unavailable', () => {
+  it('returns unavailable message when all failures are unavailable', async () => {
     const failures = [
       { label: 'A / m1', reason: 'unavailable' },
       { label: 'A / m2', reason: 'unavailable' },
@@ -103,7 +103,7 @@ describe('vision fallback error messages', () => {
     assert.ok(ar.includes('غير متوفرة'));
   });
 
-  it('returns rate-limited message when all failures are rate-limited', () => {
+  it('returns rate-limited message when all failures are rate-limited', async () => {
     const failures = [
       { label: 'A / m1', reason: 'rate-limited' },
       { label: 'A / m2', reason: 'rate-limited' },
@@ -112,7 +112,7 @@ describe('vision fallback error messages', () => {
     assert.ok(en.includes('rate-limited'));
   });
 
-  it('returns mixed message when failures have mixed reasons', () => {
+  it('returns mixed message when failures have mixed reasons', async () => {
     const failures = [
       { label: 'A / m1', reason: 'rate-limited' },
       { label: 'A / m2', reason: 'unavailable' },
@@ -122,7 +122,7 @@ describe('vision fallback error messages', () => {
     assert.ok(en.includes('HYSA_VISION_MODEL'));
   });
 
-  it('includes tried models even without debug mode', () => {
+  it('includes tried models even without debug mode', async () => {
     const failures = [
       { label: 'Gemini / gemini-2.5-flash', reason: 'rate-limited' },
       { label: 'OpenRouter / free-model', reason: 'invalid key' },
@@ -135,7 +135,7 @@ describe('vision fallback error messages', () => {
     assert.ok(ar.includes('المحاولات'));
   });
 
-  it('includes actual reason in debug mode', () => {
+  it('includes actual reason in debug mode', async () => {
     const failures = [
       { label: 'A / m1', reason: 'unavailable', error: '404 model not found' },
     ];
@@ -144,7 +144,7 @@ describe('vision fallback error messages', () => {
     assert.ok(en.includes('404 model not found'));
   });
 
-  it('includes actual reason in Arabic debug mode', () => {
+  it('includes actual reason in Arabic debug mode', async () => {
     const failures = [
       { label: 'A / m1', reason: 'invalid key', error: '401 Unauthorized' },
     ];
@@ -152,7 +152,7 @@ describe('vision fallback error messages', () => {
     assert.ok(ar.includes('401 Unauthorized'));
   });
 
-  it('does not duplicate tried list in debug mode (debug adds detailed errors)', () => {
+  it('does not duplicate tried list in debug mode (debug adds detailed errors)', async () => {
     const failures = [
       { label: 'Gemini / gemini-2.5-flash', reason: 'rate-limited', error: '429 Too Many Requests' },
     ];
@@ -167,7 +167,7 @@ describe('buildVisionMessages', () => {
   const textMsg = { role: 'user', content: 'what is in this image' };
   const assistantMsg = { role: 'assistant', content: 'let me look' };
 
-  it('converts last user message to parts array with image_url', () => {
+  it('converts last user message to parts array with image_url', async () => {
     const attachments = [
       { name: 'photo.jpg', ext: 'jpg', size: 1000, kind: 'image' as const, dataUrl: 'data:image/jpeg;base64,/9j/4AAQ' },
     ];
@@ -183,7 +183,7 @@ describe('buildVisionMessages', () => {
     assert.equal(last.content[1].image_url.url, 'data:image/jpeg;base64,/9j/4AAQ');
   });
 
-  it('preserves earlier messages as-is', () => {
+  it('preserves earlier messages as-is', async () => {
     const attachments = [
       { name: 'img.png', ext: 'png', size: 500, kind: 'image' as const, dataUrl: 'data:image/png;base64,abc' },
     ];
@@ -202,7 +202,7 @@ describe('buildVisionMessages', () => {
     assert.ok(Array.isArray(result[2].content));
   });
 
-  it('handles multiple image attachments', () => {
+  it('handles multiple image attachments', async () => {
     const attachments = [
       { name: 'a.jpg', ext: 'jpg', size: 100, kind: 'image' as const, dataUrl: 'data:image/jpeg;base64,a' },
       { name: 'b.jpg', ext: 'jpg', size: 200, kind: 'image' as const, dataUrl: 'data:image/jpeg;base64,b' },
@@ -215,7 +215,7 @@ describe('buildVisionMessages', () => {
     assert.equal(imageParts[1].image_url.url, 'data:image/jpeg;base64,b');
   });
 
-  it('wraps last user message in parts array even without image attachments', () => {
+  it('wraps last user message in parts array even without image attachments', async () => {
     const result = buildVisionMessages([textMsg], []);
     assert.equal(result.length, 1);
     const last = result[result.length - 1];
@@ -227,69 +227,69 @@ describe('buildVisionMessages', () => {
 });
 
 describe('hasImageAttachments', () => {
-  it('returns true when image with dataUrl exists', () => {
+  it('returns true when image with dataUrl exists', async () => {
     const atts = [{ kind: 'image' as const, name: 'x.jpg', ext: 'jpg', size: 10, dataUrl: 'data:image/jpeg;base64,x' }];
     assert.ok(hasImageAttachments(atts));
   });
 
-  it('returns false for empty attachments', () => {
+  it('returns false for empty attachments', async () => {
     assert.equal(hasImageAttachments([]), false);
     assert.equal(hasImageAttachments(undefined), false);
   });
 
-  it('returns false for non-image attachments', () => {
+  it('returns false for non-image attachments', async () => {
     const atts = [{ kind: 'text' as const, name: 'notes.txt', ext: 'txt', size: 10, textContent: 'hello' }];
     assert.equal(hasImageAttachments(atts), false);
   });
 
-  it('returns false when image has no dataUrl', () => {
+  it('returns false when image has no dataUrl', async () => {
     const atts = [{ kind: 'image' as const, name: 'x.jpg', ext: 'jpg', size: 10 }];
     assert.equal(hasImageAttachments(atts), false);
   });
 });
 
 describe('supportsVision', () => {
-  it('returns true for Gemini vision models', () => {
+  it('returns true for Gemini vision models', async () => {
     assert.ok(supportsVision('gemini', 'gemini-2.5-flash'));
   });
 
-  it('returns true for OpenRouter vision models', () => {
+  it('returns true for OpenRouter vision models', async () => {
     assert.ok(supportsVision('openrouter', 'google/gemini-2.5-flash:free'));
   });
 
-  it('returns false for text-only models', () => {
+  it('returns false for text-only models', async () => {
     assert.equal(supportsVision('deepseek', 'deepseek-chat'), false);
     assert.equal(supportsVision('groq', 'llama3-70b-8192'), false);
   });
 
-  it('oc/deepseek-v4-flash-free is NOT vision-capable', () => {
+  it('oc/deepseek-v4-flash-free is NOT vision-capable', async () => {
     assert.equal(hasVisionCapability('openai_router', 'oc/deepseek-v4-flash-free'), false);
     assert.equal(supportsVision('openai_router', 'oc/deepseek-v4-flash-free'), false);
   });
 });
 
 describe('config.visionModel support', () => {
-  it('uses config.visionModel as first candidate when set and valid', () => {
+  it('uses config.visionModel as first candidate when set and valid', async () => {
     const config = mockConfig({
       currentProvider: 'openai_router',
       currentModel: 'oc/deepseek-v4-flash-free',
       apiKeys: { openrouter: 'sk-or-v1-test' },
       visionModel: 'openrouter/google/gemini-2.5-flash:free',
     });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     assert.ok(candidates.length >= 1, 'should have at least 1 candidate');
     assert.equal(candidates[0].provider, 'openrouter', 'first candidate uses visionModel provider');
     assert.equal(candidates[0].model, 'google/gemini-2.5-flash:free', 'first candidate uses visionModel model');
   });
 
-  it('falls back to default order if config.visionModel provider has no key', () => {
+  it('falls back to default order if config.visionModel provider has no key', async () => {
     const config = mockConfig({
       currentProvider: 'openai_router',
       currentModel: 'oc/deepseek-v4-flash-free',
       apiKeys: {}, // No keys at all
       visionModel: 'gemini/gemini-2.5-flash',
     });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     // gemini requires a key which is not set, so falls to defaults
     // openai_router is current provider so hasKeyFor returns true
     // only openai_router/openai/gpt-4o-mini (requiresKey: false) is viable
@@ -298,52 +298,52 @@ describe('config.visionModel support', () => {
     }
   });
 
-  it('ignores invalid visionModel format (no slash)', () => {
+  it('ignores invalid visionModel format (no slash)', async () => {
     const config = mockConfig({
       currentProvider: 'openai_router',
       currentModel: 'oc/deepseek-v4-flash-free',
       apiKeys: { gemini: 'test-key', openrouter: 'sk-or-v1-test' },
       visionModel: 'gemini-2.5-flash', // no provider prefix
     });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     // Should not crash, should fall back to normal order
     assert.ok(candidates.length >= 1, 'should still find candidates');
     // First candidate should be from default order (gemini/gemini-2.5-flash)
     assert.equal(candidates[0].provider, 'gemini');
   });
 
-  it('text/code model (oc/deepseek-v4-flash-free) is never a vision candidate', () => {
+  it('text/code model (oc/deepseek-v4-flash-free) is never a vision candidate', async () => {
     const config = mockConfig({
       currentProvider: 'openai_router',
       currentModel: 'oc/deepseek-v4-flash-free',
       apiKeys: { openrouter: 'sk-or-v1-test' },
     });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     for (const c of candidates) {
       assert.notEqual(c.model, 'oc/deepseek-v4-flash-free', 'DeepSeek model should not be a vision candidate');
     }
   });
 
-  it('HYSA_VISION_MODEL takes precedence over fallback order', () => {
+  it('HYSA_VISION_MODEL takes precedence over fallback order', async () => {
     const config = mockConfig({
       currentProvider: 'deepseek',
       currentModel: 'deepseek-chat',
       apiKeys: { gemini: 'test-key', openrouter: 'sk-or-v1-test' },
       visionModel: 'gemini/gemini-2.5-flash',
     });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     assert.ok(candidates.length >= 1, 'should have at least 1 candidate');
     assert.equal(candidates[0].provider, 'gemini', 'first candidate should use visionModel provider');
     assert.equal(candidates[0].model, 'gemini-2.5-flash', 'first candidate model should match visionModel');
   });
 
-  it('text-only model never appears in vision candidates', () => {
+  it('text-only model never appears in vision candidates', async () => {
     const config = mockConfig({
       currentProvider: 'deepseek',
       currentModel: 'deepseek-chat',
       apiKeys: { gemini: 'test-key', openrouter: 'sk-or-v1-test' },
     });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     // openai/gpt-4o-mini is not in VISION_FALLBACK_ORDER;
     // with gemini+openrouter keys we already get 3 candidates, so openai_router models
     // from the third stage (getVisionCapableProviders) should not appear
@@ -352,21 +352,33 @@ describe('config.visionModel support', () => {
     }
   });
 
-  it('ninerouter appears as vision candidate', () => {
+  it('ninerouter auto is skipped as a vision candidate without active OpenAI credentials', async () => {
     const config = mockConfig({
       currentProvider: 'deepseek',
       currentModel: 'deepseek-chat',
       apiKeys: {},
       ninerouterBaseUrl: 'http://localhost:20128',
     });
-    const candidates = getVisionFallbackCandidates(config);
+    const candidates = await getVisionFallbackCandidates(config);
     const hasNinerouter = candidates.some(c => c.provider === 'ninerouter' && c.model === 'auto');
-    assert.ok(hasNinerouter, 'ninerouter/auto should appear as a vision candidate');
+    assert.equal(hasNinerouter, false, 'ninerouter/auto should not appear without active OpenAI credentials');
+  });
+
+  it('ninerouter auto is not used as a blind vision candidate even when OpenAI credentials exist', async () => {
+    const config = mockConfig({
+      currentProvider: 'deepseek',
+      currentModel: 'deepseek-chat',
+      apiKeys: { openai: 'sk-openai-test' },
+      ninerouterBaseUrl: 'http://localhost:20128',
+    });
+    const candidates = await getVisionFallbackCandidates(config);
+    const hasNinerouter = candidates.some(c => c.provider === 'ninerouter' && c.model === 'auto');
+    assert.equal(hasNinerouter, false, 'ninerouter/auto should not be used for vision without image-to-text discovery');
   });
 });
 
 describe('sanitizeMessagesForTextModel', () => {
-  it('strips image_url parts for text-only model DeepSeek', () => {
+  it('strips image_url parts for text-only model DeepSeek', async () => {
     const messages: any[] = [
       { role: 'user', content: 'hello' },
       { role: 'assistant', content: 'hi' },
@@ -380,7 +392,7 @@ describe('sanitizeMessagesForTextModel', () => {
     assert.ok((last.content as string).includes('what is this'), 'should preserve text');
   });
 
-  it('does nothing for vision-capable model Gemini', () => {
+  it('does nothing for vision-capable model Gemini', async () => {
     const messages: any[] = [
       { role: 'user', content: [{ type: 'text', text: 'describe' }, { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,/9j/4AAQ' } }] },
     ];
@@ -390,7 +402,7 @@ describe('sanitizeMessagesForTextModel', () => {
     assert.equal(JSON.stringify(messages), before, 'messages should be unmodified');
   });
 
-  it('strips multiple image_url parts in a single message', () => {
+  it('strips multiple image_url parts in a single message', async () => {
     const messages: any[] = [
       { role: 'user', content: [
         { type: 'text', text: 'compare' },
@@ -405,7 +417,7 @@ describe('sanitizeMessagesForTextModel', () => {
     assert.ok(content.includes('compare'));
   });
 
-  it('handles mixed array content with only images (no text part)', () => {
+  it('handles mixed array content with only images (no text part)', async () => {
     const messages: any[] = [
       { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,x' } }] },
     ];
@@ -414,7 +426,7 @@ describe('sanitizeMessagesForTextModel', () => {
     assert.equal(messages[0].content, '[Image attached]');
   });
 
-  it('does not modify plain string messages', () => {
+  it('does not modify plain string messages', async () => {
     const messages: any[] = [
       { role: 'user', content: 'just text' },
       { role: 'assistant', content: 'response' },
@@ -425,7 +437,7 @@ describe('sanitizeMessagesForTextModel', () => {
     assert.equal(messages[1].content, 'response');
   });
 
-  it('history with old image_url parts does not break later text chat', () => {
+  it('history with old image_url parts does not break later text chat', async () => {
     const messages: any[] = [
       { role: 'user', content: [{ type: 'text', text: 'first question' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,old' } }] },
       { role: 'assistant', content: 'vision response' },
@@ -441,7 +453,7 @@ describe('sanitizeMessagesForTextModel', () => {
 });
 
 describe('validateProviderConsistency', () => {
-  it('detects mismatches', () => {
+  it('detects mismatches', async () => {
     function validate(provider: string, model: string, taskKind?: string): boolean {
       if (taskKind === 'image_vision' && !hasVisionCapability(provider, model)) {
         return false;
@@ -454,5 +466,3 @@ describe('validateProviderConsistency', () => {
     assert.equal(validate('deepseek', 'deepseek-chat'), true, 'text-only model should pass without task');
   });
 });
-
-

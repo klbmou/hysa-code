@@ -10,6 +10,9 @@ export interface ToolCall {
 export interface AIResponse {
     message: string;
     toolCalls: ToolCall[];
+    provider?: string;
+    model?: string;
+    fallbackEvents?: string[];
 }
 export interface AIClient {
     sendMessage(messages: Message[], systemPrompt: string, signal?: AbortSignal): Promise<AIResponse>;
@@ -22,6 +25,9 @@ export type StreamEvent = {
     type: 'done';
     fullText: string;
     toolCalls: ToolCall[];
+    provider?: string;
+    model?: string;
+    fallbackEvents?: string[];
 } | {
     type: 'error';
     message: string;

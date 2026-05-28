@@ -7,11 +7,12 @@ import { checkOllama } from './ollama.js';
 import { checkOpenAICompatibleAPI } from './openai-compatible.js';
 import { markHealth, markModelCooldown, markProviderCooldown, isOnCooldown, isProviderOnCooldown, isUnhealthy, isSkippedForRequest, getHealthRecord, getFallbackEvents, setLastFallbackUsed, setLastSuccessfulProvider, clearRequestSkips, addFallbackEvent, clearFallbackEvents, recordRequestLatency, recordErrorAnalytics, recordRecoverySuccess, recordStreamInterruption } from './model-health.js';
 import type { ErrorCategory } from './model-health.js';
-import { getRetryAfterSeconds } from './provider-policy.js';
+import { getRetryAfterSeconds, providerModelHasActiveCredentials } from './provider-policy.js';
 import { recordRequest, recordError } from '../utils/session.js';
 import { logProviderSuccess, logProviderFailure } from '../brain/graph-store.js';
 import { hasVisionCapability } from './provider-capabilities.js';
 import { estimateTimeoutFromMessages } from './timeout-utils.js';
+import { hydrateNinerouterConfig } from './ninerouter.js';
 
 const CHAT_TIMEOUT_MS = 30000;
 const FALLBACK_ATTEMPT_TIMEOUT_MS = 15000;
@@ -153,6 +154,7 @@ export function getFallbackCandidates(current: ProviderType, config: HysaConfig)
   function add(provider: ProviderType, model?: string): void {
     const m = model || PROVIDER_DEFAULTS[provider]?.model || '';
     if (!m) return;
+    if (!providerModelHasActiveCredentials(provider, m, config)) return;
     const k = `${provider}:${m}`;
     if (added.has(k)) return;
     added.add(k);
@@ -162,19 +164,24 @@ export function getFallbackCandidates(current: ProviderType, config: HysaConfig)
 
   // A. Free API fallback chain
   if (tier === 'free_api') {
+    if (current !== 'opencode_zen') add('opencode_zen');
     add('openrouter', 'qwen/qwen3-coder:free');
     add('openrouter', 'deepseek/deepseek-chat:free');
     add('openrouter', 'openai/gpt-oss-120b:free');
+    if (current !== 'gemini') add('gemini');
+    if (current !== 'deepseek') add('deepseek');
+    if (current !== 'groq') add('groq');
+    const preferred9RouterModel = config.ninerouterModel && config.ninerouterModel !== 'auto'
+      ? config.ninerouterModel
+      : 'oc/deepseek-v4-flash-free';
+    add('ninerouter', preferred9RouterModel);
+    if (preferred9RouterModel !== 'oc/deepseek-v4-flash-free') add('ninerouter', 'oc/deepseek-v4-flash-free');
     if (config.openaiRouterBaseUrl) {
       if (config.openaiRouterModel) add('openai_router', config.openaiRouterModel);
       for (const m of PROVIDER_MODELS.openai_router) {
         add('openai_router', m);
       }
     }
-    if (current !== 'gemini') add('gemini');
-    if (current !== 'deepseek') add('deepseek');
-    if (current !== 'opencode_zen') add('opencode_zen');
-    if (current !== 'groq') add('groq');
     // Experimental only if allowed
     if (config.allowExperimentalProviders) {
       add('pollinations');
@@ -298,11 +305,12 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
       const startTime = Date.now();
       clearFallbackEvents();
       setMessagesForTimeout(messages);
+      await hydrateNinerouterConfig(config);
       const primaryModel = config.currentModel;
       const primaryTimeout = getProviderTimeout(primary, true, messages);
       if (config.debug) console.log(`[req:${streamReqId}] sendMessageStream starting: ${primary} / ${primaryModel}`);
 
-      if (!shouldSkipProvider(primary, primaryModel)) {
+      if (providerModelHasActiveCredentials(primary, primaryModel, config) && !shouldSkipProvider(primary, primaryModel)) {
         const client = tryCreateClient(primary, primaryModel, config);
         if (client?.sendMessageStream) {
           const provLabel = PROVIDER_DEFAULTS[primary]?.label || primary;
@@ -340,7 +348,12 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             markHealth(primary, primaryModel, 'healthy', 'success', 'unknown', duration);
             logProviderSuccess(primary, primaryModel).catch(() => {});
             recordRequest(duration);
-            return result;
+            return {
+              ...result,
+              provider: PROVIDER_DEFAULTS[primary]?.label || primary,
+              model: primaryModel,
+              fallbackEvents: getFallbackEvents().map(e => e.reason),
+            };
           } catch (err) {
             clearTimeout(timer);
             streamError = err as Error;
@@ -365,7 +378,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
                   if (fallbackResult.message) {
                     onEvent({ type: 'token', text: fallbackResult.message });
                   }
-                  onEvent({ type: 'done', fullText: fallbackResult.message, toolCalls: fallbackResult.toolCalls });
+                  onEvent({ type: 'done', fullText: fallbackResult.message, toolCalls: fallbackResult.toolCalls, provider: fallbackResult.provider, model: fallbackResult.model, fallbackEvents: fallbackResult.fallbackEvents });
                   return fallbackResult;
                 }
               } catch {
@@ -384,7 +397,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
       if (result.message) {
         onEvent({ type: 'token', text: result.message });
       }
-      onEvent({ type: 'done', fullText: result.message, toolCalls: result.toolCalls });
+      onEvent({ type: 'done', fullText: result.message, toolCalls: result.toolCalls, provider: result.provider, model: result.model, fallbackEvents: result.fallbackEvents });
       return result;
     },
   };
@@ -400,6 +413,8 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
       const attemptLog: string[] = [];
       let openRouterGlobal429 = false;
 
+      await hydrateNinerouterConfig(config);
+
       if (debug) {
         const candidates = getFallbackCandidates(primary, config);
         console.log(`[req:${reqId}] Starting fallback chain`);
@@ -414,6 +429,12 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
         if (provider === 'openrouter' && openRouterGlobal429) {
           if (debug) console.log(`[req:${reqId}] [skip] ${attemptLabel}: OpenRouter global 429 detected, skipping all OR models`);
           skippedReasons.push(`  [skip] ${attemptLabel}: OpenRouter global 429, skipping all OR models`);
+          return null;
+        }
+        if (!providerModelHasActiveCredentials(provider, model, config)) {
+          const skipMsg = `[skip] ${attemptLabel}: ${provider} / ${model} (no active credentials or connections)`;
+          skippedReasons.push(`  ${skipMsg}`);
+          if (debug) console.log(`[req:${reqId}] ${skipMsg}`);
           return null;
         }
         if (shouldSkipProvider(provider, model)) {
@@ -497,7 +518,12 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             recordRequest(duration);
             recordRequestLatency(provider, model, duration);
             setLastSuccessfulProvider(provider, model);
-            return result;
+            return {
+              ...result,
+              provider: PROVIDER_DEFAULTS[provider]?.label || provider,
+              model,
+              fallbackEvents: getFallbackEvents().map(e => e.reason),
+            };
           } catch (err: unknown) {
             retries++;
             const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -548,7 +574,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
               const cooldownSec = getRetryAfterSeconds(err) ?? (cat === 'rate_limit' ? 120 : cat === 'timeout' ? 30 : 60);
               markModelCooldown(provider, model, friendlyError(errMsg, provider), cooldownSec, cat);
-              if ((provider === 'openai_router' || provider === 'openrouter' || provider === 'ninerouter') && cat === 'rate_limit') {
+              if (cat === 'rate_limit') {
                 markProviderCooldown(provider, `${PROVIDER_DEFAULTS[provider]?.label || provider} rate-limited; provider cooldown active`, cooldownSec, cat);
               }
             }
@@ -719,7 +745,9 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             const label = PROVIDER_DEFAULTS[group.provider]?.label || group.provider;
             console.log(`  OK Switched to ${label} / ${model}.`);
             setLastFallbackUsed(`${label} / ${model}`);
+            addFallbackEvent(group.provider, model, `Fallback: ${label} / ${model}`);
             addFallbackEvent(group.provider, model, `Switched to ${label} / ${model}`);
+            if (debug) console.log(`[req:${reqId}] Fallback: ${label} / ${model}`);
 
             if (debug) {
               const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -759,9 +787,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
         ? friendlyError((lastError as Error).message, lastProvider)
         : `${lastProvLabel} is unavailable. No fallback providers configured.`;
 
-      const prefix = isLocalFallbackEnabled(config)
-        ? 'All configured free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.'
-        : 'All configured online free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.';
+      const prefix = 'All currently configured providers are temporarily unavailable or rate-limited.';
       throw new Error(`${prefix}\n${errMsg}`);
     }
   }
@@ -769,9 +795,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
 function throwAllFailedError(lastError: Error | null, primary: ProviderType, primaryModel: string, startTime: number, skipped: string[], totalAttempts: number, reqId: number, config: HysaConfig): never {
   const el = ((Date.now() - startTime) / 1000).toFixed(0);
   const label = PROVIDER_DEFAULTS[primary]?.label || primary;
-  const prefix = isLocalFallbackEnabled(config)
-    ? 'All configured free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.'
-    : 'All configured online free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.';
+  const prefix = 'All currently configured providers are temporarily unavailable or rate-limited.';
   throw new Error(`${prefix}\n${label} exhausted after ${el}s (${totalAttempts} attempts).`);
 }
 

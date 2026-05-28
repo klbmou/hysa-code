@@ -9,7 +9,7 @@ import { EXPERIMENTAL_FREE_PROVIDERS, LOCAL_FREE_PROVIDERS, PROVIDER_DEFAULTS, P
 import { getHealthRecord, getModelsInCooldown, getProviderCooldownRemaining, isOnCooldown, isProviderOnCooldown, isUnhealthy, } from './model-health.js';
 const CODE_OR_PROJECT_REQUEST = /\b(code|file|files|repo|project|debug|bug|error|stack|trace|fix|edit|change|modify|implement|refactor|review|search|find|grep|read|run|test|build|compile|function|class|type|interface|component|route|api)\b/i;
 const LOCAL_FALLBACK_DISABLED_REASON = 'local fallback disabled; set HYSA_ENABLE_LOCAL_FALLBACK=true to allow local fallback';
-const ONLINE_FREE_UNAVAILABLE_MESSAGE = 'All configured online free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.';
+const ALL_PROVIDERS_UNAVAILABLE_MESSAGE = 'All currently configured providers are temporarily unavailable or rate-limited.';
 export function getProviderTier(provider) {
     const premium = ['anthropic', 'openai'];
     const experimental = ['pollinations', 'puter', 'llm7'];
@@ -84,6 +84,12 @@ export function getProviderModelsFromRegistry(runtimeModels) {
     if (runtimeModels && 'hysa_ai' in runtimeModels) {
         modelsByProvider.set('hysa_ai', dedupe(runtimeModels.hysa_ai ?? []));
     }
+    if (runtimeModels && 'ninerouter' in runtimeModels) {
+        modelsByProvider.set('ninerouter', dedupe([
+            ...(runtimeModels.ninerouter ?? []),
+            ...(modelsByProvider.get('ninerouter') ?? []),
+        ]));
+    }
     return modelsByProvider;
 }
 export function getProviderModels(provider, runtimeModels) {
@@ -95,6 +101,8 @@ export function providerIsConfigured(provider, config) {
         return !!config.openaiRouterBaseUrl;
     if (prov === 'anthropic_proxy')
         return !!config.anthropicProxyBaseUrl;
+    if (prov === 'ninerouter')
+        return !!config.ninerouterBaseUrl || config.ninerouterDiscovered === true;
     if (prov === 'ollama' || prov === 'local_openai' || prov === 'hysa_ai')
         return true;
     if (EXPERIMENTAL_FREE_PROVIDERS.includes(prov) && !config.allowExperimentalProviders)
@@ -102,6 +110,47 @@ export function providerIsConfigured(provider, config) {
     if (providerHasOptionalApiKey(prov))
         return true;
     return !!config.apiKeys[prov];
+}
+export function providerModelHasActiveCredentials(provider, model, config) {
+    if (!providerIsConfigured(provider, config))
+        return false;
+    const prov = provider;
+    const normalizedModel = model.trim().toLowerCase();
+    if (!normalizedModel)
+        return false;
+    if (prov === 'openai')
+        return !!config.apiKeys.openai;
+    if (prov === 'anthropic')
+        return !!config.apiKeys.anthropic;
+    if (prov === 'gemini')
+        return !!config.apiKeys.gemini;
+    if (prov === 'openrouter')
+        return !!config.apiKeys.openrouter;
+    if (prov === 'groq')
+        return !!config.apiKeys.groq;
+    if (prov === 'deepseek')
+        return !!config.apiKeys.deepseek;
+    if (prov === 'opencode_zen')
+        return !!config.apiKeys.opencode_zen;
+    if (prov === 'openai_router') {
+        if (isAutoModel(normalizedModel))
+            return !!config.apiKeys.openai;
+        if (isOpenAiRoutedModel(normalizedModel))
+            return !!config.apiKeys.openai;
+    }
+    if (prov === 'ninerouter') {
+        const discoveredModels = new Set([
+            ...(config.ninerouterModels ?? []),
+            ...(config.ninerouterVisionModels ?? []),
+        ].map(m => m.trim().toLowerCase()));
+        if (isAutoModel(normalizedModel))
+            return config.ninerouterAutoHealthChecked === true;
+        if (discoveredModels.has(normalizedModel))
+            return true;
+        if (isOpenAiRoutedModel(normalizedModel))
+            return !!config.apiKeys.openai;
+    }
+    return true;
 }
 export function isProviderUsable(provider, config, runtimeModels, healthChecker) {
     return getProviderUsability(provider, config, runtimeModels, healthChecker).usable;
@@ -126,6 +175,8 @@ export function getProviderUsability(provider, config, runtimeModels, healthChec
         return { provider, configured, usable: false, reason: 'no models configured', usableModels, cooldownModels, providerCooldownRemainingMs };
     }
     for (const model of models) {
+        if (!providerModelHasActiveCredentials(provider, model, config))
+            continue;
         if (checker.isOnCooldown(provider, model)) {
             cooldownModels.push(model);
             continue;
@@ -180,31 +231,22 @@ export function getProviderPreferenceForTask(taskKind, input) {
     const currentProvider = typeof input === 'string' ? input : input?.currentProvider;
     const localFallbackEnabled = typeof input === 'object' ? isLocalFallbackEnabled(input) : false;
     const currentIsLocal = !!currentProvider && isLocalProvider(currentProvider);
-    const local = currentIsLocal
-        ? dedupeProviders([currentProvider, ...(localFallbackEnabled ? LOCAL_FREE_PROVIDERS : [])])
-        : localFallbackEnabled
-            ? LOCAL_FREE_PROVIDERS
+    const local = localFallbackEnabled
+        ? LOCAL_FREE_PROVIDERS
+        : currentIsLocal && currentProvider
+            ? [currentProvider]
             : [];
-    const cloudFree = ['openai_router', 'openrouter', 'ninerouter', 'opencode_zen', 'gemini', 'deepseek', 'groq', 'anthropic_proxy'];
+    const directFree = taskKind === 'image_vision'
+        ? ['gemini', 'openrouter', 'opencode_zen', 'groq', 'deepseek']
+        : ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini'];
+    const routerFree = ['ninerouter'];
+    const configuredOnline = ['openai_router', 'anthropic_proxy', 'anthropic', 'openai'];
     const experimental = ['pollinations', 'llm7', 'puter'];
     const currentOnline = currentProvider && !currentIsLocal ? currentProvider : undefined;
     if (currentIsLocal) {
-        return dedupeProviders([currentProvider, ...local, 'openai_router', 'openrouter', ...cloudFree, ...experimental]);
+        return dedupeProviders([currentProvider, ...directFree, ...routerFree, ...configuredOnline, ...experimental, ...local]);
     }
-    if (taskKind === 'simple_chat') {
-        return dedupeProviders([currentOnline, ...(localFallbackEnabled ? ['ollama'] : []), 'openai_router', 'openrouter', ...local, ...cloudFree, ...experimental]);
-    }
-    if (taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review') {
-        return dedupeProviders(['openai_router', 'openrouter', currentOnline, ...cloudFree, ...local, ...experimental]);
-    }
-    if (taskKind === 'image_vision') {
-        const visionFree = ['gemini', 'ninerouter', 'openrouter', 'anthropic_proxy', 'openai_router', 'opencode_zen', 'groq'];
-        return dedupeProviders([currentOnline, ...visionFree, ...local, ...experimental]);
-    }
-    if (taskKind === 'search' || taskKind === 'web_research') {
-        return dedupeProviders(['openai_router', 'openrouter', currentOnline, 'gemini', 'deepseek', ...cloudFree, ...local, ...experimental]);
-    }
-    return dedupeProviders([currentOnline, 'openai_router', 'openrouter', ...cloudFree, ...local, ...experimental]);
+    return dedupeProviders([currentOnline, ...directFree, ...routerFree, ...configuredOnline, ...experimental, ...local]);
 }
 export function didProviderFailWithCategory(provider, category, runtimeModels) {
     const models = getProviderModels(provider, runtimeModels);
@@ -226,7 +268,7 @@ export function getSuggestedFallbackAction(provider, config, lastError, runtimeM
         const localHint = isLocalFallbackEnabled(config)
             ? 'Ollama is not currently usable.'
             : 'Local fallback is disabled. To enable it, set HYSA_ENABLE_LOCAL_FALLBACK=true.';
-        return `${ONLINE_FREE_UNAVAILABLE_MESSAGE} ${localHint}`;
+        return `${ALL_PROVIDERS_UNAVAILABLE_MESSAGE} ${localHint}`;
     }
     if (!isProviderUsable(provider, config, runtimeModels)) {
         return `${PROVIDER_DEFAULTS[provider]?.label || provider} is not currently usable. Run hysa config to switch providers or wait for cooldowns to expire.`;
@@ -235,6 +277,12 @@ export function getSuggestedFallbackAction(provider, config, lastError, runtimeM
 }
 function isLocalProvider(provider) {
     return LOCAL_FREE_PROVIDERS.includes(provider);
+}
+function isAutoModel(model) {
+    return model === 'auto' || model === 'openai/auto';
+}
+function isOpenAiRoutedModel(model) {
+    return model.startsWith('openai/') || model === 'gpt-4o' || model === 'gpt-4o-mini' || model === 'gpt-4-turbo';
 }
 function dedupe(items) {
     return [...new Set(items.filter(Boolean))];

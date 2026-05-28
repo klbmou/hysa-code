@@ -247,7 +247,10 @@ function applyEnvOverrides(config) {
     }
     const nrUrl = process.env.NINEROUTER_URL;
     if (nrUrl) {
-        config.ninerouterBaseUrl = nrUrl.replace(/\/+$/, '');
+        const normalized = nrUrl.replace(/\/+$/, '');
+        const root = normalized.replace(/\/v1$/i, '');
+        config.ninerouterRootUrl = root;
+        config.ninerouterBaseUrl = /\/v1$/i.test(normalized) ? normalized : `${root}/v1`;
     }
     const nrKey = process.env.NINEROUTER_API_KEY;
     if (nrKey) {
@@ -260,6 +263,10 @@ function applyEnvOverrides(config) {
     const nrChatModel = process.env.HYSA_9ROUTER_CHAT_MODEL;
     if (nrChatModel) {
         config.ninerouterModel = nrChatModel.trim();
+    }
+    const nrVisionModel = process.env.HYSA_9ROUTER_VISION_MODEL;
+    if (nrVisionModel) {
+        config.ninerouterVisionModel = nrVisionModel.trim().replace(/^ninerouter\//, '');
     }
     if (process.env.HYSA_TEXT_MODEL) {
         config.textModel = process.env.HYSA_TEXT_MODEL.trim();

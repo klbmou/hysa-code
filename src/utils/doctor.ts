@@ -13,6 +13,8 @@ import { checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig, cli
 import { getBrainStatus } from '../brain/store.js';
 import { getGraphStats, experienceGraphExists } from '../brain/graph-store.js';
 import { isRecallAvailable } from '../brain/recall.js';
+import { DEFAULT_NINEROUTER_CHAT_MODEL, DEFAULT_NINEROUTER_ROOT_URL, discoverNinerouter, hydrateNinerouterConfig } from '../ai/ninerouter.js';
+import type { RuntimeProviderModels } from '../ai/provider-policy.js';
 
 const DOCTOR_TIMEOUT_MS = 15000;
 
@@ -41,16 +43,26 @@ async function checkInternet(): Promise<DoctorResult> {
   }
 }
 
-async function getDoctorRuntimeModels(config: HysaConfig): Promise<{ ollama?: string[] } | undefined> {
+async function getDoctorRuntimeModels(config: HysaConfig): Promise<RuntimeProviderModels | undefined> {
+  const runtime: RuntimeProviderModels = {};
+  const nr = await hydrateNinerouterConfig(config, { includeVision: true, timeoutMs: 1500 });
+  if (nr?.available) {
+    runtime.ninerouter = [nr.chatModel, ...nr.models];
+    if (nr.visionModel || nr.visionModels.length > 0) {
+      runtime.ninerouterVision = [...(nr.visionModel ? [nr.visionModel] : []), ...nr.visionModels];
+    }
+    runtime.ninerouterAutoHealthChecked = nr.autoHealthChecked;
+  }
   try {
     const models = await listOllamaModels(config.ollamaBaseUrl || 'http://localhost:11434', 1500);
-    return { ollama: models };
+    runtime.ollama = models;
   } catch {
-    return { ollama: [] };
+    runtime.ollama = [];
   }
+  return runtime;
 }
 
-function pushProviderUsability(results: DoctorResult[], provider: ProviderType, config: HysaConfig, runtimeModels?: { ollama?: string[] }): void {
+function pushProviderUsability(results: DoctorResult[], provider: ProviderType, config: HysaConfig, runtimeModels?: RuntimeProviderModels): void {
   const usability = getProviderUsability(provider, config, runtimeModels);
   const label = PROVIDER_DEFAULTS[provider]?.label || provider;
   const cooldowns = getModelsInCooldown(provider);
@@ -504,62 +516,27 @@ async function checkAnthropicProxyDetailed(config: HysaConfig, debug: boolean): 
 
 async function check9RouterDetailed(config: HysaConfig, debug: boolean): Promise<DoctorResult[]> {
   const results: DoctorResult[] = [];
-  const runtimeModels = await getDoctorRuntimeModels(config);
-  const baseUrl = config.ninerouterBaseUrl || 'http://localhost:20128/v1';
+  const discovery = await discoverNinerouter(config, { includeVision: true, timeoutMs: DOCTOR_TIMEOUT_MS, force: true });
 
-  try {
-    const parsedUrl = new URL(baseUrl);
-    results.push({ name: 'Base URL', status: 'ok', message: parsedUrl.href });
-  } catch {
-    results.push({ name: 'Base URL', status: 'error', message: `Invalid URL: ${baseUrl}` });
+  results.push({ name: 'Root URL', status: 'ok', message: discovery.rootUrl });
+  results.push({ name: 'API Base URL', status: 'ok', message: discovery.apiBaseUrl });
+
+  if (!discovery.available) {
+    results.push({ name: 'API Health', status: 'error', message: discovery.reason || '9Router is not reachable' });
+    results.push({ name: 'Discovery', status: 'warn', message: `Checked NINEROUTER_URL or ${DEFAULT_NINEROUTER_ROOT_URL}` });
     return results;
   }
 
-  const checkResult = await checkOpenAICompatibleAPI(baseUrl, config.apiKeys.ninerouter);
-  if (checkResult.ok) {
-    results.push({ name: 'API Connection', status: 'ok', message: '9Router endpoint is reachable' });
-  } else {
-    results.push({ name: 'API Connection', status: 'error', message: checkResult.message });
-    return results;
-  }
+  results.push({ name: 'API Health', status: 'ok', message: 'GET /api/health returned ok' });
+  results.push({ name: 'Models', status: 'ok', message: `${discovery.models.length} usable model(s): ${discovery.models.slice(0, 5).join(', ')}${discovery.models.length > 5 ? '...' : ''}` });
 
-  const model = config.ninerouterModel || 'oc/deepseek-v4-flash-free (default)';
-  results.push({ name: 'Default Model', status: 'ok', message: model });
-
-  // Check if model is "auto" and health-check it
-  if (config.ninerouterModel === 'auto' || (!config.ninerouterModel && false)) {
-    try {
-      const autoTestResp = await withTimeout(
-        fetch(`${baseUrl.replace(/\/+$/, '')}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(config.apiKeys.ninerouter ? { 'Authorization': `Bearer ${config.apiKeys.ninerouter}` } : {}),
-          },
-          body: JSON.stringify({ model: 'auto', messages: [], max_tokens: 1 }),
-          signal: AbortSignal.timeout(3000),
-        }),
-        3000,
-      );
-      if (autoTestResp.ok || autoTestResp.status === 400) {
-        results.push({ name: 'Auto Model', status: 'ok', message: 'auto routing works' });
-      } else if (autoTestResp.status === 401 || autoTestResp.status === 403) {
-        results.push({ name: 'Auto Model', status: 'warn', message: `auto requires credentials: HTTP ${autoTestResp.status}` });
-      } else {
-        const text = await autoTestResp.text();
-        const isNoCredentialsError = text.includes('No available models') || text.includes('openai total connections: 0');
-        results.push({
-          name: 'Auto Model',
-          status: isNoCredentialsError ? 'warn' : 'error',
-          message: isNoCredentialsError
-            ? 'auto routes to provider with no credentials - using oc/deepseek-v4-flash-free fallback'
-            : `HTTP ${autoTestResp.status}`,
-        });
-      }
-    } catch (err) {
-      results.push({ name: 'Auto Model', status: 'warn', message: `Test failed: ${(err as Error).message}` });
-    }
-  }
+  const model = discovery.chatModel || DEFAULT_NINEROUTER_CHAT_MODEL;
+  results.push({ name: 'Default Chat Model', status: 'ok', message: model });
+  results.push({
+    name: 'Auto Model',
+    status: discovery.autoHealthChecked ? 'ok' : 'warn',
+    message: discovery.autoHealthChecked ? 'auto appears in health-checked /v1/models' : 'Not used unless health-checked',
+  });
 
   // HYSA_9ROUTER_CHAT_MODEL env var check
   const nrChatModelEnv = process.env.HYSA_9ROUTER_CHAT_MODEL;
@@ -573,25 +550,16 @@ async function check9RouterDetailed(config: HysaConfig, debug: boolean): Promise
     results.push({ name: 'API Key', status: 'warn', message: 'Not configured (optional)' });
   }
 
+  const runtimeModels = await getDoctorRuntimeModels(config);
   pushProviderUsability(results, 'ninerouter', config, runtimeModels);
 
-  // 9Router vision check
-  try {
-    const visionUrl = `${baseUrl.replace(/\/+$/, '')}/models/image-to-text`;
-    const visionResp = await fetch(visionUrl, { signal: AbortSignal.timeout(5000) });
-    if (visionResp.ok) {
-      const visionData = await visionResp.json() as { data?: { id: string }[] };
-      const visionModels = (visionData?.data || []).map((m: { id: string }) => m.id);
-      if (visionModels.length > 0) {
-        results.push({ name: 'Vision Models', status: 'ok', message: visionModels.join(', ') });
-      } else {
-        results.push({ name: 'Vision Models', status: 'warn', message: 'No vision models returned by /v1/models/image-to-text' });
-      }
-    } else {
-      results.push({ name: 'Vision Models', status: 'warn', message: `GET /v1/models/image-to-text returned ${visionResp.status}` });
-    }
-  } catch (err) {
-    results.push({ name: 'Vision Models', status: 'warn', message: `Failed to check: ${(err as Error).message}` });
+  if (discovery.visionModel) {
+    results.push({ name: 'Vision Model', status: 'ok', message: discovery.visionModel });
+  }
+  if (discovery.visionModels.length > 0) {
+    results.push({ name: 'Vision Models', status: 'ok', message: discovery.visionModels.join(', ') });
+  } else {
+    results.push({ name: 'Vision Models', status: 'warn', message: 'No vision models returned by /v1/models/image-to-text' });
   }
 
   // HYSA_9ROUTER_VISION_MODEL env var check
@@ -599,7 +567,7 @@ async function check9RouterDetailed(config: HysaConfig, debug: boolean): Promise
   if (nrVisionEnv) {
     results.push({ name: 'HYSA_9ROUTER_VISION_MODEL', status: 'ok', message: nrVisionEnv });
   } else {
-    results.push({ name: 'HYSA_9ROUTER_VISION_MODEL', status: 'warn', message: 'Not set (uses auto fallback)' });
+    results.push({ name: 'HYSA_9ROUTER_VISION_MODEL', status: 'warn', message: 'Not set (uses /v1/models/image-to-text discovery)' });
   }
 
   return results;
@@ -815,7 +783,7 @@ export async function runVisionDiagnostics(debug = false): Promise<void> {
 
   // Check what the fallback candidates would be
   const { getVisionFallbackCandidates } = await import('../web/api.js');
-  const candidates = getVisionFallbackCandidates(config);
+  const candidates = await getVisionFallbackCandidates(config);
 
   if (candidates.length === 0) {
     console.log(pc.yellow(`  ✘ No vision-capable fallback models available.`));
@@ -828,7 +796,7 @@ export async function runVisionDiagnostics(debug = false): Promise<void> {
     const prov = c.provider;
     const label = c.label;
     const keyConfig = config.apiKeys[prov as keyof typeof config.apiKeys];
-    const hasKey = prov === 'openai_router' || !!keyConfig;
+    const hasKey = prov === 'openai_router' || prov === 'ninerouter' || !!keyConfig;
     const hasVision = true; // assume candidate is selected as vision-capable
     const status = hasKey ? pc.green('✔') : pc.red('✘');
     const statusText = hasKey ? 'usable' : `${pc.red('missing API key')}`;
@@ -837,7 +805,7 @@ export async function runVisionDiagnostics(debug = false): Promise<void> {
 
   console.log();
   const usable = candidates.filter(c => {
-    if (c.provider === 'openai_router') return true;
+    if (c.provider === 'openai_router' || c.provider === 'ninerouter') return true;
     return !!config.apiKeys[c.provider as keyof typeof config.apiKeys];
   });
   if (usable.length === 0) {
@@ -1051,10 +1019,10 @@ export async function runDoctor(debug = false, provider?: string): Promise<void>
     }
 
     // 9Router status
-    const nrBaseUrl = config.ninerouterBaseUrl || (process.env.NINEROUTER_URL ? process.env.NINEROUTER_URL.replace(/\/+$/, '') : null);
+    const nrBaseUrl = config.ninerouterBaseUrl;
     if (nrBaseUrl) {
-      results.push({ name: '9Router', status: 'ok', message: `Base URL: ${nrBaseUrl}` });
-      const nrModel = config.ninerouterModel || 'auto (default)';
+      results.push({ name: '9Router', status: config.ninerouterDiscovered ? 'ok' : 'warn', message: `Base URL: ${nrBaseUrl}${config.ninerouterDiscovered ? ' (discovered)' : ''}` });
+      const nrModel = config.ninerouterModel || DEFAULT_NINEROUTER_CHAT_MODEL;
       results.push({ name: '9Router Model', status: 'ok', message: nrModel });
       if (config.apiKeys.ninerouter) {
         results.push({ name: '9Router Key', status: 'ok', message: 'Configured (optional)' });
@@ -1063,7 +1031,7 @@ export async function runDoctor(debug = false, provider?: string): Promise<void>
       }
       pushProviderUsability(results, 'ninerouter', config, runtimeModels);
     } else {
-      results.push({ name: '9Router', status: 'warn', message: 'Not configured. Set NINEROUTER_URL.' });
+      results.push({ name: '9Router', status: 'warn', message: `Not discovered at NINEROUTER_URL or ${DEFAULT_NINEROUTER_ROOT_URL}.` });
     }
 
     const lastChatError = getLastError();

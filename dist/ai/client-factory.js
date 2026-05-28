@@ -9,7 +9,8 @@ import { createOpenAICompatibleClient } from './openai-compatible.js';
 import { createOpenCodeZenClient } from './opencode-zen.js';
 import { createHysaAIClient } from './hysa-ai.js';
 import { createAnthropicProxyClient } from './anthropic-proxy.js';
-import { EXPERIMENTAL_BASE_URLS } from '../config/keys.js';
+import { EXPERIMENTAL_BASE_URLS, PROVIDER_DEFAULTS } from '../config/keys.js';
+import { providerModelHasActiveCredentials } from './provider-policy.js';
 export function createSingleClient(provider, model, apiKeys, ollamaBaseUrl, localOpenAiBaseUrl, localOpenAiModel, config) {
     switch (provider) {
         case 'anthropic': {
@@ -71,12 +72,20 @@ export function createSingleClient(provider, model, apiKeys, ollamaBaseUrl, loca
             const routerUrl = config?.openaiRouterBaseUrl;
             if (!routerUrl)
                 throw new Error('OpenAI router base URL not configured. Set HYSA_OPENAI_ROUTER_BASE_URL.');
-            const routerModel = config?.openaiRouterModel || model;
+            const routerModel = model || config?.openaiRouterModel || PROVIDER_DEFAULTS.openai_router.model;
+            if (config && !providerModelHasActiveCredentials('openai_router', routerModel, config)) {
+                throw new Error(`OpenAI Router / ${routerModel} has no active credentials or connections configured.`);
+            }
             return createOpenAICompatibleClient(routerUrl, apiKeys.openai_router, routerModel);
         }
         case 'ninerouter': {
-            const nrUrl = config?.ninerouterBaseUrl || 'http://localhost:20128/v1';
-            const nrModel = config?.ninerouterModel || 'auto';
+            const nrUrl = config?.ninerouterBaseUrl;
+            if (!nrUrl)
+                throw new Error('9Router base URL not configured. Set NINEROUTER_URL.');
+            const nrModel = model || config?.ninerouterModel || PROVIDER_DEFAULTS.ninerouter.model;
+            if (config && !providerModelHasActiveCredentials('ninerouter', nrModel, config)) {
+                throw new Error(`9Router / ${nrModel} has no active credentials or connections configured.`);
+            }
             return createOpenAICompatibleClient(nrUrl, apiKeys.ninerouter, nrModel);
         }
         default:

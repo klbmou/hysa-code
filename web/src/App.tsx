@@ -218,6 +218,13 @@ export default function App() {
     return msgs;
   }, []);
 
+  const updateProviderStatus = useCallback((provider?: string, model?: string) => {
+    if (!provider && !model) return;
+    setStatus(prev => prev
+      ? { ...prev, provider: provider || prev.provider, model: model || prev.model }
+      : prev);
+  }, []);
+
   const continueAfterTool = useCallback(async (tc: ToolCall, result: string) => {
     const msgs = pendingMsgsRef.current || buildMessages(chatItems);
     setLoading(true);
@@ -233,6 +240,7 @@ export default function App() {
         }),
       });
       const data = await res.json();
+      updateProviderStatus(data.provider, data.model);
 
       if (data.message) {
         setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: data.message }]);
@@ -272,7 +280,7 @@ export default function App() {
       setLoading(false);
       setLoadingPhase('');
     }
-  }, [chatItems, buildMessages, openFile]);
+  }, [chatItems, buildMessages, openFile, updateProviderStatus]);
 
   const toggleYolo = useCallback(async () => {
     const newVal = !yolo; setYolo(newVal);
@@ -477,6 +485,7 @@ export default function App() {
                     accumulatedText = event.fullText || accumulatedText;
                     finalToolCalls = event.toolCalls || [];
                     if (event.timing) setTimingData(event.timing);
+                    updateProviderStatus(event.provider, event.model);
                     if (event.plan) {
                       setChatItems(prev => {
                         for (let i = prev.length - 1; i >= 0; i--) {
@@ -523,6 +532,7 @@ export default function App() {
                 accumulatedText = event.fullText || accumulatedText;
                 finalToolCalls = event.toolCalls || [];
                 if (event.timing) setTimingData(event.timing);
+                updateProviderStatus(event.provider, event.model);
                 if (event.plan) {
                   setChatItems(prev => {
                     for (let i = prev.length - 1; i >= 0; i--) {
@@ -620,6 +630,7 @@ export default function App() {
       const assistantText = getAssistantText(data);
       const hasToolCalls = data.toolCalls && data.toolCalls.length > 0;
       if (data.timing) setTimingData(data.timing);
+      updateProviderStatus(data.provider, data.model);
 
       if (data.error && !assistantText && !hasToolCalls) {
         const newItems: ChatItem[] = [];
@@ -770,7 +781,7 @@ export default function App() {
       setLoadingPhase('');
       console.debug(LOG, '=== sendMessage end ===');
     }
-  }, [chatItems, openFile, buildMessages, clearState, addError, debug, loading]);
+  }, [chatItems, openFile, buildMessages, clearState, addError, debug, loading, updateProviderStatus]);
 
   const handleCopyMessage = useCallback((text: string) => {
     navigator.clipboard.writeText(text).catch(() => {});

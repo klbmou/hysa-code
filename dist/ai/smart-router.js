@@ -1,4 +1,4 @@
-import { PROVIDER_TIERS, isLocalFallbackEnabled } from '../config/keys.js';
+import { PROVIDER_DEFAULTS, PROVIDER_TIERS, isLocalFallbackEnabled } from '../config/keys.js';
 import { createSingleClient } from './client-factory.js';
 import { addFallbackEvent, clearFallbackEvents, clearRequestSkips, getFallbackEvents, getHealthRecord, getProviderCooldownRemaining, isOnCooldown, isProviderOnCooldown, isUnhealthy, markHealth, markModelCooldown, markProviderCooldown, setLastFallbackUsed, setLastSuccessfulProvider, recordRequestLatency, recordErrorAnalytics, recordRecoverySuccess, recordStreamInterruption, } from './model-health.js';
 import { classifyTask } from './task-classifier.js';
@@ -8,12 +8,13 @@ import { getBestProviderForTask, getRetryAfterSeconds, isRateLimitError, isTimeo
 import { logProviderSuccess, logProviderFailure } from '../brain/graph-store.js';
 import { hasVisionCapability } from './provider-capabilities.js';
 import { getProviderTimeoutForTask } from './timeout-utils.js';
+import { hydrateNinerouterConfig } from './ninerouter.js';
 const LOG = '[SmartRouter]';
 const ATTEMPT_TIMEOUT_MS = 25000;
 const MAX_TOTAL_TIME_MS = 120000;
 const LOCAL_TIMEOUT_MS = 15000;
 const PROVIDER_FAILURE_COOLDOWN_THRESHOLD = 3;
-const ONLINE_FREE_UNAVAILABLE_MESSAGE = 'All configured online free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.';
+const ALL_PROVIDERS_UNAVAILABLE_MESSAGE = 'All currently configured providers are temporarily unavailable or rate-limited.';
 let requestCounter = 0;
 function getEnvInt(key, defaultVal) {
     const v = process.env[key];
@@ -99,7 +100,7 @@ export function createSmartRouter(config, _signal) {
                 const localHint = isLocalFallbackEnabled(config)
                     ? 'Local fallback is enabled, but no local chat-capable model is currently usable.'
                     : 'Local fallback is disabled. To enable it, set HYSA_ENABLE_LOCAL_FALLBACK=true.';
-                throw new Error(`${ONLINE_FREE_UNAVAILABLE_MESSAGE} ${localHint}`);
+                throw new Error(`${ALL_PROVIDERS_UNAVAILABLE_MESSAGE} ${localHint}`);
             }
             let lastError = null;
             const providerStats = new Map();
@@ -154,7 +155,10 @@ export function createSmartRouter(config, _signal) {
                     setLastSuccessfulProvider(c.provider, c.model);
                     if (c.provider !== config.currentProvider || c.model !== config.currentModel || i > 0) {
                         setLastFallbackUsed(c.label);
+                        addFallbackEvent(c.provider, c.model, `Fallback: ${c.label}`);
                         addFallbackEvent(c.provider, c.model, `Switched to ${c.label}`);
+                        if (debug)
+                            console.log(`${LOG}[req:${reqId}] Fallback: ${c.label}`);
                     }
                     if (debug) {
                         console.log(`${LOG}[req:${reqId}] ✅ ${c.label} succeeded in ${(duration / 1000).toFixed(1)}s`);
@@ -162,7 +166,12 @@ export function createSmartRouter(config, _signal) {
                     else {
                         console.log(`  ✅ ${c.label} — ${(duration / 1000).toFixed(1)}s`);
                     }
-                    return result;
+                    return {
+                        ...result,
+                        provider: PROVIDER_DEFAULTS[c.provider]?.label || c.provider,
+                        model: c.model,
+                        fallbackEvents: getFallbackEvents().map(e => e.reason),
+                    };
                 }
                 catch (err) {
                     clearTimeout(timer);
@@ -177,8 +186,13 @@ export function createSmartRouter(config, _signal) {
                     if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
                         markModelCooldown(c.provider, c.model, errMsg, cooldownSec, cat);
                     }
+                    if (cat === 'rate_limit') {
+                        const reason = `${c.provider} rate-limited on ${c.model}; provider cooldown active`;
+                        markProviderCooldown(c.provider, reason, Math.max(cooldownSec, 120), cat);
+                        addFallbackEvent(c.provider, '', reason);
+                    }
                     const providerCooldownReason = recordProviderFailure(providerStats, c.provider, cat, providerTargets.get(c.provider) ?? 1);
-                    if (providerCooldownReason) {
+                    if (providerCooldownReason && cat !== 'rate_limit') {
                         markProviderCooldown(c.provider, providerCooldownReason, Math.max(cooldownSec, 120), cat);
                         addFallbackEvent(c.provider, '', providerCooldownReason);
                         if (!debug) {
@@ -214,19 +228,21 @@ export function createSmartRouter(config, _signal) {
             }
             // Build friendly error based on which providers were tried
             const triedRouter = attempts.some(a => a.provider === 'openai_router');
+            const triedNinerouter = attempts.some(a => a.provider === 'ninerouter');
             const triedOllama = attempts.some(a => a.provider === 'ollama');
             const routerStats = providerStats.get('openai_router');
             const routerPressure = !!routerStats && routerStats.failures.length > 0 && routerStats.failures.every(f => f === 'rate_limit' || f === 'timeout' || f === 'quota');
-            if (triedRouter && routerPressure && !triedOllama) {
+            if (triedRouter && routerPressure && !triedOllama && !triedNinerouter) {
                 const localHint = isLocalFallbackEnabled(config)
                     ? 'Local fallback is enabled, but Ollama was not usable. Start Ollama, pull a chat-capable model, or wait for cooldowns.'
                     : 'Local fallback is disabled. To enable it, set HYSA_ENABLE_LOCAL_FALLBACK=true.';
-                throw new Error(`${ONLINE_FREE_UNAVAILABLE_MESSAGE} ${localHint}`);
+                throw new Error(`${ALL_PROVIDERS_UNAVAILABLE_MESSAGE} ${localHint}`);
             }
             if (triedRouter && routerPressure && triedOllama) {
                 throw new Error(`OpenAI Router is rate-limited, so HYSA switched to Ollama. Ollama was reachable, but the local model attempt failed: ${lastError?.message || 'no local chat-capable model responded'}. Pull a chat-capable coding model with "ollama pull qwen2.5-coder:1.5b", run hysa config, or wait for router cooldowns.`);
             }
-            throw new Error(`All ${attempts.length} planned model(s) failed after ${totalElapsed}s. ${lastError?.message || 'No usable fallback provider responded.'}`);
+            const detail = lastError?.message ? ` Last error: ${lastError.message}` : '';
+            throw new Error(`${ALL_PROVIDERS_UNAVAILABLE_MESSAGE} Tried ${attempts.length} planned model(s) after ${totalElapsed}s.${detail}`);
         },
         async sendMessageStream(messages, systemPrompt, onEvent, signal) {
             // For streaming, use a simpler approach: try first candidate with streaming
@@ -252,7 +268,10 @@ export function createSmartRouter(config, _signal) {
             const healthChecker = { isOnCooldown, isUnhealthy, isProviderOnCooldown };
             const candidates = buildAttemptPlan(getCandidatesForTask(taskKind, config, healthChecker, runtimeModels), taskKind, getMaxAttempts());
             if (candidates.length === 0) {
-                const msg = 'No available models for this request. Check your provider configuration.';
+                const localHint = isLocalFallbackEnabled(config)
+                    ? 'Local fallback is enabled, but no local chat-capable model is currently usable.'
+                    : 'Local fallback is disabled. To enable it, set HYSA_ENABLE_LOCAL_FALLBACK=true.';
+                const msg = `${ALL_PROVIDERS_UNAVAILABLE_MESSAGE} ${localHint}`;
                 onEvent({ type: 'token', text: msg });
                 onEvent({ type: 'done', fullText: msg, toolCalls: [] });
                 return { message: msg, toolCalls: [] };
@@ -298,7 +317,12 @@ export function createSmartRouter(config, _signal) {
                     logProviderSuccess(first.provider, first.model).catch(() => { });
                     setLastSuccessfulProvider(first.provider, first.model);
                     recordRequestLatency(first.provider, first.model, duration);
-                    return result;
+                    return {
+                        ...result,
+                        provider: PROVIDER_DEFAULTS[first.provider]?.label || first.provider,
+                        model: first.model,
+                        fallbackEvents: getFallbackEvents().map(e => e.reason),
+                    };
                 }
                 catch (err) {
                     clearTimeout(timer);
@@ -332,10 +356,13 @@ Previous partial response: ${partialTokens.slice(0, 500)}`;
                                     console.log(`${LOG}[req:${reqId}] Partial recovery succeeded via fallback`);
                                 onEvent({ type: 'token', text: `\n\n[Partial recovery: ${first.provider} timed out, continuing with fallback]\n\n` });
                                 onEvent({ type: 'token', text: fallbackResult.message });
-                                onEvent({ type: 'done', fullText: partialTokens + '\n\n[continued below]\n\n' + fallbackResult.message, toolCalls: fallbackResult.toolCalls });
+                                onEvent({ type: 'done', fullText: partialTokens + '\n\n[continued below]\n\n' + fallbackResult.message, toolCalls: fallbackResult.toolCalls, provider: fallbackResult.provider, model: fallbackResult.model, fallbackEvents: fallbackResult.fallbackEvents });
                                 return {
                                     message: partialTokens + '\n\n[continued]\n\n' + fallbackResult.message,
                                     toolCalls: fallbackResult.toolCalls,
+                                    provider: fallbackResult.provider,
+                                    model: fallbackResult.model,
+                                    fallbackEvents: fallbackResult.fallbackEvents,
                                 };
                             }
                         }
@@ -353,7 +380,7 @@ Previous partial response: ${partialTokens.slice(0, 500)}`;
             if (result.message) {
                 onEvent({ type: 'token', text: result.message });
             }
-            onEvent({ type: 'done', fullText: result.message, toolCalls: result.toolCalls });
+            onEvent({ type: 'done', fullText: result.message, toolCalls: result.toolCalls, provider: result.provider, model: result.model, fallbackEvents: result.fallbackEvents });
             return result;
         },
     };
@@ -361,6 +388,20 @@ Previous partial response: ${partialTokens.slice(0, 500)}`;
 }
 async function getRuntimeProviderModels(config, taskKind) {
     const runtime = {};
+    const nr = await hydrateNinerouterConfig(config, { includeVision: taskKind === 'image_vision' });
+    if (nr?.available) {
+        runtime.ninerouter = dedupe([
+            nr.chatModel,
+            ...nr.models,
+        ]);
+        if (nr.visionModel || nr.visionModels.length > 0) {
+            runtime.ninerouterVision = dedupe([
+                ...(nr.visionModel ? [nr.visionModel] : []),
+                ...nr.visionModels,
+            ]);
+        }
+        runtime.ninerouterAutoHealthChecked = nr.autoHealthChecked;
+    }
     const allowOllama = config.currentProvider === 'ollama' || isLocalFallbackEnabled(config);
     if (!allowOllama)
         return runtime;
@@ -386,16 +427,26 @@ function buildAttemptPlan(candidates, taskKind, maxAttempts) {
             groups.set(candidate.provider, [candidate]);
     }
     const planned = [];
-    const totalLimit = Math.max(maxAttempts, taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review' ? 6 : 4);
+    const totalLimit = Math.max(maxAttempts, taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review' ? 7 : 5);
     for (const [provider, group] of groups) {
         const limit = getProviderAttemptLimit(provider, taskKind);
         for (const candidate of group.slice(0, limit)) {
             if (planned.length >= totalLimit)
-                return planned;
+                return ensureNinerouterIncluded(planned, candidates);
             planned.push(candidate);
         }
     }
-    return planned;
+    return ensureNinerouterIncluded(planned, candidates);
+}
+function ensureNinerouterIncluded(planned, candidates) {
+    if (planned.some(c => c.provider === 'ninerouter'))
+        return planned;
+    const ninerouterCandidate = candidates.find(c => c.provider === 'ninerouter');
+    if (!ninerouterCandidate)
+        return planned;
+    if (planned.length === 0)
+        return [ninerouterCandidate];
+    return [...planned.slice(0, -1), ninerouterCandidate];
 }
 function getProviderAttemptLimit(provider, taskKind) {
     if (taskKind === 'simple_chat')
@@ -414,6 +465,9 @@ function countProviderTargets(candidates) {
         counts.set(candidate.provider, (counts.get(candidate.provider) ?? 0) + 1);
     }
     return counts;
+}
+function dedupe(items) {
+    return [...new Set(items.filter(Boolean))];
 }
 function recordProviderFailure(statsByProvider, provider, category, plannedProviderAttempts) {
     const stats = statsByProvider.get(provider) ?? { attempts: 0, failures: [] };

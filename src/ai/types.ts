@@ -13,6 +13,9 @@ export interface ToolCall {
 export interface AIResponse {
   message: string;
   toolCalls: ToolCall[];
+  provider?: string;
+  model?: string;
+  fallbackEvents?: string[];
 }
 
 export interface AIClient {
@@ -22,7 +25,7 @@ export interface AIClient {
 
 export type StreamEvent =
   | { type: 'token'; text: string }
-  | { type: 'done'; fullText: string; toolCalls: ToolCall[] }
+  | { type: 'done'; fullText: string; toolCalls: ToolCall[]; provider?: string; model?: string; fallbackEvents?: string[] }
   | { type: 'error'; message: string };
 
 export interface HealthCheckResult {

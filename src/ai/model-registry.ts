@@ -2,6 +2,7 @@ import type { ProviderType, HysaConfig } from '../config/keys.js';
 import type { TaskKind } from './task-classifier.js';
 import {
   getProviderPreferenceForTask,
+  providerModelHasActiveCredentials,
   providerIsConfigured,
 } from './provider-policy.js';
 import type { RuntimeProviderModels } from './provider-policy.js';
@@ -27,11 +28,12 @@ const MODEL_REGISTRY: ModelCapability[] = [
   { provider: 'openai_router', model: 'openai/gpt-4o-mini', label: 'OpenAI Router / openai/gpt-4o-mini', capabilities: ['general_qa', 'simple_chat', 'unknown'], priority: 'fast' },
 
   // ── ninerouter models ──
-  { provider: 'ninerouter', model: 'auto', label: '9Router / auto', capabilities: ['simple_chat', 'general_qa', 'coding_qa', 'code_edit', 'project_scan', 'long_reasoning', 'web_research', 'unknown', 'image_vision'], priority: 'balanced' },
+  { provider: 'ninerouter', model: 'oc/deepseek-v4-flash-free', label: '9Router / oc/deepseek-v4-flash-free', capabilities: ['simple_chat', 'general_qa', 'coding_qa', 'code_edit', 'project_scan', 'long_reasoning', 'web_research', 'unknown'], priority: 'balanced' },
   { provider: 'ninerouter', model: 'gemini/gemini-2.5-flash', label: '9Router / gemini/gemini-2.5-flash', capabilities: ['general_qa', 'coding_qa', 'long_reasoning', 'image_vision', 'simple_chat', 'unknown'], priority: 'balanced' },
   { provider: 'ninerouter', model: 'gemini/gemini-1.5-flash', label: '9Router / gemini/gemini-1.5-flash', capabilities: ['general_qa', 'simple_chat', 'image_vision', 'unknown'], priority: 'fast' },
   { provider: 'ninerouter', model: 'openai/gpt-4o', label: '9Router / openai/gpt-4o', capabilities: ['general_qa', 'coding_qa', 'long_reasoning', 'image_vision', 'unknown'], priority: 'stronger' },
   { provider: 'ninerouter', model: 'openai/gpt-4o-mini', label: '9Router / openai/gpt-4o-mini', capabilities: ['general_qa', 'simple_chat', 'image_vision', 'unknown'], priority: 'fast' },
+  { provider: 'ninerouter', model: 'auto', label: '9Router / auto', capabilities: ['simple_chat', 'general_qa', 'coding_qa', 'code_edit', 'project_scan', 'long_reasoning', 'web_research', 'unknown', 'image_vision'], priority: 'fallback' },
 
   // ── openrouter models ──
   { provider: 'openrouter', model: 'qwen/qwen3-coder:free', label: 'OpenRouter / qwen/qwen3-coder:free', capabilities: ['simple_chat', 'general_qa', 'coding_qa'], priority: 'fast' },
@@ -125,6 +127,7 @@ export function getCandidatesForTask(
       added.add(key);
 
       if (!providerIsAvailable(mc.provider, config)) continue;
+      if (!providerModelHasActiveCredentials(mc.provider, mc.model, config)) continue;
       if (healthChecker.isProviderOnCooldown?.(mc.provider)) continue;
       if (healthChecker.isOnCooldown(mc.provider, mc.model)) continue;
       if (healthChecker.isUnhealthy(mc.provider, mc.model)) continue;
@@ -141,6 +144,10 @@ export function getCandidatesForTask(
   return candidates.sort((a, b) => {
     const providerDelta = providerIndex(providerOrder, a.provider) - providerIndex(providerOrder, b.provider);
     if (providerDelta !== 0) return providerDelta;
+    if (a.provider === 'ninerouter' && b.provider === 'ninerouter' && config.ninerouterModel) {
+      if (a.model === config.ninerouterModel && b.model !== config.ninerouterModel) return -1;
+      if (b.model === config.ninerouterModel && a.model !== config.ninerouterModel) return 1;
+    }
     const priorityDelta = priorityIndex(priorityOrder, a.priority) - priorityIndex(priorityOrder, b.priority);
     if (priorityDelta !== 0) return priorityDelta;
     return 0;
@@ -157,7 +164,7 @@ export function getSkippedProviderReasons(config: HysaConfig): { provider: strin
     { provider: 'opencode_zen', check: () => !!config.apiKeys.opencode_zen, reason: 'missing/invalid API key' },
     { provider: 'anthropic_proxy', check: () => !!config.anthropicProxyBaseUrl, reason: 'base URL not configured' },
     { provider: 'openai_router', check: () => !!config.openaiRouterBaseUrl, reason: 'base URL not configured' },
-    { provider: 'ninerouter', check: () => !!config.ninerouterBaseUrl, reason: 'NINEROUTER_URL not set' },
+    { provider: 'ninerouter', check: () => !!config.ninerouterBaseUrl || config.ninerouterDiscovered === true, reason: 'not discovered at NINEROUTER_URL or http://localhost:20128' },
   ];
 
   for (const c of checks) {
@@ -197,6 +204,44 @@ function getRuntimeRegistry(config: HysaConfig, runtimeModels?: RuntimeProviderM
     });
   }
 
+  const ninerouterModels = dedupe([
+    ...(config.ninerouterModel ? [config.ninerouterModel] : []),
+    ...(runtimeModels?.ninerouter ?? []),
+    ...(config.ninerouterModels ?? []),
+  ]);
+  const ninerouterVisionModels = dedupe([
+    ...(config.ninerouterVisionModel ? [config.ninerouterVisionModel] : []),
+    ...(runtimeModels?.ninerouterVision ?? []),
+    ...(config.ninerouterVisionModels ?? []),
+  ]);
+
+  for (const model of ninerouterModels) {
+    if (!model || registry.some(m => m.provider === 'ninerouter' && m.model === model)) continue;
+    registry.push({
+      provider: 'ninerouter',
+      model,
+      label: `9Router / ${model}`,
+      capabilities: ['simple_chat', 'general_qa', 'coding_qa', 'code_edit', 'project_scan', 'long_reasoning', 'web_research', 'unknown'],
+      priority: model === 'auto' || model === 'openai/auto' ? 'fallback' : model === config.ninerouterModel ? 'balanced' : 'fast',
+    });
+  }
+
+  for (const model of ninerouterVisionModels) {
+    if (!model) continue;
+    const existing = registry.find(m => m.provider === 'ninerouter' && m.model === model);
+    if (existing) {
+      if (!existing.capabilities.includes('image_vision')) existing.capabilities.push('image_vision');
+      continue;
+    }
+    registry.push({
+      provider: 'ninerouter',
+      model,
+      label: `9Router / ${model}`,
+      capabilities: ['general_qa', 'coding_qa', 'long_reasoning', 'image_vision', 'simple_chat', 'unknown'],
+      priority: looksVisionModel(model) ? 'balanced' : 'fallback',
+    });
+  }
+
   if (config.currentProvider === 'ninerouter' && config.currentModel && !registry.some(m => m.provider === 'ninerouter' && m.model === config.currentModel)) {
     registry.push({
       provider: 'ninerouter',
@@ -218,6 +263,14 @@ function getRuntimeRegistry(config: HysaConfig, runtimeModels?: RuntimeProviderM
   }
 
   return registry;
+}
+
+function dedupe<T>(items: T[]): T[] {
+  return [...new Set(items.filter(Boolean))];
+}
+
+function looksVisionModel(model: string): boolean {
+  return /(gemini|gpt-4o|vision|vl|image|multimodal)/i.test(model);
 }
 
 function ollamaPriority(model: string): ModelCapability['priority'] {

@@ -14,7 +14,8 @@ import { generatePlan, shouldPlanFor } from '../ai/planner.js';
 import { clonePlan, markStepRunning, markStepDone, markStepFailed, inferStepFromToolCall, buildFinalReport } from '../ai/planner.js';
 import type { ExecutionPlan, PlanReport } from '../ai/planner.js';
 import { hasVisionCapability, isModelVisionCapable, isProviderVisionCapable, getVisionCapableProviders } from '../ai/provider-capabilities.js';
-import { shouldInjectProjectContext } from '../ai/provider-policy.js';
+import { providerModelHasActiveCredentials, shouldInjectProjectContext } from '../ai/provider-policy.js';
+import { clearNinerouterDiscoveryCache, hydrateNinerouterConfig } from '../ai/ninerouter.js';
 import { rankFiles } from '../context/ranker.js';
 import { decideProjectMode } from '../context/project-router.js';
 import { getYolo, setYolo, getProviderHealth } from '../utils/session.js';
@@ -167,7 +168,6 @@ const VISION_FALLBACK_ORDER: { provider: ProviderType; model: string; requiresKe
   { provider: 'openrouter', model: 'qwen/qwen2.5-vl-72b-instruct:free', requiresKey: true },
   { provider: 'openrouter', model: 'google/gemini-2.5-flash', requiresKey: true },
   { provider: 'openrouter', model: 'qwen/qwen-vl-plus', requiresKey: true },
-  { provider: 'ninerouter', model: 'auto', requiresKey: false, requiresHealthCheck: true },
 ];
 
 // 9Router vision model cache (lazy, per-process)
@@ -175,31 +175,25 @@ let cachedNinerouterVisionModels: { model: string; label: string }[] | null = nu
 
 async function discoverNinerouterVisionModels(config: HysaConfig): Promise<{ model: string; label: string }[]> {
   if (cachedNinerouterVisionModels) return cachedNinerouterVisionModels;
-  const baseUrl = config.ninerouterBaseUrl || 'http://localhost:20128/v1';
-  try {
-    const response = await fetch(`${baseUrl}/models/image-to-text`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!response.ok) {
-      console.log('[vision] 9Router /v1/models/image-to-text returned', response.status);
-      return [];
-    }
-    const data = await response.json() as { data?: { id: string }[] };
-    const models = (data?.data || []).map((m: { id: string }) => ({
-      model: m.id,
-      label: `9Router / ${m.id}`,
-    }));
-    cachedNinerouterVisionModels = models;
-    console.log('[vision] 9Router discovered', models.length, 'vision model(s):', models.map(m => m.model).join(', '));
-    return models;
-  } catch (err) {
-    console.log('[vision] 9Router vision discovery failed:', (err as Error).message);
+  const discovery = await hydrateNinerouterConfig(config, { includeVision: true, timeoutMs: 5000 });
+  if (!discovery?.available) {
+    if (discovery?.reason) console.log('[vision] 9Router discovery failed:', discovery.reason);
     return [];
   }
+  const models = (config.ninerouterVisionModels || [])
+    .filter(model => model !== 'auto' && model !== 'openai/auto')
+    .map(model => ({
+      model,
+      label: `9Router / ${model}`,
+    }));
+  cachedNinerouterVisionModels = models;
+  console.log('[vision] 9Router discovered', models.length, 'vision model(s):', models.map(m => m.model).join(', '));
+  return models;
 }
 
 export function clearNinerouterVisionCache(): void {
   cachedNinerouterVisionModels = null;
+  clearNinerouterDiscoveryCache();
 }
 
 async function ensureNinerouterVisionCache(config: HysaConfig): Promise<void> {
@@ -219,14 +213,32 @@ function hasImageAttachments(attachments?: AttachmentPayload[]): boolean {
   return attachments.some(a => a.kind === 'image' && a.dataUrl);
 }
 
-function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderType; model: string; label: string }[] {
+async function getVisionFallbackCandidates(config: HysaConfig): Promise<{ provider: ProviderType; model: string; label: string }[]> {
   const candidates: { provider: ProviderType; model: string; label: string }[] = [];
   const currentProv = config.currentProvider;
+  await hydrateNinerouterConfig(config, { includeVision: true });
 
   function hasKeyFor(provider: string): boolean {
+    if (provider === 'ninerouter') return !!config.ninerouterBaseUrl || config.ninerouterDiscovered === true;
     if (provider === currentProv) return true;
     const key = config.apiKeys[provider as keyof typeof config.apiKeys];
     return !!key;
+  }
+
+  function canUseCandidate(provider: ProviderType, model: string): boolean {
+    if (provider === 'ninerouter' && (model === 'auto' || model === 'openai/auto')) {
+      console.log('[vision] skipped 9Router auto for vision; use HYSA_9ROUTER_VISION_MODEL or /v1/models/image-to-text discovery');
+      return false;
+    }
+    if (provider === 'ninerouter' && !config.ninerouterBaseUrl) {
+      console.log('[vision] skipped 9Router (base URL not configured):', model);
+      return false;
+    }
+    if (!providerModelHasActiveCredentials(provider, model, config)) {
+      console.log('[vision] skipped (no active credentials/connections):', provider, '/', model);
+      return false;
+    }
+    return true;
   }
 
   console.log('[vision] building vision fallback candidates (currentProvider:', currentProv, ')');
@@ -239,7 +251,7 @@ function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderTy
       const visionProv = config.visionModel.slice(0, slashIdx) as ProviderType;
       const visionMod = config.visionModel.slice(slashIdx + 1);
       console.log('[vision] configured vision model detected:', visionProv, '/', visionMod);
-      if (hasKeyFor(visionProv) && hasVisionCapability(visionProv, visionMod)) {
+      if (hasKeyFor(visionProv) && hasVisionCapability(visionProv, visionMod) && canUseCandidate(visionProv, visionMod)) {
         const label = `${PROVIDER_DEFAULTS[visionProv]?.label || visionProv} / ${visionMod}`;
         console.log('[vision] config.visionModel found and used:', visionProv, '/', visionMod);
         candidates.push({ provider: visionProv, model: visionMod, label });
@@ -253,23 +265,29 @@ function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderTy
     }
   }
 
-  // Check HYSA_9ROUTER_VISION_MODEL (e.g., "ninerouter/gemini/gemini-2.5-flash")
-  const nrVisionModel = process.env.HYSA_9ROUTER_VISION_MODEL;
+  // Check HYSA_9ROUTER_VISION_MODEL (e.g., "gemini/gemini-2.5-flash" or "ninerouter/gemini/gemini-2.5-flash")
+  const nrVisionModel = config.ninerouterVisionModel || process.env.HYSA_9ROUTER_VISION_MODEL;
   if (nrVisionModel && candidates.length < 3) {
-    const parts = nrVisionModel.split('/').filter(Boolean);
-    if (parts.length >= 2 && parts[0] === 'ninerouter') {
-      const nrMod = parts.slice(1).join('/'); // could be "gemini/gemini-2.5-flash" or just a model name
+    const nrMod = nrVisionModel.replace(/^ninerouter\//, '');
+    if (nrMod) {
       const label = `9Router / ${nrMod}`;
       console.log('[vision] HYSA_9ROUTER_VISION_MODEL found:', nrMod);
-      if (hasVisionCapability('ninerouter', nrMod)) {
+      if ((hasVisionCapability('ninerouter', nrMod) || config.ninerouterVisionModels?.includes(nrMod)) && canUseCandidate('ninerouter' as ProviderType, nrMod)) {
         candidates.push({ provider: 'ninerouter' as ProviderType, model: nrMod, label });
         console.log('[vision] added HYSA_9ROUTER_VISION_MODEL:', label);
       } else {
         console.log('[vision] HYSA_9ROUTER_VISION_MODEL not vision-capable:', nrMod);
       }
-    } else {
-      console.log('[vision] invalid HYSA_9ROUTER_VISION_MODEL format (expected ninerouter/...):', nrVisionModel);
     }
+  }
+
+  const discovered9RouterVision = await discoverNinerouterVisionModels(config);
+  for (const discovered of discovered9RouterVision) {
+    if (candidates.length >= 3) break;
+    if (candidates.some(c => c.provider === 'ninerouter' && c.model === discovered.model)) continue;
+    if (!canUseCandidate('ninerouter', discovered.model)) continue;
+    candidates.push({ provider: 'ninerouter', model: discovered.model, label: discovered.label });
+    console.log('[vision] added discovered 9Router vision model:', discovered.label);
   }
 
   // Try preferred vision fallback order
@@ -285,6 +303,9 @@ function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderTy
     }
     if (!hasVisionCapability(fb.provider, fb.model)) {
       console.log('[vision] rejected text-only model:', fb.provider, '/', fb.model);
+      continue;
+    }
+    if (!canUseCandidate(fb.provider, fb.model)) {
       continue;
     }
     if (isProviderOnCooldown(fb.provider)) {
@@ -321,6 +342,9 @@ function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderTy
       if (candidates.some(c => c.provider === vp.provider && c.model === vp.model)) continue;
       if (!hasKeyFor(vp.provider)) {
         console.log('[vision] skipped (no key):', vp.provider, '/', vp.model);
+        continue;
+      }
+      if (!canUseCandidate(vp.provider as ProviderType, vp.model)) {
         continue;
       }
       if (isProviderOnCooldown(vp.provider)) {
@@ -788,7 +812,7 @@ export async function handleChatStream(
         }
       }
 
-      const visionCandidates = getVisionFallbackCandidates(config);
+      const visionCandidates = await getVisionFallbackCandidates(config);
       const failures: { label: string; reason: string; error?: string }[] = [];
       if (visionCandidates.length > 0) {
         console.log(LOG, `[req:${reqId}] Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)`);
@@ -832,7 +856,7 @@ export async function handleChatStream(
               );
               const duration = Date.now() - attemptStart;
               console.log(LOG, `[req:${reqId}] ✅ Vision fallback succeeded with selectedProvider=${c.provider}, selectedModel=${c.model} in ${(duration / 1000).toFixed(1)}s`);
-              writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls, timing: { visionTotal: Date.now() - visionTimer } })}\n\n`);
+              writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls, timing: { visionTotal: Date.now() - visionTimer }, provider: PROVIDER_DEFAULTS[c.provider]?.label || c.provider, model: c.model })}\n\n`);
               return;
             } else {
               const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
@@ -840,7 +864,7 @@ export async function handleChatStream(
               if (result.message) {
                 console.log(LOG, `[req:${reqId}] ✅ Vision fallback succeeded with selectedProvider=${c.provider}, selectedModel=${c.model} in ${(duration / 1000).toFixed(1)}s`);
                 writeEvent(`data: ${JSON.stringify({ type: 'token', text: result.message })}\n\n`);
-                writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: result.message, toolCalls: result.toolCalls, timing: { visionTotal: Date.now() - visionTimer } })}\n\n`);
+                writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: result.message, toolCalls: result.toolCalls, timing: { visionTotal: Date.now() - visionTimer }, provider: PROVIDER_DEFAULTS[c.provider]?.label || c.provider, model: c.model })}\n\n`);
                 return;
               }
             }
@@ -910,7 +934,7 @@ export async function handleChatStream(
         writeEvent(`data: ${JSON.stringify({ type: 'error', message: msg })}\n\n`);
       } else {
         writeEvent(`data: ${JSON.stringify({ type: 'token', text: msg })}\n\n`);
-        writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: msg, toolCalls: result.toolCalls || [] })}\n\n`);
+        writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: msg, toolCalls: result.toolCalls || [], provider: result.provider, model: result.model, fallbackEvents: result.fallbackEvents })}\n\n`);
       }
       return;
     }
@@ -1169,14 +1193,14 @@ export async function handleChatStream(
           const fallbackMsg = (fallbackErr as Error).message || 'Fallback also failed';
           console.log(LOG, `[req:${reqId}] Tool loop background continuation also failed: ${fallbackMsg}`);
           // Emit what we have so far as the final response
-          writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response?.message || 'Tool loop interrupted', toolCalls: response?.toolCalls || [], timing: timingReport, plan: currentPlan })}\n\n`);
+          writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response?.message || 'Tool loop interrupted', toolCalls: response?.toolCalls || [], timing: timingReport, plan: currentPlan, provider: response?.provider, model: response?.model, fallbackEvents: response?.fallbackEvents })}\n\n`);
           return;
         }
       }
     }
 
     const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun) : undefined;
-    writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls, timing: timingReport, plan: currentPlan, planReport })}\n\n`);
+    writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls, timing: timingReport, plan: currentPlan, planReport, provider: response.provider, model: response.model, fallbackEvents: response.fallbackEvents })}\n\n`);
   } catch (err: unknown) {
     const e = err as Error;
     const rawMsg = e.message || 'Unknown stream error';
@@ -1421,7 +1445,7 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
         }
       }
 
-      const visionCandidates = getVisionFallbackCandidates(config);
+      const visionCandidates = await getVisionFallbackCandidates(config);
       const failures: { label: string; reason: string; error?: string }[] = [];
 
       if (visionCandidates.length > 0) {

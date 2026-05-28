@@ -28,8 +28,14 @@ export interface HysaConfig {
     anthropicProxyModel?: string;
     openaiRouterBaseUrl?: string;
     openaiRouterModel?: string;
+    ninerouterRootUrl?: string;
     ninerouterBaseUrl?: string;
     ninerouterModel?: string;
+    ninerouterModels?: string[];
+    ninerouterVisionModel?: string;
+    ninerouterVisionModels?: string[];
+    ninerouterAutoHealthChecked?: boolean;
+    ninerouterDiscovered?: boolean;
     allowExperimentalProviders?: boolean;
     experimentalConfirmed?: boolean;
     enableLocalFallback?: boolean;

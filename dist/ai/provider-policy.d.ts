@@ -18,6 +18,9 @@ export interface RuntimeProviderModels {
     ollama?: string[];
     local_openai?: string[];
     hysa_ai?: string[];
+    ninerouter?: string[];
+    ninerouterVision?: string[];
+    ninerouterAutoHealthChecked?: boolean;
 }
 export interface ProviderUsability {
     provider: ProviderType;
@@ -36,6 +39,7 @@ export declare function getRetryAfterSeconds(error: unknown): number | null;
 export declare function getProviderModelsFromRegistry(runtimeModels?: RuntimeProviderModels): Map<string, string[]>;
 export declare function getProviderModels(provider: string, runtimeModels?: RuntimeProviderModels): string[];
 export declare function providerIsConfigured(provider: string, config: HysaConfig): boolean;
+export declare function providerModelHasActiveCredentials(provider: string, model: string, config: HysaConfig): boolean;
 export declare function isProviderUsable(provider: string, config: HysaConfig, runtimeModels?: RuntimeProviderModels, healthChecker?: {
     isOnCooldown: (p: string, m: string) => boolean;
     isUnhealthy: (p: string, m: string) => boolean;

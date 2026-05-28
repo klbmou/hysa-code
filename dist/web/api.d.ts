@@ -18,11 +18,11 @@ declare const VISION_FALLBACK_ORDER: {
 }[];
 export declare function clearNinerouterVisionCache(): void;
 declare function hasImageAttachments(attachments?: AttachmentPayload[]): boolean;
-declare function getVisionFallbackCandidates(config: HysaConfig): {
+declare function getVisionFallbackCandidates(config: HysaConfig): Promise<{
     provider: ProviderType;
     model: string;
     label: string;
-}[];
+}[]>;
 declare function getVisionFallbackErrorMessage(lang: 'arabic' | 'english', failures: {
     label: string;
     reason: string;

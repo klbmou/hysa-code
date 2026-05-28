@@ -31,6 +31,9 @@ const CAPABILITY_MAP = [
 ];
 export function providerHasCapability(provider, model, capability) {
     const lowerModel = model.toLowerCase();
+    if (provider === 'ninerouter' && capability === 'vision' && /(gemini|gpt-4o|vision|vl|image|multimodal)/i.test(model)) {
+        return true;
+    }
     for (const entry of CAPABILITY_MAP) {
         if (entry.provider !== provider)
             continue;
