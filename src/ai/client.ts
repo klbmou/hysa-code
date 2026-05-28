@@ -12,7 +12,13 @@ import { recordRequest, recordError } from '../utils/session.js';
 import { logProviderSuccess, logProviderFailure } from '../brain/graph-store.js';
 import { hasVisionCapability } from './provider-capabilities.js';
 import { estimateTimeoutFromMessages } from './timeout-utils.js';
-import { hydrateNinerouterConfig } from './ninerouter.js';
+import {
+  classifyNinerouterFailure,
+  extractNinerouterErrorDetails,
+  hydrateNinerouterConfig,
+  ninerouterProbeStatusToErrorCategory,
+  orderNinerouterChatModels,
+} from './ninerouter.js';
 
 const CHAT_TIMEOUT_MS = 30000;
 const FALLBACK_ATTEMPT_TIMEOUT_MS = 15000;
@@ -71,6 +77,32 @@ export function categorizeError(msg: string): ErrorCategory {
   if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed') || lower.includes('network') || lower.includes('enotfound') || lower.includes('econnaborted')) return 'network';
   if (lower.includes('404') || lower.includes('model not found') || lower.includes('not found') || lower.includes('does not support') || lower.includes('not support') || lower.includes('unavailable') || lower.includes('no free') || lower.includes('not supported') || lower.includes('503') || lower.includes('service unavailable') || lower.includes('overloaded') || lower.includes('overload')) return 'model_unavailable';
   return 'unknown';
+}
+
+function categorizeProviderError(provider: ProviderType, err: unknown): ErrorCategory {
+  if (provider === 'ninerouter') {
+    return ninerouterProbeStatusToErrorCategory(classifyNinerouterFailure(err));
+  }
+  return categorizeError((err as Error)?.message || String(err));
+}
+
+function logNinerouterFailure(reqId: number, model: string, err: unknown, cat: ErrorCategory, debug: boolean): void {
+  const details = extractNinerouterErrorDetails(err);
+  const fields = [
+    `status=${details.httpStatus ?? 'unknown'}`,
+    `error.type=${details.errorType ?? 'unknown'}`,
+    `error.message=${truncate(details.errorMessage ?? (err as Error)?.message ?? String(err), 300)}`,
+    'provider=ninerouter',
+    `model=${model}`,
+    `upstream=${details.upstreamProvider ?? 'unknown'}`,
+    `body=${truncate(details.rawBody ?? '', 500) || 'empty'}`,
+  ];
+  console.log(`[req:${reqId}] 9Router raw failure: ${fields.join(' | ')}`);
+  if (debug) console.log(`[req:${reqId}] 9Router model failed: ${model} - ${cat}`);
+}
+
+function truncate(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}...` : value;
 }
 
 // ── Friendly Error Messages ───────────────────────────
@@ -171,11 +203,8 @@ export function getFallbackCandidates(current: ProviderType, config: HysaConfig)
     if (current !== 'gemini') add('gemini');
     if (current !== 'deepseek') add('deepseek');
     if (current !== 'groq') add('groq');
-    const preferred9RouterModel = config.ninerouterModel && config.ninerouterModel !== 'auto'
-      ? config.ninerouterModel
-      : 'oc/deepseek-v4-flash-free';
-    add('ninerouter', preferred9RouterModel);
-    if (preferred9RouterModel !== 'oc/deepseek-v4-flash-free') add('ninerouter', 'oc/deepseek-v4-flash-free');
+    const ninerouterModels = orderNinerouterChatModels(config.ninerouterModels ?? [], config.ninerouterModel).slice(0, MAX_FALLBACK_MODELS);
+    for (const model of ninerouterModels) add('ninerouter', model);
     if (config.openaiRouterBaseUrl) {
       if (config.openaiRouterModel) add('openai_router', config.openaiRouterModel);
       for (const m of PROVIDER_MODELS.openai_router) {
@@ -242,7 +271,7 @@ export function getFallbackCandidates(current: ProviderType, config: HysaConfig)
 // ── Provider/Model skip logic ────────────────────────
 
 function shouldSkipProvider(provider: ProviderType, model: string): boolean {
-  if (isProviderOnCooldown(provider)) return true;
+  if (provider !== 'ninerouter' && isProviderOnCooldown(provider)) return true;
   if (isOnCooldown(provider, model)) return true;
   if (isSkippedForRequest(provider, model)) return true;
   const rec = getHealthRecord(provider, model);
@@ -358,7 +387,11 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             clearTimeout(timer);
             streamError = err as Error;
             const errMsg = streamError.message || '';
-            const cat = categorizeError(errMsg);
+            const cat = categorizeProviderError(primary, err);
+            if (primary === 'ninerouter') {
+              logNinerouterFailure(streamReqId, primaryModel, err, cat, debug);
+              addFallbackEvent(primary, primaryModel, `9Router model failed: ${cat}`);
+            }
             markHealth(primary, primaryModel, 'unhealthy', friendlyError(errMsg, primary), cat);
             logProviderFailure(primary, primaryModel, errMsg).catch(() => {});
             recordError(errMsg, primary, primaryModel);
@@ -529,9 +562,13 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
             lastError = err as Error;
             const errMsg = lastError.message || '';
-            const cat = categorizeError(errMsg);
+            const cat = categorizeProviderError(provider, err);
             const attemptDuration = Date.now() - attemptStart;
             recordErrorAnalytics(provider, model, cat);
+            if (provider === 'ninerouter') {
+              logNinerouterFailure(reqId, model, err, cat, debug);
+              addFallbackEvent(provider, model, `9Router model failed: ${cat}`);
+            }
 
             if (cat === 'timeout') {
               addFallbackEvent(provider, model, `${provLabel} timed out (${timeoutMs / 1000}s)`);
@@ -574,7 +611,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
               const cooldownSec = getRetryAfterSeconds(err) ?? (cat === 'rate_limit' ? 120 : cat === 'timeout' ? 30 : 60);
               markModelCooldown(provider, model, friendlyError(errMsg, provider), cooldownSec, cat);
-              if (cat === 'rate_limit') {
+              if (cat === 'rate_limit' && provider !== 'ninerouter') {
                 markProviderCooldown(provider, `${PROVIDER_DEFAULTS[provider]?.label || provider} rate-limited; provider cooldown active`, cooldownSec, cat);
               }
             }

@@ -6,6 +6,7 @@ import {
   providerIsConfigured,
 } from './provider-policy.js';
 import type { RuntimeProviderModels } from './provider-policy.js';
+import { orderNinerouterChatModels } from './ninerouter.js';
 
 export interface ModelCapability {
   provider: string;
@@ -128,7 +129,7 @@ export function getCandidatesForTask(
 
       if (!providerIsAvailable(mc.provider, config)) continue;
       if (!providerModelHasActiveCredentials(mc.provider, mc.model, config)) continue;
-      if (healthChecker.isProviderOnCooldown?.(mc.provider)) continue;
+      if (mc.provider !== 'ninerouter' && healthChecker.isProviderOnCooldown?.(mc.provider)) continue;
       if (healthChecker.isOnCooldown(mc.provider, mc.model)) continue;
       if (healthChecker.isUnhealthy(mc.provider, mc.model)) continue;
 
@@ -144,9 +145,11 @@ export function getCandidatesForTask(
   return candidates.sort((a, b) => {
     const providerDelta = providerIndex(providerOrder, a.provider) - providerIndex(providerOrder, b.provider);
     if (providerDelta !== 0) return providerDelta;
-    if (a.provider === 'ninerouter' && b.provider === 'ninerouter' && config.ninerouterModel) {
-      if (a.model === config.ninerouterModel && b.model !== config.ninerouterModel) return -1;
-      if (b.model === config.ninerouterModel && a.model !== config.ninerouterModel) return 1;
+    if (a.provider === 'ninerouter' && b.provider === 'ninerouter') {
+      const ordered = getConfiguredNinerouterOrder(config, runtimeModels);
+      const aIndex = modelIndex(ordered, a.model);
+      const bIndex = modelIndex(ordered, b.model);
+      if (aIndex !== bIndex) return aIndex - bIndex;
     }
     const priorityDelta = priorityIndex(priorityOrder, a.priority) - priorityIndex(priorityOrder, b.priority);
     if (priorityDelta !== 0) return priorityDelta;
@@ -204,11 +207,7 @@ function getRuntimeRegistry(config: HysaConfig, runtimeModels?: RuntimeProviderM
     });
   }
 
-  const ninerouterModels = dedupe([
-    ...(config.ninerouterModel ? [config.ninerouterModel] : []),
-    ...(runtimeModels?.ninerouter ?? []),
-    ...(config.ninerouterModels ?? []),
-  ]);
+  const ninerouterModels = getConfiguredNinerouterOrder(config, runtimeModels);
   const ninerouterVisionModels = dedupe([
     ...(config.ninerouterVisionModel ? [config.ninerouterVisionModel] : []),
     ...(runtimeModels?.ninerouterVision ?? []),
@@ -283,6 +282,18 @@ function ollamaPriority(model: string): ModelCapability['priority'] {
 function providerIndex(providerOrder: ProviderType[], provider: string): number {
   const index = providerOrder.indexOf(provider as ProviderType);
   return index >= 0 ? index : providerOrder.length + 1;
+}
+
+function getConfiguredNinerouterOrder(config: HysaConfig, runtimeModels?: RuntimeProviderModels): string[] {
+  return orderNinerouterChatModels([
+    ...(runtimeModels?.ninerouter ?? []),
+    ...(config.ninerouterModels ?? []),
+  ], config.ninerouterModel);
+}
+
+function modelIndex(ordered: string[], model: string): number {
+  const index = ordered.indexOf(model);
+  return index >= 0 ? index : ordered.length + 1;
 }
 
 function priorityIndex(priorityOrder: string[], priority: string): number {

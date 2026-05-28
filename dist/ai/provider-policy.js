@@ -147,6 +147,8 @@ export function providerModelHasActiveCredentials(provider, model, config) {
             return config.ninerouterAutoHealthChecked === true;
         if (discoveredModels.has(normalizedModel))
             return true;
+        if (discoveredModels.size > 0)
+            return false;
         if (isOpenAiRoutedModel(normalizedModel))
             return !!config.apiKeys.openai;
     }
@@ -168,7 +170,7 @@ export function getProviderUsability(provider, config, runtimeModels, healthChec
     if (isLocalProvider(provider) && provider !== config.currentProvider && !isLocalFallbackEnabled(config)) {
         return { provider, configured, usable: false, reason: LOCAL_FALLBACK_DISABLED_REASON, usableModels, cooldownModels, providerCooldownRemainingMs };
     }
-    if (isProviderOnCooldown(provider)) {
+    if (provider !== 'ninerouter' && isProviderOnCooldown(provider)) {
         return { provider, configured, usable: false, reason: `provider cooldown ${Math.ceil(providerCooldownRemainingMs / 1000)}s`, usableModels, cooldownModels, providerCooldownRemainingMs };
     }
     if (models.length === 0) {

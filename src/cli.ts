@@ -3245,14 +3245,15 @@ export async function start(): Promise<void> {
     .option('--debug', 'Show raw provider error details')
     .option('--provider <name>', 'Test a specific provider (e.g. openrouter, hysa-ai, ollama)')
     .option('--vision', 'Run vision-specific diagnostics (check fallback providers, API keys)')
-    .action(async (opts: { debug?: boolean; provider?: string; vision?: boolean }) => {
+    .option('--probe-models', 'Probe discovered provider models with a tiny request')
+    .action(async (opts: { debug?: boolean; provider?: string; vision?: boolean; probeModels?: boolean }) => {
       const normalized = opts.provider?.replace(/-/g, '_');
       if (opts.vision) {
         const { runVisionDiagnostics } = await import('./utils/doctor.js');
         await runVisionDiagnostics(opts.debug ?? false);
         return;
       }
-      await runDoctor(opts.debug ?? false, normalized);
+      await runDoctor(opts.debug ?? false, normalized, { probeModels: opts.probeModels ?? false });
     });
 
   program

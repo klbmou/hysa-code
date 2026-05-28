@@ -13,7 +13,14 @@ import { checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig, cli
 import { getBrainStatus } from '../brain/store.js';
 import { getGraphStats, experienceGraphExists } from '../brain/graph-store.js';
 import { isRecallAvailable } from '../brain/recall.js';
-import { DEFAULT_NINEROUTER_CHAT_MODEL, DEFAULT_NINEROUTER_ROOT_URL, discoverNinerouter, hydrateNinerouterConfig } from '../ai/ninerouter.js';
+import {
+  DEFAULT_NINEROUTER_CHAT_MODEL,
+  DEFAULT_NINEROUTER_ROOT_URL,
+  discoverNinerouter,
+  hydrateNinerouterConfig,
+  orderNinerouterChatModels,
+  probe9RouterModel,
+} from '../ai/ninerouter.js';
 import type { RuntimeProviderModels } from '../ai/provider-policy.js';
 
 const DOCTOR_TIMEOUT_MS = 15000;
@@ -22,6 +29,10 @@ interface DoctorResult {
   name: string;
   status: 'ok' | 'warn' | 'error';
   message: string;
+}
+
+interface DoctorOptions {
+  probeModels?: boolean;
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
@@ -47,7 +58,9 @@ async function getDoctorRuntimeModels(config: HysaConfig): Promise<RuntimeProvid
   const runtime: RuntimeProviderModels = {};
   const nr = await hydrateNinerouterConfig(config, { includeVision: true, timeoutMs: 1500 });
   if (nr?.available) {
-    runtime.ninerouter = [nr.chatModel, ...nr.models];
+    runtime.ninerouter = config.ninerouterModels?.length
+      ? [...config.ninerouterModels]
+      : orderNinerouterChatModels(nr.models, nr.chatModel);
     if (nr.visionModel || nr.visionModels.length > 0) {
       runtime.ninerouterVision = [...(nr.visionModel ? [nr.visionModel] : []), ...nr.visionModels];
     }
@@ -514,7 +527,7 @@ async function checkAnthropicProxyDetailed(config: HysaConfig, debug: boolean): 
   return results;
 }
 
-async function check9RouterDetailed(config: HysaConfig, debug: boolean): Promise<DoctorResult[]> {
+async function check9RouterDetailed(config: HysaConfig, debug: boolean, options: DoctorOptions = {}): Promise<DoctorResult[]> {
   const results: DoctorResult[] = [];
   const discovery = await discoverNinerouter(config, { includeVision: true, timeoutMs: DOCTOR_TIMEOUT_MS, force: true });
 
@@ -531,7 +544,33 @@ async function check9RouterDetailed(config: HysaConfig, debug: boolean): Promise
   results.push({ name: 'Models', status: 'ok', message: `${discovery.models.length} usable model(s): ${discovery.models.slice(0, 5).join(', ')}${discovery.models.length > 5 ? '...' : ''}` });
 
   const model = discovery.chatModel || DEFAULT_NINEROUTER_CHAT_MODEL;
+  const orderedChatModels = orderNinerouterChatModels(discovery.models, model);
+  config.ninerouterRootUrl = discovery.rootUrl;
+  config.ninerouterBaseUrl = discovery.apiBaseUrl;
+  config.ninerouterModel = model;
+  config.ninerouterModels = orderedChatModels;
+  config.ninerouterAutoHealthChecked = discovery.autoHealthChecked;
+  config.ninerouterDiscovered = true;
+
   results.push({ name: 'Default Chat Model', status: 'ok', message: model });
+  results.push({ name: 'Chat Models', status: 'ok', message: orderedChatModels.join(', ') });
+
+  const cooldowns = getModelsInCooldown('ninerouter');
+  const cooldownSet = new Set(cooldowns.map(c => c.model));
+  if (cooldowns.length > 0) {
+    results.push({
+      name: 'Cooldown Models',
+      status: 'warn',
+      message: cooldowns.map(c => `${c.model} (${Math.ceil(c.remainingMs / 1000)}s, ${c.category})`).join(', '),
+    });
+  } else {
+    results.push({ name: 'Cooldown Models', status: 'ok', message: 'none' });
+  }
+
+  const recommended = orderedChatModels.find(m => !cooldownSet.has(m)) || orderedChatModels[0];
+  if (recommended) {
+    results.push({ name: 'Recommended Next Model', status: cooldownSet.has(recommended) ? 'warn' : 'ok', message: recommended });
+  }
   results.push({
     name: 'Auto Model',
     status: discovery.autoHealthChecked ? 'ok' : 'warn',
@@ -568,6 +607,28 @@ async function check9RouterDetailed(config: HysaConfig, debug: boolean): Promise
     results.push({ name: 'HYSA_9ROUTER_VISION_MODEL', status: 'ok', message: nrVisionEnv });
   } else {
     results.push({ name: 'HYSA_9ROUTER_VISION_MODEL', status: 'warn', message: 'Not set (uses /v1/models/image-to-text discovery)' });
+  }
+
+  if (options.probeModels) {
+    results.push({ name: 'Model Probe', status: 'ok', message: 'Probing discovered chat models with prompt "ping"' });
+    for (const probeModel of orderedChatModels) {
+      const probe = await probe9RouterModel(config, probeModel, { timeoutMs: 10000 });
+      const status = probe.usable
+        ? 'ok'
+        : probe.status === 'rate_limited' || probe.status === 'invalid_model'
+          ? 'warn'
+          : 'error';
+      const reason = [
+        `model=${probe.model}`,
+        `usable=${probe.usable ? 'yes' : 'no'}`,
+        `reason=${probe.status}: ${probe.reason}`,
+        `latency=${probe.latencyMs}ms`,
+        probe.httpStatus ? `http=${probe.httpStatus}` : '',
+        probe.errorType ? `type=${probe.errorType}` : '',
+        probe.upstreamProvider ? `upstream=${probe.upstreamProvider}` : '',
+      ].filter(Boolean).join('; ');
+      results.push({ name: `Probe ${probeModel}`, status, message: reason });
+    }
   }
 
   return results;
@@ -822,7 +883,7 @@ export async function runVisionDiagnostics(debug = false): Promise<void> {
   console.log(pc.dim(`  Run tests with: hysa chat (with an image attachment)\n`));
 }
 
-export async function runDoctor(debug = false, provider?: string): Promise<void> {
+export async function runDoctor(debug = false, provider?: string, options: DoctorOptions = {}): Promise<void> {
   if (provider) {
     const config = loadConfig();
     if (!config) {
@@ -878,7 +939,7 @@ export async function runDoctor(debug = false, provider?: string): Promise<void>
     } else if (provider === 'openai_router') {
       results = await checkOpenAIRouterDetailed(config, debug);
     } else if (provider === 'ninerouter') {
-      results = await check9RouterDetailed(config, debug);
+      results = await check9RouterDetailed(config, debug, options);
     } else if (provider === 'anthropic' || provider === 'openai' || provider === 'opencode_zen') {
       console.log(pc.yellow(`  Diagnostics for "${provider}" not yet supported in detailed mode. Try:\n  hysa doctor\n  hysa doctor --provider hysa-ai\n`));
       return;

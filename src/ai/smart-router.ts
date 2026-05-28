@@ -37,7 +37,12 @@ import type { RuntimeProviderModels } from './provider-policy.js';
 import { logProviderSuccess, logProviderFailure } from '../brain/graph-store.js';
 import { hasVisionCapability } from './provider-capabilities.js';
 import { getProviderTimeoutForTask } from './timeout-utils.js';
-import { hydrateNinerouterConfig } from './ninerouter.js';
+import {
+  classifyNinerouterFailure,
+  extractNinerouterErrorDetails,
+  hydrateNinerouterConfig,
+  ninerouterProbeStatusToErrorCategory,
+} from './ninerouter.js';
 
 const LOG = '[SmartRouter]';
 const ATTEMPT_TIMEOUT_MS = 25000;
@@ -146,11 +151,12 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
       const providerStats = new Map<string, ProviderAttemptStats>();
       const providerTargets = countProviderTargets(attempts);
       const skippedProviders = new Set<string>();
+      let ninerouterModelFailures = 0;
 
       for (let i = 0; i < attempts.length; i++) {
         const c = attempts[i];
 
-        if (isProviderOnCooldown(c.provider)) {
+        if (c.provider !== 'ninerouter' && isProviderOnCooldown(c.provider)) {
           if (!skippedProviders.has(c.provider)) {
             skippedProviders.add(c.provider);
             const remaining = Math.ceil(getProviderCooldownRemaining(c.provider) / 1000);
@@ -162,6 +168,14 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
 
         const timeoutMs = getAttemptTimeout(c.provider);
         const attemptLabel = `Attempt ${i + 1}/${attempts.length}`;
+
+        if (c.provider === 'ninerouter') {
+          const msg = ninerouterModelFailures > 0
+            ? `trying next 9Router model: ${c.model}`
+            : `trying 9Router model: ${c.model}`;
+          if (ninerouterModelFailures > 0) addFallbackEvent(c.provider, c.model, `Trying next 9Router model: ${c.model}`);
+          if (debug) console.log(`${LOG}[req:${reqId}] ${msg}`);
+        }
 
         if (debug) {
           console.log(`${LOG}[req:${reqId}] ${attemptLabel}: ${c.label} (timeout: ${timeoutMs / 1000}s)`);
@@ -210,6 +224,10 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
           markHealth(c.provider, c.model, 'healthy', 'success', 'unknown', duration);
           logProviderSuccess(c.provider, c.model).catch(() => {});
           setLastSuccessfulProvider(c.provider, c.model);
+          if (c.provider === 'ninerouter' && ninerouterModelFailures > 0) {
+            addFallbackEvent(c.provider, c.model, `selected 9Router fallback model: ${c.model}`);
+            if (debug) console.log(`${LOG}[req:${reqId}] selected 9Router fallback model: ${c.model}`);
+          }
           if (c.provider !== config.currentProvider || c.model !== config.currentModel || i > 0) {
             setLastFallbackUsed(c.label);
             addFallbackEvent(c.provider, c.model, `Fallback: ${c.label}`);
@@ -234,22 +252,28 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
           const errMsg = lastError.message || '';
           const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
 
-          const cat = categorizeError(errMsg || String(err));
+          const cat = categorizeProviderError(c.provider, err);
           const retryAfter = getRetryAfterSeconds(err);
           const cooldownSec = retryAfter ?? getCooldownSeconds(cat);
+
+          if (c.provider === 'ninerouter') {
+            ninerouterModelFailures += 1;
+            logNinerouterFailure(reqId, c.model, err, cat, debug);
+            addFallbackEvent(c.provider, c.model, `9Router model failed: ${cat}`);
+          }
 
           markHealth(c.provider, c.model, 'unhealthy', errMsg, cat);
           logProviderFailure(c.provider, c.model, errMsg).catch(() => {});
           if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
             markModelCooldown(c.provider, c.model, errMsg, cooldownSec, cat);
           }
-          if (cat === 'rate_limit') {
+          if (cat === 'rate_limit' && c.provider !== 'ninerouter') {
             const reason = `${c.provider} rate-limited on ${c.model}; provider cooldown active`;
             markProviderCooldown(c.provider, reason, Math.max(cooldownSec, 120), cat);
             addFallbackEvent(c.provider, '', reason);
           }
           const providerCooldownReason = recordProviderFailure(providerStats, c.provider, cat, providerTargets.get(c.provider) ?? 1);
-          if (providerCooldownReason && cat !== 'rate_limit') {
+          if (providerCooldownReason && c.provider !== 'ninerouter' && cat !== 'rate_limit') {
             markProviderCooldown(c.provider, providerCooldownReason, Math.max(cooldownSec, 120), cat);
             addFallbackEvent(c.provider, '', providerCooldownReason);
             if (!debug) {
@@ -409,9 +433,13 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
         } catch (err) {
           clearTimeout(timer);
           const errMsg = (err as Error).message || '';
-          const cat = categorizeError(errMsg || String(err));
+          const cat = categorizeProviderError(first.provider, err);
           const retryAfter = getRetryAfterSeconds(err);
           const cooldownSec = retryAfter ?? getCooldownSeconds(cat);
+          if (first.provider === 'ninerouter') {
+            logNinerouterFailure(reqId, first.model, err, cat, debug);
+            addFallbackEvent(first.provider, first.model, `9Router model failed: ${cat}`);
+          }
           markHealth(first.provider, first.model, 'unhealthy', errMsg, cat);
           logProviderFailure(first.provider, first.model, errMsg).catch(() => {});
           recordErrorAnalytics(first.provider, first.model, cat);
@@ -455,7 +483,7 @@ Previous partial response: ${partialTokens.slice(0, 500)}`;
             throw err;
           }
 
-          if (cat === 'rate_limit') {
+          if (cat === 'rate_limit' && first.provider !== 'ninerouter') {
             markProviderCooldown(first.provider, `${first.provider} streaming failed with rate_limit; switching providers on the next request`, Math.max(cooldownSec, 120), cat);
           }
           console.log(`  Stream ${first.label} failed (${cat}). Trying another model/provider...`);
@@ -486,10 +514,12 @@ async function getRuntimeProviderModels(config: HysaConfig, taskKind: TaskKind):
   const runtime: RuntimeProviderModels = {};
   const nr = await hydrateNinerouterConfig(config, { includeVision: taskKind === 'image_vision' });
   if (nr?.available) {
-    runtime.ninerouter = dedupe([
-      nr.chatModel,
-      ...nr.models,
-    ]);
+    runtime.ninerouter = config.ninerouterModels?.length
+      ? [...config.ninerouterModels]
+      : dedupe([
+          nr.chatModel,
+          ...nr.models,
+        ]);
     if (nr.visionModel || nr.visionModels.length > 0) {
       runtime.ninerouterVision = dedupe([
         ...(nr.visionModel ? [nr.visionModel] : []),
@@ -523,32 +553,28 @@ function buildAttemptPlan(candidates: RouterCandidate[], taskKind: TaskKind, max
   }
 
   const planned: RouterCandidate[] = [];
-  const totalLimit = Math.max(maxAttempts, taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review' ? 7 : 5);
+  const nonNinerouterLimit = Math.max(maxAttempts, taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review' ? 7 : 5);
+  let nonNinerouterAttempts = 0;
 
   for (const [provider, group] of groups) {
     const limit = getProviderAttemptLimit(provider, taskKind);
     for (const candidate of group.slice(0, limit)) {
-      if (planned.length >= totalLimit) return ensureNinerouterIncluded(planned, candidates);
+      if (provider !== 'ninerouter') {
+        if (nonNinerouterAttempts >= nonNinerouterLimit) continue;
+        nonNinerouterAttempts += 1;
+      }
       planned.push(candidate);
     }
   }
 
-  return ensureNinerouterIncluded(planned, candidates);
-}
-
-function ensureNinerouterIncluded(planned: RouterCandidate[], candidates: RouterCandidate[]): RouterCandidate[] {
-  if (planned.some(c => c.provider === 'ninerouter')) return planned;
-  const ninerouterCandidate = candidates.find(c => c.provider === 'ninerouter');
-  if (!ninerouterCandidate) return planned;
-  if (planned.length === 0) return [ninerouterCandidate];
-  return [...planned.slice(0, -1), ninerouterCandidate];
+  return planned;
 }
 
 function getProviderAttemptLimit(provider: string, taskKind: TaskKind): number {
+  if (provider === 'ninerouter') return getEnvInt('HYSA_9ROUTER_MAX_MODEL_ATTEMPTS', 8);
   if (taskKind === 'simple_chat') return provider === 'ollama' ? 2 : 2;
   if (provider === 'openai_router' && (taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review')) return 4;
   if (provider === 'openrouter') return 3;
-  if (provider === 'ninerouter' && (taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review')) return 3;
   return 2;
 }
 
@@ -584,6 +610,34 @@ function recordProviderFailure(
   }
 
   return null;
+}
+
+function categorizeProviderError(provider: string, err: unknown): ErrorCategory {
+  if (provider === 'ninerouter') {
+    const status = classifyNinerouterFailure(err);
+    return ninerouterProbeStatusToErrorCategory(status);
+  }
+  const msg = (err as Error)?.message || String(err);
+  return categorizeError(msg);
+}
+
+function logNinerouterFailure(reqId: number, model: string, err: unknown, category: ErrorCategory, debug: boolean): void {
+  const details = extractNinerouterErrorDetails(err);
+  const fields = [
+    `status=${details.httpStatus ?? 'unknown'}`,
+    `error.type=${details.errorType ?? 'unknown'}`,
+    `error.message=${truncate(details.errorMessage ?? (err as Error)?.message ?? String(err), 300)}`,
+    'provider=ninerouter',
+    `model=${model}`,
+    `upstream=${details.upstreamProvider ?? 'unknown'}`,
+    `body=${truncate(details.rawBody ?? '', 500) || 'empty'}`,
+  ];
+  console.log(`${LOG}[req:${reqId}] 9Router raw failure: ${fields.join(' | ')}`);
+  if (debug) console.log(`${LOG}[req:${reqId}] 9Router model failed: ${model} - ${category}`);
+}
+
+function truncate(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}...` : value;
 }
 
 function categorizeError(msg: string): ErrorCategory {

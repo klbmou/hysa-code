@@ -46,8 +46,19 @@ const openChecker = {
   isProviderOnCooldown: () => false,
 };
 
-async function startMockNinerouter(port = 0): Promise<{ server: Server; rootUrl: string; apiBaseUrl: string; chatModels: string[] }> {
+interface MockNinerouterOptions {
+  models?: string[];
+  visionModels?: string[];
+  responses?: Record<string, { status: number; body: unknown }>;
+}
+
+async function startMockNinerouter(port = 0, options: MockNinerouterOptions = {}): Promise<{ server: Server; rootUrl: string; apiBaseUrl: string; chatModels: string[] }> {
   const chatModels: string[] = [];
+  const models = options.models ?? [
+    'oc/deepseek-v4-flash-free',
+    'gemini/gemini-3.1-flash-lite-preview',
+  ];
+  const visionModels = options.visionModels ?? ['gemini/gemini-3.1-flash-lite-preview'];
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const path = new URL(req.url || '/', 'http://localhost').pathname;
     if (req.method === 'GET' && path === '/api/health') {
@@ -55,21 +66,20 @@ async function startMockNinerouter(port = 0): Promise<{ server: Server; rootUrl:
     }
     if (req.method === 'GET' && path === '/v1/models') {
       return writeJson(res, 200, {
-        data: [
-          { id: 'oc/deepseek-v4-flash-free' },
-          { id: 'gemini/gemini-3.1-flash-lite-preview' },
-        ],
+        data: models.map(id => ({ id })),
       });
     }
     if (req.method === 'GET' && path === '/v1/models/image-to-text') {
       return writeJson(res, 200, {
-        data: [{ id: 'gemini/gemini-3.1-flash-lite-preview' }],
+        data: visionModels.map(id => ({ id })),
       });
     }
     if (req.method === 'POST' && path === '/v1/chat/completions') {
       const body = await readBody(req);
       const parsed = JSON.parse(body || '{}') as { model?: string };
       if (parsed.model) chatModels.push(parsed.model);
+      const configured = parsed.model ? options.responses?.[parsed.model] : undefined;
+      if (configured) return writeJson(res, configured.status, configured.body);
       return writeJson(res, 200, {
         choices: [{ message: { content: 'ninerouter ok' } }],
       });
@@ -139,6 +149,7 @@ describe('provider fallback chain', () => {
     delete process.env.NINEROUTER_URL;
     delete process.env.HYSA_9ROUTER_CHAT_MODEL;
     delete process.env.HYSA_MODEL_MAX_ATTEMPTS;
+    delete process.env.HYSA_9ROUTER_MAX_MODEL_ATTEMPTS;
     clearNinerouterDiscoveryCache();
     resetHealth();
   });
@@ -280,6 +291,127 @@ describe('provider fallback chain', () => {
       assert.deepEqual(nr.chatModels, ['oc/deepseek-v4-flash-free']);
       assert.equal(config.currentProvider, 'openai_router', 'manual HYSA_PROVIDER=ninerouter should not be required');
       assert.ok(getFallbackEvents().some(e => e.reason === 'Fallback: 9Router / oc/deepseek-v4-flash-free'));
+    } finally {
+      await close(routerServer.server);
+      await close(nr.server);
+    }
+  });
+
+  it('9Router DeepSeek rate limit triggers Gemini model fallback from discovered models without a manual env var', async () => {
+    const routerServer = await startRateLimitedRouter();
+    const nr = await startMockNinerouter(0, {
+      models: [
+        'oc/deepseek-v4-flash-free',
+        'gemini/gemini-3.1-flash-lite-preview',
+        'nvidia/z-ai/glm4.7',
+      ],
+      responses: {
+        'oc/deepseek-v4-flash-free': {
+          status: 429,
+          body: { error: { type: 'FreeUsageLimitError', message: 'free usage limit reached', provider: 'opencode' } },
+        },
+      },
+    });
+    process.env.NINEROUTER_URL = nr.rootUrl;
+    delete process.env.HYSA_9ROUTER_CHAT_MODEL;
+    process.env.HYSA_9ROUTER_MAX_MODEL_ATTEMPTS = '8';
+
+    try {
+      const config = mockConfig({
+        currentProvider: 'openai_router',
+        currentModel: 'oc/deepseek-v4-flash-free',
+        apiKeys: {},
+        openaiRouterBaseUrl: routerServer.apiBaseUrl,
+        ninerouterBaseUrl: undefined,
+        debug: true,
+      });
+      const router = createSmartRouter(config);
+
+      const result = await router.sendMessage([{ role: 'user', content: 'hello' }], 'system');
+
+      assert.equal(result.provider, '9Router');
+      assert.equal(result.model, 'gemini/gemini-3.1-flash-lite-preview');
+      assert.deepEqual(nr.chatModels, [
+        'oc/deepseek-v4-flash-free',
+        'gemini/gemini-3.1-flash-lite-preview',
+      ]);
+      assert.ok(config.ninerouterModels?.includes('gemini/gemini-3.1-flash-lite-preview'), 'discovered /v1/models should populate fallback models');
+      assert.equal(process.env.HYSA_PROVIDER, undefined, 'manual HYSA_PROVIDER=ninerouter should not be required');
+      assert.ok(getFallbackEvents().some(e => e.reason.includes('selected 9Router fallback model: gemini/gemini-3.1-flash-lite-preview')));
+    } finally {
+      await close(routerServer.server);
+      await close(nr.server);
+    }
+  });
+
+  it('skips a cooling 9Router model and tries the recommended next discovered model', async () => {
+    const routerServer = await startRateLimitedRouter();
+    const nr = await startMockNinerouter(0, {
+      models: [
+        'oc/deepseek-v4-flash-free',
+        'gemini/gemini-3-flash-preview',
+        'nvidia/z-ai/glm4.7',
+      ],
+    });
+    process.env.NINEROUTER_URL = nr.rootUrl;
+    process.env.HYSA_9ROUTER_MAX_MODEL_ATTEMPTS = '8';
+    markModelCooldown('ninerouter', 'oc/deepseek-v4-flash-free', '429 FreeUsageLimitError', 120, 'rate_limit');
+
+    try {
+      const config = mockConfig({
+        currentProvider: 'openai_router',
+        currentModel: 'oc/deepseek-v4-flash-free',
+        apiKeys: {},
+        openaiRouterBaseUrl: routerServer.apiBaseUrl,
+        ninerouterBaseUrl: undefined,
+        debug: true,
+      });
+      const router = createSmartRouter(config);
+
+      const result = await router.sendMessage([{ role: 'user', content: 'hello' }], 'system');
+
+      assert.equal(result.provider, '9Router');
+      assert.equal(result.model, 'gemini/gemini-3-flash-preview');
+      assert.deepEqual(nr.chatModels, ['gemini/gemini-3-flash-preview']);
+    } finally {
+      await close(routerServer.server);
+      await close(nr.server);
+    }
+  });
+
+  it('reports unavailable only after all discovered 9Router chat models fail', async () => {
+    const routerServer = await startRateLimitedRouter();
+    const models = [
+      'oc/deepseek-v4-flash-free',
+      'gemini/gemini-2.0-flash-lite',
+      'nvidia/z-ai/glm4.7',
+    ];
+    const nr = await startMockNinerouter(0, {
+      models,
+      responses: Object.fromEntries(models.map(model => [
+        model,
+        { status: 429, body: { error: { type: 'FreeUsageLimitError', message: `${model} limited` } } },
+      ])),
+    });
+    process.env.NINEROUTER_URL = nr.rootUrl;
+    process.env.HYSA_9ROUTER_MAX_MODEL_ATTEMPTS = '8';
+
+    try {
+      const config = mockConfig({
+        currentProvider: 'openai_router',
+        currentModel: 'oc/deepseek-v4-flash-free',
+        apiKeys: {},
+        openaiRouterBaseUrl: routerServer.apiBaseUrl,
+        ninerouterBaseUrl: undefined,
+        debug: true,
+      });
+      const router = createSmartRouter(config);
+
+      await assert.rejects(
+        () => router.sendMessage([{ role: 'user', content: 'hello' }], 'system'),
+        /All currently configured providers are temporarily unavailable or rate-limited/,
+      );
+      assert.deepEqual(nr.chatModels, models);
     } finally {
       await close(routerServer.server);
       await close(nr.server);

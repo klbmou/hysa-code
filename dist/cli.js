@@ -3051,6 +3051,7 @@ export async function start() {
         .option('--debug', 'Show raw provider error details')
         .option('--provider <name>', 'Test a specific provider (e.g. openrouter, hysa-ai, ollama)')
         .option('--vision', 'Run vision-specific diagnostics (check fallback providers, API keys)')
+        .option('--probe-models', 'Probe discovered provider models with a tiny request')
         .action(async (opts) => {
         const normalized = opts.provider?.replace(/-/g, '_');
         if (opts.vision) {
@@ -3058,7 +3059,7 @@ export async function start() {
             await runVisionDiagnostics(opts.debug ?? false);
             return;
         }
-        await runDoctor(opts.debug ?? false, normalized);
+        await runDoctor(opts.debug ?? false, normalized, { probeModels: opts.probeModels ?? false });
     });
     program
         .command('models')
