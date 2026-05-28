@@ -7,6 +7,9 @@ import { getGitInfo } from '../utils/git.js';
 import { createClient, createSingleClient, categorizeError } from '../ai/client.js';
 import { buildSystemPrompt, resolvePromptMode } from '../prompts/system.js';
 import { classifyTask } from '../ai/task-classifier.js';
+import { generatePlan } from '../ai/planner.js';
+import { clonePlan, markStepRunning, markStepDone, markStepFailed, inferStepFromToolCall, buildFinalReport } from '../ai/planner.js';
+import { hasVisionCapability, isModelVisionCapable, getVisionCapableProviders } from '../ai/provider-capabilities.js';
 import { shouldInjectProjectContext } from '../ai/provider-policy.js';
 import { rankFiles } from '../context/ranker.js';
 import { decideProjectMode } from '../context/project-router.js';
@@ -121,23 +124,17 @@ function withTimeout(promise, ms) {
 }
 const workingDir = resolve('.');
 // Known vision-capable models per provider (for supportsVision check)
-const VISION_CAPABLE_MODELS = {
-    gemini: ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'],
-    openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo'],
-    anthropic: ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022'],
-    openrouter: ['google/gemini-2.5-flash', 'qwen/qwen2.5-vl-72b-instruct:free'],
-};
 function supportsVision(provider, model) {
-    const models = VISION_CAPABLE_MODELS[provider];
-    if (!models)
-        return false;
-    return models.some(m => model.includes(m.replace('google/', '').replace(':free', '')) || model === m);
+    return hasVisionCapability(provider, model);
 }
 // Preferred ordered list of vision fallback models (max 3 attempted)
 const VISION_FALLBACK_ORDER = [
     { provider: 'openrouter', model: 'google/gemini-2.5-flash' },
     { provider: 'openrouter', model: 'qwen/qwen2.5-vl-72b-instruct:free' },
+    { provider: 'openrouter', model: 'qwen/qwen-vl-plus' },
+    { provider: 'openai_router', model: 'openai/gpt-4o-mini' },
     { provider: 'gemini', model: 'gemini-2.5-flash' },
+    { provider: 'gemini', model: 'gemini-1.5-flash' },
 ];
 function hasImageAttachments(attachments) {
     if (!attachments || attachments.length === 0)
@@ -147,10 +144,11 @@ function hasImageAttachments(attachments) {
 function getVisionFallbackCandidates(config) {
     const candidates = [];
     const currentProv = config.currentProvider;
+    // Try preferred vision fallback order first
     for (const fb of VISION_FALLBACK_ORDER) {
         if (fb.provider !== currentProv) {
             const key = config.apiKeys[fb.provider];
-            if (!key)
+            if (!key && fb.provider !== 'openrouter' && fb.provider !== 'openai_router')
                 continue;
         }
         const label = `${PROVIDER_DEFAULTS[fb.provider]?.label || fb.provider} / ${fb.model}`;
@@ -158,19 +156,90 @@ function getVisionFallbackCandidates(config) {
         if (candidates.length >= 3)
             break;
     }
+    // If still need more candidates, try any vision-capable provider from the registry
+    if (candidates.length < 3) {
+        const allVision = getVisionCapableProviders();
+        for (const vp of allVision) {
+            if (candidates.some(c => c.provider === vp.provider && c.model === vp.model))
+                continue;
+            if (vp.provider !== currentProv) {
+                const key = config.apiKeys[vp.provider];
+                if (!key && vp.provider !== 'openrouter' && vp.provider !== 'openai_router')
+                    continue;
+            }
+            const label = `${PROVIDER_DEFAULTS[vp.provider]?.label || vp.provider} / ${vp.model}`;
+            candidates.push({ provider: vp.provider, model: vp.model, label });
+            if (candidates.length >= 3)
+                break;
+        }
+    }
     return candidates;
 }
 function getVisionFallbackErrorMessage(lang, failures, debug) {
+    const reasons = failures.map(f => f.reason);
+    const allTimeout = reasons.every(r => r === 'timed out');
+    const allRateLimit = reasons.every(r => r === 'rate-limited' || r === 'quota exceeded');
+    const allInvalidKey = reasons.every(r => r === 'invalid key');
+    const allUnavailable = reasons.every(r => r === 'unavailable');
+    let actualReason;
+    if (failures.length === 0)
+        actualReason = 'no configured vision model';
+    else if (allTimeout)
+        actualReason = 'all vision models timed out — network or provider too slow';
+    else if (allRateLimit)
+        actualReason = 'rate-limited or quota exceeded on all vision models';
+    else if (allInvalidKey)
+        actualReason = 'invalid API key for all configured vision models';
+    else if (allUnavailable)
+        actualReason = 'all vision models are unavailable';
+    else
+        actualReason = 'all vision model attempts failed';
     if (lang === 'arabic') {
-        let msg = 'لم أستطع تحليل الصورة الآن لأن نماذج الرؤية المتاحة غير متوفرة أو وصلت للحد اليومي. جرّب لاحقًا أو غيّر المزود إلى Gemini/OpenRouter Vision.';
+        let msg = 'لم أستطع تحليل الصورة الآن.';
+        if (failures.length === 0) {
+            msg += ' لا توجد نماذج رؤية مفعّلة. فعّل Gemini أو OpenRouter Vision أو غيّر إلى مزود يدعم الرؤية.';
+        }
+        else if (allInvalidKey) {
+            msg += ' مفتاح API لخدمات الرؤية غير صحيح. تحقق من مفاتيح API في الإعدادات.';
+        }
+        else if (allRateLimit) {
+            msg += ' جميع نماذج الرؤية المتاحة وصلت إلى الحد اليومي أو معدّل الاستخدام. جرّب بعد قليل أو جرّب مزود رؤية آخر.';
+        }
+        else if (allTimeout) {
+            msg += ' لم تستجب نماذج الرؤية خلال المهلة الزمنية. قد تكون الشبكة بطيئة أو المزود غير متاح. جرّب بعد قليل.';
+        }
+        else if (allUnavailable) {
+            msg += ' نماذج الرؤية المتاحة غير متوفرة حاليًا. جرّب بعد قليل.';
+        }
+        else {
+            msg += ' جميع محاولات نماذج الرؤية فشلت.';
+        }
         if (debug && failures.length > 0) {
-            msg += '\n\nجرّبت ' + failures.length + ' نماذج رؤية:\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason).join('\n');
+            msg += '\n\nنماذج الرؤية التي جرّبت:\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason).join('\n');
         }
         return msg;
     }
-    let msg = 'I couldn\'t analyze the image right now because the available vision models are unavailable or quota-limited. Try again later or switch to Gemini/OpenRouter Vision.';
+    let msg = 'I couldn\'t analyze the image.';
+    if (failures.length === 0) {
+        msg += ' No vision-capable models are configured. Configure Gemini, OpenRouter Vision, or switch to a vision-capable provider.';
+    }
+    else if (allInvalidKey) {
+        msg += ' The API key for the vision services is invalid. Check your API keys in settings.';
+    }
+    else if (allRateLimit) {
+        msg += ' All available vision models are rate-limited or quota-exhausted. Try again later or try a different vision provider.';
+    }
+    else if (allTimeout) {
+        msg += ' The vision models did not respond within the timeout. The network may be slow or the provider unavailable. Try again shortly.';
+    }
+    else if (allUnavailable) {
+        msg += ' The available vision models are currently unavailable. Try again later.';
+    }
+    else {
+        msg += ' All vision model attempts failed.';
+    }
     if (debug && failures.length > 0) {
-        msg += '\n\nTried ' + failures.length + ' vision models:\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason).join('\n');
+        msg += '\n\nTried ' + failures.length + ' vision model(s):\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason).join('\n');
     }
     return msg;
 }
@@ -364,17 +433,22 @@ export async function handleChatStream(req, writeEvent) {
         const visionAvailable = supportsVision(prov, config.currentModel);
         // ── Vision fallback: if images present but current provider not vision-capable ──
         if (hasImages && !visionAvailable) {
+            const imageCount = req.attachments?.filter(a => a.kind === 'image').length || 0;
+            console.log(LOG, `[req:${reqId}] Vision pipeline: taskKind=image_vision, requiredCapability=vision, currentProvider=${prov}, currentModel=${config.currentModel}, providerSupportsVision=${visionAvailable}, imageCount=${imageCount}`);
             if (req.attachments) {
                 for (const att of req.attachments) {
                     if (att.kind === 'image') {
-                        console.log(LOG, `image attachment: ${att.name}, ${att.size}B, hasDataUrl ${!!att.dataUrl}`);
+                        console.log(LOG, `[req:${reqId}] image attachment: ${att.name}, ${att.size}B, hasDataUrl ${!!att.dataUrl}`);
                     }
                 }
             }
             const visionCandidates = getVisionFallbackCandidates(config);
             const failures = [];
             if (visionCandidates.length > 0) {
-                console.log(LOG, `Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)...`);
+                console.log(LOG, `[req:${reqId}] Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)`);
+                for (const vc of visionCandidates) {
+                    console.log(LOG, `[req:${reqId}]   Fallback candidate: ${vc.label}`);
+                }
                 const visionMsgs = buildVisionMessages(req.messages, req.attachments);
                 const fbProjectInfo = getProjectInfo(workingDir);
                 const fbSysPrompt = buildSystemPrompt({
@@ -390,9 +464,10 @@ export async function handleChatStream(req, writeEvent) {
                 }));
                 injectLanguageInstruction(fbMessages);
                 for (const c of visionCandidates) {
-                    const timeoutMs = 10000;
+                    const timeoutMs = 30000;
+                    const attemptStart = Date.now();
                     try {
-                        console.log(LOG, `Trying vision provider: ${c.label}`);
+                        console.log(LOG, `[req:${reqId}] Trying vision provider: ${c.label} (timeout: ${timeoutMs / 1000}s)`);
                         const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel, config);
                         if (client.sendMessageStream) {
                             const response = await withTimeout(client.sendMessageStream(fbMessages, fbSysPrompt, (event) => {
@@ -400,14 +475,16 @@ export async function handleChatStream(req, writeEvent) {
                                     writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
                                 }
                             }), timeoutMs);
-                            console.log(LOG, `Vision fallback succeeded with ${c.label}`);
+                            const duration = Date.now() - attemptStart;
+                            console.log(LOG, `[req:${reqId}] ✅ Vision fallback succeeded with ${c.label} in ${(duration / 1000).toFixed(1)}s`);
                             writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls })}\n\n`);
                             return;
                         }
                         else {
                             const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
+                            const duration = Date.now() - attemptStart;
                             if (result.message) {
-                                console.log(LOG, `Vision fallback succeeded with ${c.label}`);
+                                console.log(LOG, `[req:${reqId}] ✅ Vision fallback succeeded with ${c.label} in ${(duration / 1000).toFixed(1)}s`);
                                 writeEvent(`data: ${JSON.stringify({ type: 'token', text: result.message })}\n\n`);
                                 writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: result.message, toolCalls: result.toolCalls })}\n\n`);
                                 return;
@@ -416,6 +493,7 @@ export async function handleChatStream(req, writeEvent) {
                     }
                     catch (err) {
                         const e = err;
+                        const duration = Date.now() - attemptStart;
                         const cat = categorizeError(e.message || '');
                         let reasonStr;
                         if (cat === 'rate_limit')
@@ -433,7 +511,7 @@ export async function handleChatStream(req, writeEvent) {
                         else
                             reasonStr = 'failed';
                         failures.push({ label: c.label, reason: reasonStr });
-                        console.log(LOG, `Vision fallback failed with ${c.label}: ${e.message?.slice(0, 100)}`);
+                        console.log(LOG, `[req:${reqId}] ❌ Vision fallback failed with ${c.label}: ${e.message?.slice(0, 160)} (${(duration / 1000).toFixed(1)}s)`);
                     }
                 }
             }
@@ -441,6 +519,7 @@ export async function handleChatStream(req, writeEvent) {
             const userLastMsg = req.messages.filter(m => m.role === 'user').pop()?.content || '';
             const lang = getResponseLanguage(userLastMsg);
             const errorText = getVisionFallbackErrorMessage(lang, failures, !!config.debug);
+            console.log(LOG, `[req:${reqId}] All ${failures.length} vision fallback(s) failed`);
             writeEvent(`data: ${JSON.stringify({ type: 'token', text: errorText })}\n\n`);
             writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: errorText, toolCalls: [] })}\n\n`);
             return;
@@ -504,6 +583,11 @@ export async function handleChatStream(req, writeEvent) {
         const simpleMode = !projectDecision.projectMode && (isSimpleQuestion(streamLastContent) || taskKind === 'simple_chat');
         timer.stop('classification');
         console.log(LOG, `[req:${reqId}] task=${taskKind} projectMode=${projectDecision.projectMode} reason=${projectDecision.reason} simple=${simpleMode}`);
+        // ── Agentic plan for complex tasks ─────────────
+        const plan = generatePlan(streamLastContent, taskKind);
+        if (plan) {
+            writeEvent(`data: ${JSON.stringify({ type: 'plan', plan })}\n\n`);
+        }
         // ── Capability question detection ────────────────
         const capLastMsg = messages[messages.length - 1];
         const capContent = typeof capLastMsg?.content === 'string' ? capLastMsg.content : '';
@@ -577,6 +661,8 @@ export async function handleChatStream(req, writeEvent) {
         // ── Timing log ──
         timer.stop('total');
         const timingReport = timer.report();
+        timingReport.capability = supportsVision(prov, config.currentModel) || hasImageAttachments(req.attachments) ? 'vision' : 'text';
+        timingReport.routing_mode = 'api';
         if (config.debug) {
             console.log(LOG, `[timing] classification=${timingReport.classification}ms, project_scan=${timingReport.project_scan}ms, context_select=${timingReport.context_select}ms, total=${timingReport.total}ms`);
         }
@@ -585,6 +671,10 @@ export async function handleChatStream(req, writeEvent) {
                 writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
             }
         });
+        // ── Plan execution state tracking ──────────
+        let currentPlan = plan ? clonePlan(plan) : null;
+        const filesTouched = [];
+        let commandsRun = 0;
         // ── YOLO tool continuation loop (streaming) ──
         let steps = 0;
         let streamMessages = [...messages];
@@ -601,7 +691,37 @@ export async function handleChatStream(req, writeEvent) {
                 console.log(LOG, `[req:${reqId}] YOLO stream tool loop step ${steps}/${MAX_TOOL_STEPS}: ${autoTools.length} tools`);
             }
             writeEvent(`data: ${JSON.stringify({ type: 'tool_result', step: steps, total: autoTools.length, status: 'executing' })}\n\n`);
+            // ── Update plan state: mark inferred step running ──
+            if (currentPlan) {
+                for (const tc of autoTools) {
+                    const idx = inferStepFromToolCall(tc.type, tc.params, currentPlan);
+                    if (idx >= 0) {
+                        currentPlan = markStepRunning(currentPlan, idx);
+                        writeEvent(`data: ${JSON.stringify({ type: 'plan_update', plan: currentPlan, stepIndex: idx, status: 'running' })}\n\n`);
+                    }
+                    if (tc.type === 'read_file' && tc.params.filePath) {
+                        filesTouched.push(tc.params.filePath);
+                    }
+                    if (tc.type === 'execute_command') {
+                        commandsRun++;
+                    }
+                }
+            }
             const { results } = await executeToolCalls(autoTools, true);
+            // ── Update plan state: mark step done ──
+            if (currentPlan) {
+                for (let i = 0; i < autoTools.length; i++) {
+                    const tc = autoTools[i];
+                    const idx = inferStepFromToolCall(tc.type, tc.params, currentPlan);
+                    if (idx >= 0) {
+                        const resultText = results[i] || '';
+                        currentPlan = resultText.includes('Error:') || resultText.includes('Failed:')
+                            ? markStepFailed(currentPlan, idx)
+                            : markStepDone(currentPlan, idx);
+                        writeEvent(`data: ${JSON.stringify({ type: 'plan_update', plan: currentPlan, stepIndex: idx, status: currentPlan.steps[idx].status })}\n\n`);
+                    }
+                }
+            }
             const feedText = response.message
                 ? `${response.message}\n\nTool results:\n${formatToolResults(autoTools, results)}`
                 : `Tool results:\n${formatToolResults(autoTools, results)}`;
@@ -613,7 +733,8 @@ export async function handleChatStream(req, writeEvent) {
                 }
             });
         }
-        writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls, timing: timingReport })}\n\n`);
+        const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun) : undefined;
+        writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls, timing: timingReport, plan: currentPlan, planReport })}\n\n`);
     }
     catch (err) {
         const e = err;
@@ -739,17 +860,22 @@ export async function handleChat(req) {
         const visionAvailable = supportsVision(prov, config.currentModel);
         // ── Vision fallback: if images present but current provider not vision-capable ──
         if (hasImages && !visionAvailable) {
+            const imageCount = req.attachments?.filter(a => a.kind === 'image').length || 0;
+            console.log(LOG, `[req:${reqId}] Vision pipeline: taskKind=image_vision, requiredCapability=vision, currentProvider=${prov}, currentModel=${config.currentModel}, providerSupportsVision=${visionAvailable}, imageCount=${imageCount}`);
             if (req.attachments) {
                 for (const att of req.attachments) {
                     if (att.kind === 'image') {
-                        console.log(LOG, `image attachment: ${att.name}, ${att.size}B, hasDataUrl ${!!att.dataUrl}`);
+                        console.log(LOG, `[req:${reqId}] image attachment: ${att.name}, ${att.size}B, hasDataUrl ${!!att.dataUrl}`);
                     }
                 }
             }
             const visionCandidates = getVisionFallbackCandidates(config);
             const failures = [];
             if (visionCandidates.length > 0) {
-                console.log(LOG, `Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)...`);
+                console.log(LOG, `[req:${reqId}] Current provider ${prov} not vision-capable, trying ${visionCandidates.length} vision-capable fallback(s)`);
+                for (const vc of visionCandidates) {
+                    console.log(LOG, `[req:${reqId}]   Fallback candidate: ${vc.label}`);
+                }
                 const visionMsgs = buildVisionMessages(req.messages, req.attachments);
                 const fbProjectInfo = getProjectInfo(workingDir);
                 const fbSysPrompt = buildSystemPrompt({
@@ -765,13 +891,15 @@ export async function handleChat(req) {
                 }));
                 injectLanguageInstruction(fbMessages);
                 for (const c of visionCandidates) {
-                    const timeoutMs = 10000;
+                    const timeoutMs = 30000;
+                    const attemptStart = Date.now();
                     try {
-                        console.log(LOG, `Trying vision provider: ${c.label}`);
+                        console.log(LOG, `[req:${reqId}] Trying vision provider: ${c.label} (timeout: ${timeoutMs / 1000}s)`);
                         const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel, config);
                         const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
+                        const duration = Date.now() - attemptStart;
                         if (result.message) {
-                            console.log(LOG, `Vision fallback succeeded with ${c.label}`);
+                            console.log(LOG, `[req:${reqId}] ✅ Vision fallback succeeded with ${c.label} in ${(duration / 1000).toFixed(1)}s`);
                             return {
                                 message: result.message,
                                 toolCalls: result.toolCalls,
@@ -782,6 +910,7 @@ export async function handleChat(req) {
                     }
                     catch (err) {
                         const e = err;
+                        const duration = Date.now() - attemptStart;
                         const cat = categorizeError(e.message || '');
                         let reasonStr;
                         if (cat === 'rate_limit')
@@ -799,7 +928,7 @@ export async function handleChat(req) {
                         else
                             reasonStr = 'failed';
                         failures.push({ label: c.label, reason: reasonStr });
-                        console.log(LOG, `Vision fallback failed with ${c.label}: ${e.message?.slice(0, 100)}`);
+                        console.log(LOG, `[req:${reqId}] ❌ Vision fallback failed with ${c.label}: ${e.message?.slice(0, 160)} (${(duration / 1000).toFixed(1)}s)`);
                     }
                 }
             }
@@ -807,6 +936,7 @@ export async function handleChat(req) {
             const userLastMsg = req.messages.filter(m => m.role === 'user').pop()?.content || '';
             const lang = getResponseLanguage(userLastMsg);
             const msg = getVisionFallbackErrorMessage(lang, failures, !!config.debug);
+            console.log(LOG, `[req:${reqId}] All ${failures.length} vision fallback(s) failed`);
             return { message: msg, toolCalls: [] };
         }
         // Inject attachment text content as context before the user's question
@@ -864,6 +994,8 @@ export async function handleChat(req) {
         const isSimpleQ = !projectDecision.projectMode && (isSimpleQuestion(lastContent) || taskKind === 'simple_chat');
         timer.stop('classification');
         console.log(LOG, `[req:${reqId}] task=${taskKind} projectMode=${projectDecision.projectMode} reason=${projectDecision.reason} simple=${isSimpleQ} projectQuery=${isProjectQuery}`);
+        // ── Agentic plan for complex tasks ─────────────
+        const plan = generatePlan(lastContent, taskKind);
         // ── Capability question detection ────────────────
         const capLastMsg = messages[messages.length - 1];
         const capContent = typeof capLastMsg?.content === 'string' ? capLastMsg.content : '';
@@ -916,8 +1048,14 @@ export async function handleChat(req) {
             /^(?:where\s+can\s+(?:I|we)\s+(?:watch|find|get)\s+)/i,
             /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
             /^(?:ابحث\s+(?:لي\s+)?عن\s+)(.+)/i,
+            /^(?:ابحث\s+(?:عنه|عنها|عنهم|عنك))(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
+            /^(?:دور\s+(?:عليها|عليه|عليهم|عليك))(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
+            /^(?:شوف|فتش)\s+(?:عليها|عليه|عليهم|عليك)(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
+            /^(?:دور|فتش)\s+(?:في\s+)?(?:غوغل|جوجل)\s+(?:عن\s+)?(.+)/i,
+            /^(?:شوف|فتش)\s+(?:في\s+)?(?:النت|الانترنت|الإنترنت)\s+(?:عن\s+)?(.+)/i,
+            /^(?:هات\s+مصادر|أعطني\s+روابط|اعطني\s+روابط|هات\s+روابط)(?:\s+(?:عن|حول)\s+(.+))?/i,
             /^(?:اعطني|أعطني)\s+(?:مصادر|معلومة)\s+(?:عن|حول)\s+(.+)/i,
-            /^(?:مصادر)\s+(?:عن|حول)\s+(.+)/i,
+            /^(?:مصادر\s+|روابط\s+)(?:عن|حول)\s+(.+)/i,
             /^(?:آخر\s+أخبار\s+)(.+)/i,
             /^(?:هل\s+هذا\s+صحيح\s+(?:الآن|حاليا|حالياً)?)/i,
             /^(?:ما\s+هو\s+(?:آخر|أحدث)\s+)/i,
@@ -1052,9 +1190,14 @@ export async function handleChat(req) {
         // ── Timing log ──
         timer.stop('total');
         const timingReport = timer.report();
+        timingReport.capability = isModelVisionCapable(config.currentModel) || hasImageAttachments(req.attachments) ? 'vision' : 'text';
+        timingReport.routing_mode = 'api';
         if (config.debug) {
             console.log(LOG, `[timing] classification=${timingReport.classification}ms, project_scan=${timingReport.project_scan}ms, context_select=${timingReport.context_select}ms, total=${timingReport.total}ms`);
         }
+        let currentPlan = plan ? clonePlan(plan) : null;
+        const filesTouched = [];
+        let commandsRun = 0;
         console.log(LOG, `Sending ${messages.length} messages to provider`);
         let response = await client.sendMessage(messages, perQueryPrompt);
         console.log(LOG, 'Provider response received successfully');
@@ -1074,7 +1217,35 @@ export async function handleChat(req) {
             if (config.debug) {
                 console.log(LOG, `[req:${reqId}] YOLO tool loop step ${steps}/${MAX_TOOL_STEPS}: ${autoTools.length} tools`);
             }
+            // ── Update plan state: mark inferred step running ──
+            if (currentPlan) {
+                for (const tc of autoTools) {
+                    const idx = inferStepFromToolCall(tc.type, tc.params, currentPlan);
+                    if (idx >= 0) {
+                        currentPlan = markStepRunning(currentPlan, idx);
+                    }
+                    if (tc.type === 'read_file' && tc.params.filePath) {
+                        filesTouched.push(tc.params.filePath);
+                    }
+                    if (tc.type === 'execute_command') {
+                        commandsRun++;
+                    }
+                }
+            }
             const { results } = await executeToolCalls(autoTools, true);
+            // ── Update plan state: mark step done ──
+            if (currentPlan) {
+                for (let i = 0; i < autoTools.length; i++) {
+                    const tc = autoTools[i];
+                    const idx = inferStepFromToolCall(tc.type, tc.params, currentPlan);
+                    if (idx >= 0) {
+                        const resultText = results[i] || '';
+                        currentPlan = resultText.includes('Error:') || resultText.includes('Failed:')
+                            ? markStepFailed(currentPlan, idx)
+                            : markStepDone(currentPlan, idx);
+                    }
+                }
+            }
             const feedText = response.message
                 ? `${response.message}\n\nTool results:\n${formatToolResults(autoTools, results)}`
                 : `Tool results:\n${formatToolResults(autoTools, results)}`;
@@ -1085,6 +1256,7 @@ export async function handleChat(req) {
         if (response.toolCalls.length > 0 && steps > 0) {
             console.log(LOG, `[req:${reqId}] Tool loop stopped after ${steps} steps, ${response.toolCalls.length} remaining tools`);
         }
+        const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun) : undefined;
         const fbEvents = getFallbackEvents();
         const fallbackEvents = fbEvents.map(e => e.reason);
         const actualProvider = getLastSuccessfulProvider();
@@ -1095,6 +1267,8 @@ export async function handleChat(req) {
                 type: tc.type,
                 params: tc.params,
             })),
+            plan: currentPlan || plan || undefined,
+            planReport,
             fallbackEvents: fallbackEvents.length > 0 ? fallbackEvents : undefined,
             provider: actualProvider ? (PROVIDER_DEFAULTS[actualProvider]?.label || actualProvider) : (PROVIDER_DEFAULTS[prov]?.label || prov),
             model: actualModel || config.currentModel,

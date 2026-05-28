@@ -14,6 +14,8 @@ import { getSettings, updateSettings, updateAgentMode } from './config/settings.
 import { createClient, createSingleClient } from './ai/client.js';
 import type { AIClient, Message, ToolCall, AIResponse, ToolType, StreamEvent } from './ai/types.js';
 import { classifyTask } from './ai/task-classifier.js';
+import { generatePlan, shouldPlanFor } from './ai/planner.js';
+import { clonePlan, markStepRunning, markStepDone, markStepFailed, inferStepFromToolCall, buildFinalReport } from './ai/planner.js';
 import { shouldInjectProjectContext, getAvailableFallbackProviders, getSuggestedFallbackAction } from './ai/provider-policy.js';
 import { buildProjectTree, getProjectInfo, invalidateCache } from './context/builder.js';
 import type { ProjectInfo } from './context/builder.js';
@@ -2184,6 +2186,25 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false, debugTim
     const taskKind = classifyTask([{ role: 'user', content: trimmed }]);
     timer?.stop('task_classification');
 
+    // ── Agentic plan for complex tasks ──────────────
+    const plan = generatePlan(trimmed, taskKind);
+    let currentPlan = plan ? clonePlan(plan) : null;
+    const planFilesTouched: string[] = [];
+    let planCommandsRun = 0;
+    if (plan) {
+      console.log('');
+      console.log(pc.bold(pc.cyan('  📋 Plan:')));
+      console.log(pc.dim(`  Goal: ${pc.white(plan.goal)}`));
+      console.log(pc.dim(`  Risk: ${plan.riskLevel === 'high' ? pc.red(plan.riskLevel) : plan.riskLevel === 'medium' ? pc.yellow(plan.riskLevel) : pc.green(plan.riskLevel)}`));
+      if (plan.files.length > 0) {
+        console.log(pc.dim(`  Files: ${pc.white(plan.files.join(', '))}`));
+      }
+      plan.steps.forEach((step, i) => {
+        console.log(pc.dim(`    ${i + 1}. ○ ${step.description}`));
+      });
+      console.log('');
+    }
+
     // ── Project mode routing ──────────────────────
     const projectDecision = decideProjectMode(trimmed, true, taskKind);
     const isSimpleQ = isSimpleQuestion(trimmed) && !projectDecision.projectMode || taskKind === 'simple_chat';
@@ -2223,8 +2244,14 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false, debugTim
       /^(?:how\s+(?:much|many)\s+(?:is|are|does)\s+)/i,
       /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
       /^(?:ابحث\s+(?:لي\s+)?عن\s+)(.+)/i,
+      /^(?:ابحث\s+(?:عنه|عنها|عنهم|عنك))(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
+      /^(?:دور\s+(?:عليها|عليه|عليهم|عليك))(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
+      /^(?:شوف|فتش)\s+(?:عليها|عليه|عليهم|عليك)(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
+      /^(?:دور|فتش)\s+(?:في\s+)?(?:غوغل|جوجل)\s+(?:عن\s+)?(.+)/i,
+      /^(?:شوف|فتش)\s+(?:في\s+)?(?:النت|الانترنت|الإنترنت)\s+(?:عن\s+)?(.+)/i,
+      /^(?:هات\s+مصادر|أعطني\s+روابط|اعطني\s+روابط|هات\s+روابط)(?:\s+(?:عن|حول)\s+(.+))?/i,
       /^(?:اعطني|أعطني)\s+(?:مصادر|معلومة)\s+(?:عن|حول)\s+(.+)/i,
-      /^(?:مصادر)\s+(?:عن|حول)\s+(.+)/i,
+      /^(?:مصادر\s+|روابط\s+)(?:عن|حول)\s+(.+)/i,
       /^(?:آخر\s+أخبار\s+)(.+)/i,
       /^(?:هل\s+هذا\s+صحيح\s+(?:الآن|حاليا|حالياً)?)/i,
       /^(?:ما\s+هو\s+(?:آخر|أحدث)\s+)/i,
@@ -2701,7 +2728,36 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false, debugTim
       const toolResults: string[] = [];
       for (const toolCall of response.toolCalls) {
         const toolTimer = timer ? new Timer() : undefined;
+
+        // ── Plan: mark step running ──
+        let planStepIdx = -1;
+        if (currentPlan) {
+          planStepIdx = inferStepFromToolCall(toolCall.type, toolCall.params, currentPlan);
+          if (planStepIdx >= 0) {
+            currentPlan = markStepRunning(currentPlan, planStepIdx);
+            const step = currentPlan.steps[planStepIdx];
+            console.log(pc.cyan(`  ▶ ${step.description}`));
+          }
+          if (toolCall.type === 'read_file' && toolCall.params.filePath) {
+            planFilesTouched.push(toolCall.params.filePath);
+          }
+          if (toolCall.type === 'execute_command') {
+            planCommandsRun++;
+          }
+        }
+
         const result = await handleToolCall(toolCall, yoloMode, !!config.debug, toolTimer, workingDir);
+
+        // ── Plan: mark step done/failed ──
+        if (currentPlan && planStepIdx >= 0) {
+          const isError = result.includes('Error:') || result.includes('Failed:') || result.includes('✗');
+          currentPlan = isError
+            ? markStepFailed(currentPlan, planStepIdx)
+            : markStepDone(currentPlan, planStepIdx);
+          const icon = isError ? '✗' : '✓';
+          const color = isError ? pc.red : pc.green;
+          console.log(color(`  ${icon} ${currentPlan.steps[planStepIdx].description}`));
+        }
         if (debugTiming && toolTimer) {
           console.log(pc.dim(toolTimer.table(`tool.${toolCall.type}`)));
         }
@@ -2824,6 +2880,20 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false, debugTim
 
     if (steps >= MAX_STEPS && lastResponse?.toolCalls.length && lastResponse?.toolCalls.length > 0) {
       console.log(pc.dim('  (Reached max analysis steps. Type "continue" to keep going.)\n'));
+    }
+
+    // ── Plan final report ──
+    if (currentPlan) {
+      const report = buildFinalReport(currentPlan, [...new Set(planFilesTouched)], planCommandsRun);
+      const statusIcon = report.finalStatus === 'completed' ? '✓' : report.finalStatus === 'failed' ? '✗' : '◌';
+      const statusColor = report.finalStatus === 'completed' ? pc.green : report.finalStatus === 'failed' ? pc.red : pc.yellow;
+      console.log('');
+      console.log(pc.bold(pc.cyan('  📊 Plan Report:')));
+      console.log(pc.dim(`  ${statusIcon} Status: ${statusColor(report.finalStatus)}`));
+      console.log(pc.dim(`  Steps: ${report.completedSteps}/${report.totalSteps} completed, ${report.failedSteps} failed`));
+      if (report.filesTouched.length > 0) console.log(pc.dim(`  Files touched: ${pc.white(report.filesTouched.join(', '))}`));
+      if (report.commandsRun > 0) console.log(pc.dim(`  Commands run: ${report.commandsRun}`));
+      console.log('');
     }
 
     // Message was handled - show context token count

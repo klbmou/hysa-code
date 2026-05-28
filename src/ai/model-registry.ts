@@ -23,6 +23,7 @@ const MODEL_REGISTRY: ModelCapability[] = [
   { provider: 'openai_router', model: 'deepseek/deepseek-chat', label: 'OpenAI Router / deepseek/deepseek-chat', capabilities: ['coding_qa', 'long_reasoning', 'general_qa'], priority: 'balanced' },
   { provider: 'openai_router', model: 'openai/gpt-4o-mini', label: 'OpenAI Router / openai/gpt-4o-mini', capabilities: ['general_qa', 'simple_chat', 'unknown'], priority: 'fast' },
   { provider: 'openai_router', model: 'cc/claude-sonnet-4-6', label: 'OpenAI Router / cc/claude-sonnet-4-6', capabilities: ['long_reasoning', 'code_edit', 'coding_qa'], priority: 'stronger' },
+  { provider: 'openai_router', model: 'openai/gpt-4o-mini', label: 'OpenAI Router / openai/gpt-4o-mini', capabilities: ['general_qa', 'simple_chat', 'unknown', 'image_vision'], priority: 'fast' },
 
   // ── openrouter models ──
   { provider: 'openrouter', model: 'qwen/qwen3-coder:free', label: 'OpenRouter / qwen/qwen3-coder:free', capabilities: ['simple_chat', 'general_qa', 'coding_qa'], priority: 'fast' },
@@ -32,6 +33,8 @@ const MODEL_REGISTRY: ModelCapability[] = [
   { provider: 'openrouter', model: 'deepseek/deepseek-chat', label: 'OpenRouter / deepseek/deepseek-chat', capabilities: ['coding_qa', 'long_reasoning', 'general_qa'], priority: 'balanced' },
   { provider: 'openrouter', model: 'google/gemini-2.5-flash', label: 'OpenRouter / google/gemini-2.5-flash', capabilities: ['general_qa', 'coding_qa', 'long_reasoning', 'image_vision'], priority: 'balanced' },
   { provider: 'openrouter', model: 'openrouter/free', label: 'OpenRouter / openrouter/free', capabilities: ['general_qa', 'simple_chat'], priority: 'fallback' },
+  { provider: 'openrouter', model: 'qwen/qwen2.5-vl-72b-instruct:free', label: 'OpenRouter / qwen2.5-vl-72b-instruct:free', capabilities: ['general_qa', 'image_vision'], priority: 'balanced' },
+  { provider: 'openrouter', model: 'qwen/qwen-vl-plus', label: 'OpenRouter / qwen-vl-plus', capabilities: ['general_qa', 'image_vision'], priority: 'balanced' },
 
   // ── gemini ──
   { provider: 'gemini', model: 'gemini-2.5-flash', label: 'Gemini / gemini-2.5-flash', capabilities: ['general_qa', 'coding_qa', 'simple_chat', 'long_reasoning', 'image_vision'], priority: 'balanced' },
@@ -49,7 +52,7 @@ const MODEL_REGISTRY: ModelCapability[] = [
   { provider: 'opencode_zen', model: 'big-pickle', label: 'OpenCode Zen / big-pickle', capabilities: ['general_qa', 'coding_qa', 'simple_chat', 'long_reasoning'], priority: 'balanced' },
 
   // ── anthropic_proxy ──
-  { provider: 'anthropic_proxy', model: 'claude-3-5-sonnet-latest', label: 'Anthropic Proxy / claude-3-5-sonnet-latest', capabilities: ['coding_qa', 'code_edit', 'long_reasoning', 'general_qa'], priority: 'stronger' },
+  { provider: 'anthropic_proxy', model: 'claude-3-5-sonnet-latest', label: 'Anthropic Proxy / claude-3-5-sonnet-latest', capabilities: ['coding_qa', 'code_edit', 'long_reasoning', 'general_qa', 'image_vision'], priority: 'stronger' },
   { provider: 'anthropic_proxy', model: 'claude-3-haiku-latest', label: 'Anthropic Proxy / claude-3-haiku-latest', capabilities: ['general_qa', 'simple_chat', 'coding_qa'], priority: 'fast' },
 
   // ── experimental ──
@@ -69,7 +72,7 @@ const TASK_PRIORITY_ORDER: Record<string, string[]> = {
   project_scan: ['stronger', 'balanced', 'fast', 'fallback'],
   web_research: ['balanced', 'fast', 'fallback'],
   long_reasoning: ['stronger', 'balanced', 'fast', 'fallback'],
-  image_vision: ['balanced', 'fast'],
+  image_vision: ['balanced', 'fast', 'stronger', 'fallback'],
   browser_task: ['fast'],
   skill_task: ['balanced', 'fast', 'fallback'],
   unknown: ['balanced', 'fast', 'fallback'],

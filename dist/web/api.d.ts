@@ -1,4 +1,5 @@
 import type { HysaConfig } from '../config/keys.js';
+import type { ExecutionPlan, PlanReport } from '../ai/planner.js';
 interface AttachmentPayload {
     name: string;
     ext: string;
@@ -20,6 +21,8 @@ interface ChatResult {
         type: string;
         params: Record<string, string>;
     }[];
+    plan?: ExecutionPlan;
+    planReport?: PlanReport;
     error?: string;
     hint?: string;
     fallbackEvents?: string[];

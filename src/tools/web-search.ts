@@ -247,7 +247,9 @@ export function formatSearchResults(query: string, results: SearchResult[]): str
   output += 'Instructions:\n';
   output += '- Use these results to answer.\n';
   output += '- Cite URLs naturally.\n';
-  output += '- If results are insufficient, say so.\n';
+  output += '- For each source, include: the title, the URL, and a 1-2 line summary of what it says.\n';
+  output += '- If results are insufficient or no reliable result was found, say so clearly.\n';
   output += '- Match the user\'s language.\n';
+  output += '- CRITICAL: Do NOT claim you searched the web unless these actual results are present.\n';
   return output.trim();
 }

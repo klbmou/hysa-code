@@ -137,6 +137,9 @@ export function isEntityFollowUpQuery(message) {
         return true;
     if (/^ما\s+هو\s+(هذا|هذه)/i.test(trimmed))
         return true;
+    // Arabic search follow-up: "ابحث عنها" (search for it), "دور عليه" (look for it)
+    if (/^(?:ابحث|دور|شوف|فتش)\s+(?:عنه|عنها|عنهم|عنك|عليه|عليها|عليهم|عليك)/i.test(trimmed))
+        return true;
     return false;
 }
 const PRONOUNS = new Set([

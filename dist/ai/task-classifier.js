@@ -18,7 +18,13 @@ const SEARCH_PATTERNS = [
     /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
     /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+)/i,
     /^(?:ابحث\s+(?:لي\s+)?عن\s+)/i,
+    /^(?:ابحث\s+)(?:عنه|عنها|عنهم|عنك)(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?/i,
+    /^(?:دور|شوف|فتش)\s+(?:عليها|عليه|عليهم|عليك)(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?/i,
+    /^(?:دور|فتش)\s+(?:في\s+)?(?:غوغل|جوجل|النت|الانترنت|الإنترنت)\s+/i,
+    /^(?:شوف|فتش)\s+(?:في\s+)?(?:النت|الانترنت|الإنترنت)(?:\s+|$)/i,
+    /^(?:هات\s+مصادر|أعطني\s+روابط|اعطني\s+روابط|هات\s+روابط)(?:\s+|$)/i,
     /^(?:اعطني|أعطني)\s+(?:مصادر|معلومة)\s+(?:عن|حول)\s+/i,
+    /^(?:مصادر\s+|روابط\s+)(?:عن|حول)\s+/i,
     /^(?:آخر\s+أخبار\s+)/i,
     /^(?:من\s+أين\s+أتيت\s+)/i,
     /^(?:هل\s+هذه\s+المعلومة\s+محدثة)/i,
@@ -33,6 +39,12 @@ export function classifyTask(messages, attachments) {
     const lastUser = [...messages].reverse().find(m => m.role === 'user');
     if (!lastUser)
         return 'unknown';
+    // Detect image content from array-format messages (when classifyTask is called without attachments)
+    if (Array.isArray(lastUser.content)) {
+        const hasImage = lastUser.content.some((p) => p.type === 'image_url' && p.image_url?.url);
+        if (hasImage)
+            return 'image_vision';
+    }
     const raw = typeof lastUser.content === 'string' ? lastUser.content : '';
     const text = raw.trim();
     if (!text)
@@ -41,6 +53,11 @@ export function classifyTask(messages, attachments) {
         return 'browser_task';
     if (/^\/skill\s/i.test(text) || /^@skill\s/i.test(text))
         return 'skill_task';
+    // Arabic image/video analysis prompts (no \b — word boundary does not work with Arabic in JS)
+    if (/^(?:ما\s+هذا|ما\s+هذه)$/i.test(text) ||
+        /^(?:اشرح|شرح|حلل|وصف|صِف|اقرأ|اقرا|شوف|تعرف)\s+(?:لي\s+)?(?:هذه|هذا|الصورة|الصوره|الشكل|الرسم)/i.test(text)) {
+        return 'image_vision';
+    }
     if (isGreeting(text))
         return 'simple_chat';
     if (isWebSearchQuery(text))

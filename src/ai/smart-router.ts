@@ -229,6 +229,12 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
       const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const fbEvents = getFallbackEvents();
 
+      // Vision-specific error
+      if (taskKind === 'image_vision') {
+        const visionHint = 'Could not analyze the image because all vision-capable models are unavailable, rate-limited, or quota-exhausted. Try again later, or configure a vision-capable provider (Gemini, OpenRouter Vision, OpenAI, or Anthropic).';
+        throw new Error(`${visionHint} Tried ${attempts.length} vision model(s) after ${totalElapsed}s.`);
+      }
+
       if (debug && fbEvents.length > 0) {
         console.log(`${LOG}[req:${reqId}] All ${attempts.length} attempts failed after ${totalElapsed}s. Tried:`);
         for (const e of fbEvents) {

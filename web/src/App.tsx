@@ -9,6 +9,7 @@ import HysaIntro from './components/HysaIntro.js';
 import ToolEvent from './components/ToolEvent.js';
 import DiffCard from './components/DiffCard.js';
 import CommandCard from './components/CommandCard.js';
+import PlanCard from './components/PlanCard.js';
 import StatusBar from './components/StatusBar.js';
 
 const TIMEOUT_MS = 30000;
@@ -33,6 +34,7 @@ interface TimingData {
   total?: number;
   tool_steps?: number;
   routing_mode?: string;
+  capability?: string;
   project_mode?: boolean;
   files_selected?: number;
 }
@@ -61,6 +63,7 @@ type ChatItem = {
 } & (
   | { kind: 'user_msg'; content: string; attachments?: Attachment[] }
   | { kind: 'ai_msg'; content: string }
+  | { kind: 'plan_card'; plan: any; currentStep?: number }
   | { kind: 'tool_event'; eventType: 'read' | 'edit' | 'done' | 'run' | 'error' | 'fallback'; message: string }
   | { kind: 'diff_card'; filePath: string; content: string; diff: string }
   | { kind: 'command_card'; command: string; toolCall?: ToolCall }
@@ -457,11 +460,33 @@ export default function App() {
                     setChatItems(prev => [...prev, resultItem]);
                   } else if (event.type === 'fallback' && debug) {
                     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
+                  } else if (event.type === 'plan') {
+                    setChatItems(prev => [...prev, { id: nextId(), kind: 'plan_card', plan: event.plan }]);
+                  } else if (event.type === 'plan_update') {
+                    setChatItems(prev => {
+                      const idx = prev.length - 1;
+                      for (let i = prev.length - 1; i >= 0; i--) {
+                        if (prev[i].kind === 'plan_card') {
+                          return prev.map((item, j) => j === i ? { ...item, plan: event.plan, currentStep: event.stepIndex } : item);
+                        }
+                      }
+                      return prev;
+                    });
                   } else if (event.type === 'done') {
                     streamDone = true;
                     accumulatedText = event.fullText || accumulatedText;
                     finalToolCalls = event.toolCalls || [];
                     if (event.timing) setTimingData(event.timing);
+                    if (event.plan) {
+                      setChatItems(prev => {
+                        for (let i = prev.length - 1; i >= 0; i--) {
+                          if (prev[i].kind === 'plan_card') {
+                            return prev.map((item, j) => j === i ? { ...item, plan: event.plan } : item);
+                          }
+                        }
+                        return [...prev, { id: nextId(), kind: 'plan_card', plan: event.plan }];
+                      });
+                    }
                   } else if (event.type === 'error') {
                     streamError = event.message || '';
                   }
@@ -482,11 +507,32 @@ export default function App() {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_result', content: event.results || '' }]);
               } else if (event.type === 'fallback' && debug) {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
+              } else if (event.type === 'plan') {
+                setChatItems(prev => [...prev, { id: nextId(), kind: 'plan_card', plan: event.plan }]);
+              } else if (event.type === 'plan_update') {
+                setChatItems(prev => {
+                  for (let i = prev.length - 1; i >= 0; i--) {
+                    if (prev[i].kind === 'plan_card') {
+                      return prev.map((item, j) => j === i ? { ...item, plan: event.plan, currentStep: event.stepIndex } : item);
+                    }
+                  }
+                  return prev;
+                });
               } else if (event.type === 'done') {
                 streamDone = true;
                 accumulatedText = event.fullText || accumulatedText;
                 finalToolCalls = event.toolCalls || [];
                 if (event.timing) setTimingData(event.timing);
+                if (event.plan) {
+                  setChatItems(prev => {
+                    for (let i = prev.length - 1; i >= 0; i--) {
+                      if (prev[i].kind === 'plan_card') {
+                        return prev.map((item, j) => j === i ? { ...item, plan: event.plan } : item);
+                      }
+                    }
+                    return [...prev, { id: nextId(), kind: 'plan_card', plan: event.plan }];
+                  });
+                }
               } else if (event.type === 'error') {
                 streamError = event.message || '';
               }
@@ -596,6 +642,10 @@ export default function App() {
         for (const event of data.fallbackEvents) {
           newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event });
         }
+      }
+
+      if (data.plan) {
+        newItems.push({ id: nextId(), kind: 'plan_card', plan: data.plan });
       }
 
       if (assistantText) {
@@ -830,6 +880,9 @@ export default function App() {
                         />
                       );
                     }
+                    if (item.kind === 'plan_card') {
+                      return <PlanCard key={item.id} plan={item.plan} currentStep={item.currentStep} />;
+                    }
                     if (item.kind === 'tool_result') {
                       return (
                         <div className="tool-result" key={item.id}>
@@ -881,6 +934,7 @@ export default function App() {
                 </div>
                 <div className="timing-grid">
                   {timingData.routing_mode !== undefined && <div className="timing-row"><span className="timing-label">Routing mode</span><span className="timing-value">{timingData.routing_mode}</span></div>}
+                  {timingData.capability !== undefined && <div className="timing-row"><span className="timing-label">Capability</span><span className="timing-value">{timingData.capability}</span></div>}
                   {timingData.project_mode !== undefined && <div className="timing-row"><span className="timing-label">Project mode</span><span className="timing-value">{String(timingData.project_mode)}</span></div>}
                   {timingData.files_selected !== undefined && <div className="timing-row"><span className="timing-label">Files selected</span><span className="timing-value">{timingData.files_selected}</span></div>}
                   {timingData.tool_steps !== undefined && <div className="timing-row"><span className="timing-label">Tool steps</span><span className="timing-value">{timingData.tool_steps}</span></div>}

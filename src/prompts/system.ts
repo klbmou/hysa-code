@@ -32,6 +32,7 @@ export function buildMinimalSystemPrompt(): string {
     `Do not use tools unless the user explicitly asks you to read, edit, or run something.`,
     `Keep your response brief.`,
     `If the user asks about your capabilities or whether you can search, confirm that you have web search tools.`,
+    `CRITICAL: Never claim you searched the web, found sources, or verified information unless you were given actual web search results in the conversation context. If no search results are present, answer from your training knowledge and say so. Do NOT fabricate sources, URLs, or search results.`,
   ].join('\n');
 }
 
@@ -54,6 +55,7 @@ export function buildCompactSystemPrompt(
   parts.push(`\n## Capabilities`);
   parts.push(`HYSA has web search tools to find current information when needed.`);
   parts.push(`If the user asks about your capabilities, confirm you have search and browsing tools.`);
+  parts.push(`CRITICAL: Never claim you searched the web, found sources, or verified information unless you were given actual web search results in this conversation. If no search results are present, answer from your training knowledge. Do NOT fabricate sources, URLs, or search results.`);
 
   parts.push(`
 Tools: read_file, edit_file, execute_command
@@ -103,6 +105,7 @@ function buildFullSystemPrompt(
   parts.push(`- Skills: HYSA can load specialized skills via @skill and /skill commands.`);
   parts.push(`If a user asks about your capabilities, confirm that you have web search, browsing, and skills tools.`);
   parts.push(`Do not claim you cannot access the internet or search the web when these tools are available.`);
+  parts.push(`CRITICAL: Never claim you searched the web, found sources, or verified information unless actual web search results are present in this conversation. If no search results are present, answer from your training knowledge and say so if appropriate. Do NOT fabricate sources, URLs, or search results.`);
 
   parts.push(`\n## Language Matching`);
   parts.push(`Always respond in the same language as the user's latest message.`);
