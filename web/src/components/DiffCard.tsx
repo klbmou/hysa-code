@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 
 interface DiffCardProps {
   filePath: string;
@@ -10,9 +10,33 @@ interface DiffCardProps {
   onComplete?: (ok: boolean) => void;
 }
 
+function CopyIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12"></polyline>
+    </svg>
+  );
+}
+
 export default function DiffCard({ filePath, diff, content, onApply, onOpenFile, yolo, onComplete }: DiffCardProps) {
   const [result, setResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [applying, setApplying] = useState(false);
+  const [diffCopied, setDiffCopied] = useState(false);
+
+  const handleCopyDiff = useCallback(() => {
+    navigator.clipboard.writeText(diff).catch(() => {});
+    setDiffCopied(true);
+    setTimeout(() => setDiffCopied(false), 2000);
+  }, [diff]);
 
   const handleApply = async () => {
     setApplying(true);
@@ -40,6 +64,9 @@ export default function DiffCard({ filePath, diff, content, onApply, onOpenFile,
       <div className="diff-card-inner">
         <div className="diff-card-header">
           <span>{filePath}</span>
+          <button className={`diff-copy-btn${diffCopied ? ' copied' : ''}`} onClick={handleCopyDiff} title="Copy diff">
+            {diffCopied ? <CheckIcon /> : <CopyIcon />}
+          </button>
           {yolo && !result && <span className="diff-yolo-badge">YOLO: needs approval</span>}
         </div>
         <div className="diff-card-body">

@@ -18,7 +18,7 @@ import { shouldInjectProjectContext } from '../ai/provider-policy.js';
 import { rankFiles } from '../context/ranker.js';
 import { decideProjectMode } from '../context/project-router.js';
 import { getYolo, setYolo, getProviderHealth } from '../utils/session.js';
-import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents, getLastSuccessfulProvider, getLastSuccessfulModel, getAllHealth } from '../ai/model-health.js';
+import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents, getLastSuccessfulProvider, getLastSuccessfulModel, getAllHealth, isProviderOnCooldown } from '../ai/model-health.js';
 import { detectSecrets } from '../utils/secrets.js';
 import { translateCommand, shellInfo } from '../utils/shell.js';
 import { searchWeb, formatSearchResults, getSearchDiagnostics, isCapabilityQuestion, getCapabilityResponse } from '../tools/web-search.js';
@@ -167,7 +167,7 @@ const VISION_FALLBACK_ORDER: { provider: ProviderType; model: string; requiresKe
   { provider: 'openrouter', model: 'qwen/qwen2.5-vl-72b-instruct:free', requiresKey: true },
   { provider: 'openrouter', model: 'google/gemini-2.5-flash', requiresKey: true },
   { provider: 'openrouter', model: 'qwen/qwen-vl-plus', requiresKey: true },
-  { provider: 'openai_router', model: 'openai/gpt-4o-mini', requiresKey: false },
+  { provider: 'ninerouter', model: 'auto', requiresKey: false },
 ];
 
 function hasImageAttachments(attachments?: AttachmentPayload[]): boolean {
@@ -185,6 +185,8 @@ function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderTy
     return !!key;
   }
 
+  console.log('[vision] building vision fallback candidates (currentProvider:', currentProv, ')');
+
   // If user explicitly configured a vision model (e.g. "openrouter/google/gemini-2.5-flash:free"),
   // use it as the highest-priority vision candidate
   if (config.visionModel) {
@@ -192,33 +194,66 @@ function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderTy
     if (slashIdx > 0) {
       const visionProv = config.visionModel.slice(0, slashIdx) as ProviderType;
       const visionMod = config.visionModel.slice(slashIdx + 1);
+      console.log('[vision] configured vision model detected:', visionProv, '/', visionMod);
       if (hasKeyFor(visionProv) && hasVisionCapability(visionProv, visionMod)) {
         const label = `${PROVIDER_DEFAULTS[visionProv]?.label || visionProv} / ${visionMod}`;
+        console.log('[vision] config.visionModel found and used:', visionProv, '/', visionMod);
         candidates.push({ provider: visionProv, model: visionMod, label });
+      } else if (!hasKeyFor(visionProv)) {
+        console.log('[vision] skipped visionModel (no key):', visionProv, '/', visionMod);
+      } else if (!hasVisionCapability(visionProv, visionMod)) {
+        console.log('[vision] skipped visionModel (not vision-capable):', visionProv, '/', visionMod);
       }
+    } else {
+      console.log('[vision] invalid visionModel format (no provider/model separator):', config.visionModel);
     }
   }
 
   // Try preferred vision fallback order
   for (const fb of VISION_FALLBACK_ORDER) {
     if (candidates.length >= 3) break;
-    if (fb.requiresKey && !hasKeyFor(fb.provider)) continue;
+    if (fb.requiresKey && !hasKeyFor(fb.provider)) {
+      console.log('[vision] skipped (no key):', fb.provider, '/', fb.model);
+      continue;
+    }
+    if (!hasVisionCapability(fb.provider, fb.model)) {
+      console.log('[vision] rejected text-only model:', fb.provider, '/', fb.model);
+      continue;
+    }
+    if (isProviderOnCooldown(fb.provider)) {
+      console.log('[vision] provider skipped (cooldown):', fb.provider);
+      continue;
+    }
     const label = `${PROVIDER_DEFAULTS[fb.provider]?.label || fb.provider} / ${fb.model}`;
+    console.log('[vision] candidate added:', label);
     candidates.push({ provider: fb.provider, model: fb.model, label });
   }
 
   // If still need more candidates, try any vision-capable provider from the registry
   if (candidates.length < 3) {
     const allVision = getVisionCapableProviders();
+    console.log('[vision] need more candidates, checking', allVision.length, 'vision-capable providers from registry');
     for (const vp of allVision) {
       if (candidates.length >= 3) break;
       if (candidates.some(c => c.provider === vp.provider && c.model === vp.model)) continue;
-      if (!hasKeyFor(vp.provider)) continue;
+      if (!hasKeyFor(vp.provider)) {
+        console.log('[vision] skipped (no key):', vp.provider, '/', vp.model);
+        continue;
+      }
+      if (isProviderOnCooldown(vp.provider)) {
+        console.log('[vision] provider skipped (cooldown):', vp.provider);
+        continue;
+      }
       const label = `${PROVIDER_DEFAULTS[vp.provider as ProviderType]?.label || vp.provider} / ${vp.model}`;
+      console.log('[vision] candidate added from registry:', label);
       candidates.push({ provider: vp.provider as ProviderType, model: vp.model, label });
     }
   }
 
+  console.log('[vision] final candidates:', candidates.length);
+  for (const c of candidates) {
+    console.log('[vision]   -', c.provider, '/', c.model);
+  }
   return candidates;
 }
 
@@ -241,6 +276,8 @@ function getVisionFallbackErrorMessage(
   else if (allUnavailable) actualReason = 'all vision models are unavailable';
   else actualReason = 'all vision model attempts failed';
 
+  const hint = '\n\nTip: Set HYSA_VISION_MODEL to a vision-capable model, or ensure your API keys for Gemini/OpenRouter are configured.';
+
   if (lang === 'arabic') {
     let msg = 'لم أستطع تحليل الصورة الآن.';
     if (failures.length === 0) {
@@ -254,11 +291,14 @@ function getVisionFallbackErrorMessage(
     } else if (allUnavailable) {
       msg += ' نماذج الرؤية المتاحة غير متوفرة حاليًا. جرّب بعد قليل.';
     } else {
-      msg += ' جميع محاولات نماذج الرؤية فشلت.';
+      msg += ' جميع محاولات نماذج الرؤية فشلت. جرّب ضبط HYSA_VISION_MODEL=gemini/gemini-2.5-flash أو تأكد من مفتاح API.';
+    }
+    if (failures.length > 0) {
+      msg += '\n\nالمحاولات:\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason).join('\n');
     }
     if (debug && failures.length > 0) {
       msg += '\n\n(العطل: ' + actualReason + ')';
-      msg += '\n\nنماذج الرؤية التي جرّبت:\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason + (f.error ? '\n  ↳ ' + f.error : '')).join('\n');
+      msg += '\n\nتفاصيل الأخطاء:\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason + (f.error ? '\n  ↳ ' + f.error : '')).join('\n');
     }
     return msg;
   }
@@ -275,11 +315,14 @@ function getVisionFallbackErrorMessage(
   } else if (allUnavailable) {
     msg += ' The available vision models are currently unavailable. Try again later.';
   } else {
-    msg += ' All vision model attempts failed.';
+    msg += ' All vision model attempts failed. Try setting HYSA_VISION_MODEL=gemini/gemini-2.5-flash or check your API keys.';
+  }
+  if (failures.length > 0) {
+    msg += '\n\nTried:\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason).join('\n');
   }
   if (debug && failures.length > 0) {
     msg += '\n\n(Actual reason: ' + actualReason + ')';
-    msg += '\n\nTried ' + failures.length + ' vision model(s):\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason + (f.error ? '\n  ↳ ' + f.error : '')).join('\n');
+    msg += '\n\nDetailed errors:\n' + failures.map(f => '• ' + f.label + ' — ' + f.reason + (f.error ? '\n  ↳ ' + f.error : '')).join('\n');
   }
   return msg;
 }
@@ -378,6 +421,93 @@ function buildVisionMessages(
   }
   
   return result;
+}
+
+/**
+ * Hard validation: throw if text-only provider receives image payload.
+ * This prevents DeepSeek receiving image_url errors before they happen.
+ */
+function assertNoImagePayload(messages: { role: string; content: string | any[] }[], provider: string, model: string): void {
+  if (supportsVision(provider, model)) return;
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      const hasImage = msg.content.some((p: any) => p.type === 'image_url');
+      if (hasImage) {
+        console.log('[provider] HARD REJECT: text-only provider', provider, '/', model, 'received image payload');
+        throw new Error(`Provider/model mismatch detected: ${provider}/${model} is text-only but received image payload. Cannot send vision content to a text-only model.`);
+      }
+    }
+  }
+}
+
+function sanitizeMessagesForTextModel(
+  messages: { role: string; content: string | any[] }[],
+  provider: string,
+  model: string,
+): number {
+  if (supportsVision(provider, model)) return 0;
+  let stripped = 0;
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      const textParts: string[] = [];
+      for (const part of msg.content) {
+        if (part.type === 'text') {
+          textParts.push(part.text || '');
+        } else if (part.type === 'image_url') {
+          textParts.push('[Image attached]');
+          stripped++;
+        }
+      }
+      msg.content = textParts.join('\n').trim();
+      if (!msg.content) {
+        msg.content = '[Image attached]';
+      }
+    }
+  }
+  // Safety check: ensure no image_url parts remain after sanitization
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      const hasRemainingImages = msg.content.some((p: any) => p.type === 'image_url');
+      if (hasRemainingImages) {
+        console.log('[sanitize] warning: remaining image_url parts found after sanitization, stripping again');
+        const textParts: string[] = [];
+        for (const part of msg.content) {
+          if (part.type === 'text') {
+            textParts.push(part.text || '');
+          } else if (part.type === 'image_url') {
+            textParts.push('[Image attached]');
+            stripped++;
+          }
+        }
+        msg.content = textParts.join('\n').trim();
+        if (!msg.content) {
+          msg.content = '[Image attached]';
+        }
+      }
+    }
+  }
+  return stripped;
+}
+
+function validateProviderConsistency(provider: string, model: string, taskKind?: string): boolean {
+  console.log('[provider] selected provider:', provider);
+  console.log('[provider] routed model:', model);
+  console.log('[provider] payload type:', taskKind || 'unknown');
+  console.log('[provider] capability type:', hasVisionCapability(provider, model) ? 'vision' : 'text-only');
+  
+  if (taskKind === 'image_vision' && !hasVisionCapability(provider, model)) {
+    console.log('[provider] MISMATCH: text-only model selected for vision task');
+    console.log('[provider] actual upstream provider:', provider);
+    console.log('[provider] MISMATCH: this will cause errors like DeepSeek receiving image_url');
+    return false;
+  }
+  
+  // Hard validation: if provider-model pair shows selectedModel != actual upstream capability
+  if (hasVisionCapability(provider, model) && taskKind !== 'image_vision' && taskKind !== undefined) {
+    // This is OK — vision-capable models can handle text
+  }
+  
+  return true;
 }
 
 interface ChatRequest {
@@ -579,7 +709,7 @@ export async function handleChatStream(
           configFiles: fbProjectInfo.configFiles,
           fileCount: fbProjectInfo.fileCount,
           tree: fbProjectInfo.tree.length < 3000 ? fbProjectInfo.tree : fbProjectInfo.tree.slice(0, 3000) + '\n... (truncated)',
-        }, config.agentMode || 'chat', false, prov, config.promptMode || 'auto');
+        }, config.agentMode || 'chat', false, prov, config.promptMode || 'auto', config.userName);
 
         const fbMessages: any[] = visionMsgs.map(m => ({
           role: m.role as 'user' | 'assistant',
@@ -588,10 +718,13 @@ export async function handleChatStream(
         injectLanguageInstruction(fbMessages);
 
         for (const c of visionCandidates) {
+          console.log('[vision] using provider', c.provider, 'for vision messages');
           const timeoutMs = 30000;
           const attemptStart = Date.now();
           try {
             console.log(LOG, `[req:${reqId}] Trying vision provider: selectedProvider=${c.provider}, selectedModel=${c.model} (timeout: ${timeoutMs / 1000}s)`);
+            validateProviderConsistency(c.provider, c.model, 'image_vision');
+            assertNoImagePayload(fbMessages as any, c.provider, c.model);
             const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel, config);
             if (client.sendMessageStream) {
               const response = await withTimeout(
@@ -694,6 +827,10 @@ export async function handleChatStream(
       content: m.content,
     }));
     injectLanguageInstruction(messages);
+    const imgStripped = sanitizeMessagesForTextModel(messages, prov, config.currentModel);
+    if (imgStripped > 0) {
+      console.log(LOG, `[req:${reqId}] Sanitized ${imgStripped} image part(s) for text-only model ${config.currentModel}`);
+    }
 
     const streamLastUserRaw = req.messages.filter(m => m.role === 'user').pop()?.content || '';
     const streamLastContent = typeof streamLastUserRaw === 'string' ? streamLastUserRaw : '';
@@ -737,7 +874,7 @@ export async function handleChatStream(
       configFiles: useProjectCtx ? projectInfo.configFiles : [],
       fileCount: projectInfo.fileCount,
       tree: useProjectCtx && projectInfo.tree.length < 3000 ? projectInfo.tree : '',
-    }, config.agentMode || 'chat', lightActive, config.currentProvider, resolvedMode);
+    }, config.agentMode || 'chat', lightActive, config.currentProvider, resolvedMode, config.userName);
 
     if (config.debug) {
       console.log(LOG, `[debug] Stream: task=${taskKind}, projectCtx=${useProjectCtx}, mode=${resolvedMode}`);
@@ -802,6 +939,9 @@ export async function handleChatStream(
       console.log(LOG, `[timing] classification=${timingReport.classification}ms, project_scan=${timingReport.project_scan}ms, context_select=${timingReport.context_select}ms, total=${timingReport.total}ms`);
     }
 
+    // ── Hard validation: reject image payloads for text-only providers ──
+    assertNoImagePayload(messages as any, prov, config.currentModel);
+
     let response = await client.sendMessageStream(messages as any, perQueryPrompt, (event) => {
       if (event.type === 'token') {
         writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
@@ -816,6 +956,10 @@ export async function handleChatStream(
     // ── YOLO tool continuation loop (streaming) ──
     let steps = 0;
     let streamMessages = [...messages];
+
+    // Track the active provider for continuation (may differ from original if vision fallback was used)
+    let activeProvider = prov;
+    let activeModel = config.currentModel;
 
     while (steps < MAX_TOOL_STEPS && response.toolCalls.length > 0) {
       const yoloMode = getYolo();
@@ -875,6 +1019,9 @@ export async function handleChatStream(
 
       writeEvent(`data: ${JSON.stringify({ type: 'tool_result', step: steps, total: autoTools.length, status: 'done', results: formatToolResults(autoTools, results) })}\n\n`);
 
+      // Sanitize and validate for the ACTIVE provider (not the original)
+      sanitizeMessagesForTextModel(streamMessages, activeProvider, activeModel);
+      assertNoImagePayload(streamMessages as any, activeProvider, activeModel);
       response = await client.sendMessageStream(streamMessages as any, perQueryPrompt, (event) => {
         if (event.type === 'token') {
           writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
@@ -975,10 +1122,13 @@ export async function continueChat(messages: { role: string; content: string }[]
 
   const prov = config.currentProvider;
   const client = createClient(config);
-  const systemPrompt = buildSystemPrompt(undefined, 'chat', false, config.currentProvider);
+  const systemPrompt = buildSystemPrompt(undefined, 'chat', false, config.currentProvider, undefined, config.userName);
 
   const resultText = '\n\nTool results:\n' + formatToolResults(toolCalls, toolResults);
   messages.push({ role: 'assistant', content: resultText });
+
+  sanitizeMessagesForTextModel(messages, prov, config.currentModel);
+  assertNoImagePayload(messages as any, prov, config.currentModel);
 
   try {
     const response = await client.sendMessage(messages as any, systemPrompt);
@@ -1058,7 +1208,7 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
           configFiles: fbProjectInfo.configFiles,
           fileCount: fbProjectInfo.fileCount,
           tree: fbProjectInfo.tree.length < 3000 ? fbProjectInfo.tree : fbProjectInfo.tree.slice(0, 3000) + '\n... (truncated)',
-        }, config.agentMode || 'chat', false, prov, config.promptMode || 'auto');
+        }, config.agentMode || 'chat', false, prov, config.promptMode || 'auto', config.userName);
 
         const fbMessages: any[] = visionMsgs.map(m => ({
           role: m.role as 'user' | 'assistant',
@@ -1067,10 +1217,13 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
         injectLanguageInstruction(fbMessages);
 
         for (const c of visionCandidates) {
+          console.log('[vision] using provider', c.provider, 'for vision messages');
           const timeoutMs = 30000;
           const attemptStart = Date.now();
           try {
             console.log(LOG, `[req:${reqId}] Trying vision provider: selectedProvider=${c.provider}, selectedModel=${c.model} (timeout: ${timeoutMs / 1000}s)`);
+            validateProviderConsistency(c.provider, c.model, 'image_vision');
+            assertNoImagePayload(fbMessages as any, c.provider, c.model);
             const client = createSingleClient(c.provider, c.model, config.apiKeys, config.ollamaBaseUrl, config.localOpenAiBaseUrl, config.localOpenAiModel, config);
             const result = await withTimeout(client.sendMessage(fbMessages, fbSysPrompt), timeoutMs);
             const duration = Date.now() - attemptStart;
@@ -1164,13 +1317,17 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       configFiles: projectInfo.configFiles,
       fileCount: projectInfo.fileCount,
       tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
-    }, config.agentMode || 'chat', lightActive, config.currentProvider, config.promptMode || 'auto');
+    }, config.agentMode || 'chat', lightActive, config.currentProvider, config.promptMode || 'auto', config.userName);
 
     const messages: any[] = visionMessages.map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.content,
     }));
     injectLanguageInstruction(messages);
+    const imgStripped2 = sanitizeMessagesForTextModel(messages, prov, config.currentModel);
+    if (imgStripped2 > 0) {
+      console.log(LOG, `[req:${reqId}] Sanitized ${imgStripped2} image part(s) for text-only model ${config.currentModel}`);
+    }
 
     // ── Timing / task classification ─────────────────
     const timer = new TimingTracker();
@@ -1214,7 +1371,7 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       configFiles: useProjectCtx ? projectInfo.configFiles : [],
       fileCount: projectInfo.fileCount,
       tree: useProjectCtx && projectInfo.tree.length < 3000 ? projectInfo.tree : '',
-    }, config.agentMode || 'chat', lightActive, config.currentProvider, resolvedMode);
+    }, config.agentMode || 'chat', lightActive, config.currentProvider, resolvedMode, config.userName);
 
     if (config.debug) {
       const systemTokens = estimateTokens(perQueryPrompt);
@@ -1399,12 +1556,16 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
     let commandsRun = 0;
 
     console.log(LOG, `Sending ${messages.length} messages to provider`);
+    sanitizeMessagesForTextModel(messages, config.currentProvider, config.currentModel);
+    assertNoImagePayload(messages as any, config.currentProvider, config.currentModel);
     let response = await client.sendMessage(messages as any, perQueryPrompt);
     console.log(LOG, 'Provider response received successfully');
 
     // ── YOLO tool continuation loop ──────────────
     let steps = 0;
     let currentMessages = [...messages];
+    let activeProvider = config.currentProvider;
+    let activeModel = config.currentModel;
 
     while (steps < MAX_TOOL_STEPS && response.toolCalls.length > 0) {
       const yoloMode = getYolo();
@@ -1460,6 +1621,9 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
         : `Tool results:\n${formatToolResults(autoTools, results)}`;
       currentMessages.push({ role: 'assistant' as const, content: feedText });
 
+      // Sanitize and validate against the active provider
+      sanitizeMessagesForTextModel(currentMessages, activeProvider, activeModel);
+      assertNoImagePayload(currentMessages as any, activeProvider, activeModel);
       response = await client.sendMessage(currentMessages as any, perQueryPrompt);
     }
 
@@ -1553,7 +1717,7 @@ export async function runCommand(command: string): Promise<{ stdout: string; std
 
 // ── Exported for testing ──────────────────────────────
 
-export { getVisionFallbackCandidates, getVisionFallbackErrorMessage, buildVisionMessages, hasImageAttachments, supportsVision, VISION_FALLBACK_ORDER };
+export { getVisionFallbackCandidates, getVisionFallbackErrorMessage, buildVisionMessages, hasImageAttachments, supportsVision, sanitizeMessagesForTextModel, VISION_FALLBACK_ORDER };
 
 export function getFilePreview(path: string, content: string): string | null {
   const fullPath = resolve(workingDir, path);

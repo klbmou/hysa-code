@@ -1,5 +1,5 @@
 import type { AgentMode } from '../agent/types.js';
-export type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'openrouter' | 'groq' | 'deepseek' | 'local_openai' | 'opencode_zen' | 'pollinations' | 'llm7' | 'puter' | 'hysa_ai' | 'anthropic_proxy' | 'openai_router';
+export type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'openrouter' | 'groq' | 'deepseek' | 'local_openai' | 'opencode_zen' | 'pollinations' | 'llm7' | 'puter' | 'hysa_ai' | 'anthropic_proxy' | 'openai_router' | 'ninerouter';
 export type ProviderCategory = 'local_free' | 'cloud_free' | 'premium_api' | 'experimental_free';
 export interface HysaConfig {
     currentProvider: ProviderType;
@@ -18,6 +18,7 @@ export interface HysaConfig {
         hysa_ai?: string;
         anthropic_proxy?: string;
         openai_router?: string;
+        ninerouter?: string;
     };
     ollamaBaseUrl: string;
     localOpenAiBaseUrl?: string;
@@ -27,6 +28,8 @@ export interface HysaConfig {
     anthropicProxyModel?: string;
     openaiRouterBaseUrl?: string;
     openaiRouterModel?: string;
+    ninerouterBaseUrl?: string;
+    ninerouterModel?: string;
     allowExperimentalProviders?: boolean;
     experimentalConfirmed?: boolean;
     enableLocalFallback?: boolean;
@@ -36,6 +39,7 @@ export interface HysaConfig {
     promptMode?: 'full' | 'compact' | 'minimal' | 'auto';
     textModel?: string;
     visionModel?: string;
+    userName?: string;
 }
 export declare const PROVIDER_CATEGORIES: Record<ProviderType, ProviderCategory>;
 export declare const PROVIDER_CATEGORY_LABELS: Record<ProviderCategory, string>;

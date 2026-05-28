@@ -7,7 +7,7 @@ import type { AgentMode } from '../agent/types.js';
 const CONFIG_DIR = join(homedir(), '.hysa');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
 
-export type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'openrouter' | 'groq' | 'deepseek' | 'local_openai' | 'opencode_zen' | 'pollinations' | 'llm7' | 'puter' | 'hysa_ai' | 'anthropic_proxy' | 'openai_router';
+export type ProviderType = 'anthropic' | 'openai' | 'gemini' | 'ollama' | 'openrouter' | 'groq' | 'deepseek' | 'local_openai' | 'opencode_zen' | 'pollinations' | 'llm7' | 'puter' | 'hysa_ai' | 'anthropic_proxy' | 'openai_router' | 'ninerouter';
 
 export type ProviderCategory = 'local_free' | 'cloud_free' | 'premium_api' | 'experimental_free';
 
@@ -28,6 +28,7 @@ export interface HysaConfig {
     hysa_ai?: string;
     anthropic_proxy?: string;
     openai_router?: string;
+    ninerouter?: string;
   };
   ollamaBaseUrl: string;
   localOpenAiBaseUrl?: string;
@@ -37,6 +38,8 @@ export interface HysaConfig {
   anthropicProxyModel?: string;
   openaiRouterBaseUrl?: string;
   openaiRouterModel?: string;
+  ninerouterBaseUrl?: string;
+  ninerouterModel?: string;
   allowExperimentalProviders?: boolean;
   experimentalConfirmed?: boolean;
   enableLocalFallback?: boolean;
@@ -46,6 +49,7 @@ export interface HysaConfig {
   promptMode?: 'full' | 'compact' | 'minimal' | 'auto';
   textModel?: string;
   visionModel?: string;
+  userName?: string;
 }
 
 export const PROVIDER_CATEGORIES: Record<ProviderType, ProviderCategory> = {
@@ -64,6 +68,7 @@ export const PROVIDER_CATEGORIES: Record<ProviderType, ProviderCategory> = {
   hysa_ai: 'local_free',
   anthropic_proxy: 'cloud_free',
   openai_router: 'cloud_free',
+  ninerouter: 'cloud_free',
 };
 
 export const PROVIDER_CATEGORY_LABELS: Record<ProviderCategory, string> = {
@@ -89,6 +94,7 @@ export const PROVIDER_DEFAULTS: Record<ProviderType, { model: string; label: str
   hysa_ai: { model: 'hysa-coder-lite', label: 'HYSA AI' },
   anthropic_proxy: { model: 'claude-3-5-sonnet-latest', label: 'Anthropic Proxy' },
   openai_router: { model: 'gpt-4o-mini', label: 'OpenAI Router' },
+  ninerouter: { model: 'auto', label: '9Router' },
 };
 
 export const PROVIDER_MODELS: Record<ProviderType, string[]> = {
@@ -130,6 +136,7 @@ export const PROVIDER_MODELS: Record<ProviderType, string[]> = {
   hysa_ai: ['hysa-coder-lite', 'hysa-coder', 'hysa-fast'],
   anthropic_proxy: ['claude-3-5-sonnet-latest', 'claude-3-opus-latest', 'claude-3-haiku-latest'],
   openai_router: ['qw/qwen3-coder-flash', 'oc/deepseek-v4-flash-free', 'qw/qwen3-coder-plus', 'oc/nemotron-3-super-free', 'deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'cc/claude-sonnet-4-6'],
+  ninerouter: ['auto'],
 };
 
 export type ProviderTier = 'free_api' | 'local_free' | 'premium_api' | 'experimental_free';
@@ -150,6 +157,7 @@ export const PROVIDER_TIERS: Record<ProviderType, ProviderTier> = {
   hysa_ai: 'local_free',
   anthropic_proxy: 'free_api',
   openai_router: 'free_api',
+  ninerouter: 'free_api',
 };
 
 export const TIER_LABELS: Record<ProviderTier, { icon: string; label: string }> = {
@@ -175,6 +183,7 @@ export const PROVIDER_DESCRIPTIONS: Record<ProviderType, string> = {
   hysa_ai: 'Your own local/free provider. Uses HYSA Provider server, which uses Ollama. No external paid API required.',
   anthropic_proxy: 'Connect to any Anthropic-compatible proxy endpoint. Requires base URL. API key optional.',
   openai_router: 'Connect to any OpenAI-compatible router/proxy (e.g. 9router). Requires base URL. API key optional.',
+  ninerouter: '9Router — OpenAI-compatible gateway with auto-model selection. Default: http://localhost:20128. API key optional.',
 };
 
 export const PROVIDER_SIGNUP_URLS: Record<ProviderType, string> = {
@@ -193,15 +202,16 @@ export const PROVIDER_SIGNUP_URLS: Record<ProviderType, string> = {
   hysa_ai: '',
   anthropic_proxy: '',
   openai_router: '',
+  ninerouter: '',
 };
 
-export const FREE_API_PROVIDERS: ProviderType[] = ['opencode_zen', 'openrouter', 'groq', 'gemini', 'deepseek', 'anthropic_proxy', 'openai_router'];
+export const FREE_API_PROVIDERS: ProviderType[] = ['opencode_zen', 'openrouter', 'groq', 'gemini', 'deepseek', 'anthropic_proxy', 'openai_router', 'ninerouter'];
 
 export const PREMIUM_API_PROVIDERS: ProviderType[] = ['anthropic', 'openai'];
 
 export const LOCAL_FREE_PROVIDERS: ProviderType[] = ['ollama', 'local_openai', 'hysa_ai'];
 
-export const CLOUD_FREE_PROVIDERS: ProviderType[] = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini', 'anthropic_proxy', 'openai_router'];
+export const CLOUD_FREE_PROVIDERS: ProviderType[] = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini', 'anthropic_proxy', 'openai_router', 'ninerouter'];
 
 export const EXPERIMENTAL_FREE_PROVIDERS: ProviderType[] = ['pollinations', 'llm7', 'puter'];
 
@@ -218,7 +228,7 @@ export function providerNeedsApiKey(provider: ProviderType): boolean {
 }
 
 export function providerHasOptionalApiKey(provider: ProviderType): boolean {
-  return provider === 'llm7' || provider === 'pollinations' || provider === 'puter' || provider === 'anthropic_proxy' || provider === 'openai_router';
+  return provider === 'llm7' || provider === 'pollinations' || provider === 'puter' || provider === 'anthropic_proxy' || provider === 'openai_router' || provider === 'ninerouter';
 }
 
 function isLocalProvider(provider: ProviderType): boolean {
@@ -309,6 +319,19 @@ function applyEnvOverrides(config: HysaConfig): void {
   if (process.env.HYSA_ENABLE_LOCAL_FALLBACK !== undefined) {
     config.enableLocalFallback = isLocalFallbackEnabled(config);
   }
+  const nrUrl = process.env.NINEROUTER_URL;
+  if (nrUrl) {
+    config.ninerouterBaseUrl = nrUrl.replace(/\/+$/, '');
+  }
+  const nrKey = process.env.NINEROUTER_API_KEY;
+  if (nrKey) {
+    config.apiKeys.ninerouter = nrKey.trim();
+  }
+  const nrModel = process.env.NINEROUTER_MODEL;
+  if (nrModel) {
+    config.ninerouterModel = nrModel.trim();
+  }
+
   if (process.env.HYSA_TEXT_MODEL) {
     config.textModel = process.env.HYSA_TEXT_MODEL.trim();
   }
@@ -321,6 +344,7 @@ export function getDefaultProviderFromEnv(): string | null {
   const fromEnv = process.env.HYSA_DEFAULT_PROVIDER;
   if (fromEnv) return fromEnv;
   if (process.env.HYSA_OPENAI_ROUTER_BASE_URL) return 'openai_router';
+  if (process.env.NINEROUTER_URL) return 'ninerouter';
   return null;
 }
 

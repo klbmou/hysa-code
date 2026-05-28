@@ -19,6 +19,7 @@ export const PROVIDER_CATEGORIES = {
     hysa_ai: 'local_free',
     anthropic_proxy: 'cloud_free',
     openai_router: 'cloud_free',
+    ninerouter: 'cloud_free',
 };
 export const PROVIDER_CATEGORY_LABELS = {
     local_free: 'LOCAL FREE',
@@ -42,6 +43,7 @@ export const PROVIDER_DEFAULTS = {
     hysa_ai: { model: 'hysa-coder-lite', label: 'HYSA AI' },
     anthropic_proxy: { model: 'claude-3-5-sonnet-latest', label: 'Anthropic Proxy' },
     openai_router: { model: 'gpt-4o-mini', label: 'OpenAI Router' },
+    ninerouter: { model: 'auto', label: '9Router' },
 };
 export const PROVIDER_MODELS = {
     anthropic: ['claude-sonnet-4-20250514', 'claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'],
@@ -82,6 +84,7 @@ export const PROVIDER_MODELS = {
     hysa_ai: ['hysa-coder-lite', 'hysa-coder', 'hysa-fast'],
     anthropic_proxy: ['claude-3-5-sonnet-latest', 'claude-3-opus-latest', 'claude-3-haiku-latest'],
     openai_router: ['qw/qwen3-coder-flash', 'oc/deepseek-v4-flash-free', 'qw/qwen3-coder-plus', 'oc/nemotron-3-super-free', 'deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'cc/claude-sonnet-4-6'],
+    ninerouter: ['auto'],
 };
 export const PROVIDER_TIERS = {
     anthropic: 'premium_api',
@@ -99,6 +102,7 @@ export const PROVIDER_TIERS = {
     hysa_ai: 'local_free',
     anthropic_proxy: 'free_api',
     openai_router: 'free_api',
+    ninerouter: 'free_api',
 };
 export const TIER_LABELS = {
     free_api: { icon: '☁️', label: 'FREE API KEY' },
@@ -122,6 +126,7 @@ export const PROVIDER_DESCRIPTIONS = {
     hysa_ai: 'Your own local/free provider. Uses HYSA Provider server, which uses Ollama. No external paid API required.',
     anthropic_proxy: 'Connect to any Anthropic-compatible proxy endpoint. Requires base URL. API key optional.',
     openai_router: 'Connect to any OpenAI-compatible router/proxy (e.g. 9router). Requires base URL. API key optional.',
+    ninerouter: '9Router — OpenAI-compatible gateway with auto-model selection. Default: http://localhost:20128. API key optional.',
 };
 export const PROVIDER_SIGNUP_URLS = {
     anthropic: 'https://console.anthropic.com',
@@ -139,11 +144,12 @@ export const PROVIDER_SIGNUP_URLS = {
     hysa_ai: '',
     anthropic_proxy: '',
     openai_router: '',
+    ninerouter: '',
 };
-export const FREE_API_PROVIDERS = ['opencode_zen', 'openrouter', 'groq', 'gemini', 'deepseek', 'anthropic_proxy', 'openai_router'];
+export const FREE_API_PROVIDERS = ['opencode_zen', 'openrouter', 'groq', 'gemini', 'deepseek', 'anthropic_proxy', 'openai_router', 'ninerouter'];
 export const PREMIUM_API_PROVIDERS = ['anthropic', 'openai'];
 export const LOCAL_FREE_PROVIDERS = ['ollama', 'local_openai', 'hysa_ai'];
-export const CLOUD_FREE_PROVIDERS = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini', 'anthropic_proxy', 'openai_router'];
+export const CLOUD_FREE_PROVIDERS = ['opencode_zen', 'openrouter', 'groq', 'deepseek', 'gemini', 'anthropic_proxy', 'openai_router', 'ninerouter'];
 export const EXPERIMENTAL_FREE_PROVIDERS = ['pollinations', 'llm7', 'puter'];
 export const COMPACT_PROMPT_PROVIDERS = ['ollama', 'local_openai', 'hysa_ai', 'pollinations', 'llm7', 'puter'];
 export const EXPERIMENTAL_BASE_URLS = {
@@ -155,7 +161,7 @@ export function providerNeedsApiKey(provider) {
     return !providerHasOptionalApiKey(provider) && !isLocalProvider(provider);
 }
 export function providerHasOptionalApiKey(provider) {
-    return provider === 'llm7' || provider === 'pollinations' || provider === 'puter' || provider === 'anthropic_proxy' || provider === 'openai_router';
+    return provider === 'llm7' || provider === 'pollinations' || provider === 'puter' || provider === 'anthropic_proxy' || provider === 'openai_router' || provider === 'ninerouter';
 }
 function isLocalProvider(provider) {
     return provider === 'ollama' || provider === 'local_openai' || provider === 'hysa_ai';
@@ -239,6 +245,18 @@ function applyEnvOverrides(config) {
     if (process.env.HYSA_ENABLE_LOCAL_FALLBACK !== undefined) {
         config.enableLocalFallback = isLocalFallbackEnabled(config);
     }
+    const nrUrl = process.env.NINEROUTER_URL;
+    if (nrUrl) {
+        config.ninerouterBaseUrl = nrUrl.replace(/\/+$/, '');
+    }
+    const nrKey = process.env.NINEROUTER_API_KEY;
+    if (nrKey) {
+        config.apiKeys.ninerouter = nrKey.trim();
+    }
+    const nrModel = process.env.NINEROUTER_MODEL;
+    if (nrModel) {
+        config.ninerouterModel = nrModel.trim();
+    }
     if (process.env.HYSA_TEXT_MODEL) {
         config.textModel = process.env.HYSA_TEXT_MODEL.trim();
     }
@@ -252,6 +270,8 @@ export function getDefaultProviderFromEnv() {
         return fromEnv;
     if (process.env.HYSA_OPENAI_ROUTER_BASE_URL)
         return 'openai_router';
+    if (process.env.NINEROUTER_URL)
+        return 'ninerouter';
     return null;
 }
 export function normalizeApiKey(key) {

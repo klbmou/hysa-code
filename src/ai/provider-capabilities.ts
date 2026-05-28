@@ -27,8 +27,11 @@ const CAPABILITY_MAP: ProviderModelCapability[] = [
   { provider: 'openrouter', model: 'qwen/qwen2.5-vl-72b-instruct:free', capabilities: ['text', 'code', 'vision', 'free'] },
   { provider: 'openrouter', model: 'qwen/qwen-vl-plus', capabilities: ['text', 'code', 'vision'] },
 
-  // ── OpenAI Router vision models ──
-  { provider: 'openai_router', model: 'openai/gpt-4o-mini', capabilities: ['text', 'code', 'tool_use', 'vision'] },
+  // ── OpenAI Router — vision depends on backend; not guaranteed ──
+  // openai/gpt-4o-mini removed from vision here: router backend may not support vision.
+
+  // ── 9Router — auto model may be vision-capable depending on backend ──
+  { provider: 'ninerouter', model: 'auto', capabilities: ['text', 'code', 'tool_use', 'vision', 'free'] },
 
   // ── Anthropic Proxy vision models ──
   { provider: 'anthropic_proxy', model: 'claude-sonnet-4-6', capabilities: ['text', 'code', 'tool_use', 'vision'] },

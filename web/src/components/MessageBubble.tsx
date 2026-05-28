@@ -1,6 +1,27 @@
 import React, { useState, useCallback } from 'react';
 import type { Attachment } from './Composer.js';
 
+interface SourceLink {
+  domain: string;
+  title: string;
+  url?: string;
+}
+
+function extractSourceLinks(text: string): SourceLink[] {
+  const links: SourceLink[] = [];
+  const urlPattern = /\[([^\]]+)\]\(([^)]+)\)/g;
+  let match;
+  while ((match = urlPattern.exec(text)) !== null) {
+    try {
+      const domain = new URL(match[2]).hostname.replace(/^www\./, '');
+      if (!links.some(l => l.domain === domain && l.title === match[1])) {
+        links.push({ domain, title: match[1], url: match[2] });
+      }
+    } catch { /* skip invalid URLs */ }
+  }
+  return links.slice(0, 5);
+}
+
 interface MessageBubbleProps {
   kind: 'user' | 'assistant';
   content: string;
@@ -11,9 +32,9 @@ interface MessageBubbleProps {
   className?: string;
 }
 
-function isArabic(text: string): boolean {
-  const arabicRange = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
-  return arabicRange.test(text);
+function hasRtlChars(text: string): boolean {
+  const rtlRange = /[\u0590-\u05FF\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/;
+  return rtlRange.test(text);
 }
 
 function formatBytes(bytes: number): string {
@@ -38,50 +59,190 @@ const EXT_LABEL: Record<string, string> = {
 
 function renderMarkdown(text: string): React.ReactNode[] {
   const parts: React.ReactNode[] = [];
-  let remaining = text;
+  const lines = text.split('\n');
+  let i = 0;
 
-  while (remaining.length > 0) {
-    const codeBlockMatch = remaining.match(/```(\w*)\n([\s\S]*?)```/);
-    if (codeBlockMatch && codeBlockMatch.index !== undefined) {
-      if (codeBlockMatch.index > 0) {
-        parts.push(<span key={`t-${parts.length}`} dir="auto">{remaining.slice(0, codeBlockMatch.index)}</span>);
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Code blocks (multi-line)
+    if (line.startsWith('```')) {
+      const lang = line.slice(3).trim();
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith('```')) {
+        codeLines.push(lines[i]);
+        i++;
       }
-      const lang = codeBlockMatch[1] || 'text';
-      const code = codeBlockMatch[2];
+      i++; // skip closing ```
       parts.push(
-        <CodeBlock key={`cb-${parts.length}`} language={lang} code={code} />
+        <CodeBlock key={`cb-${parts.length}`} language={lang || 'text'} code={codeLines.join('\n')} />
       );
-      remaining = remaining.slice(codeBlockMatch.index + codeBlockMatch[0].length);
       continue;
     }
 
+    // Headings
+    const headingMatch = line.match(/^(#{1,4})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const text = headingMatch[2];
+      const Tag = `h${level}` as keyof JSX.IntrinsicElements;
+      parts.push(<Tag key={`h-${parts.length}`} dir="auto">{renderInline(text)}</Tag>);
+      i++;
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^---+\s*$/.test(line) || /^\*\*\*+\s*$/.test(line)) {
+      parts.push(<hr key={`hr-${parts.length}`} className="msg-hr" />);
+      i++;
+      continue;
+    }
+
+    // Unordered list
+    if (/^\s*[\-\*]\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\s*[\-\*]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*[\-\*]\s+/, ''));
+        i++;
+      }
+      parts.push(
+        <ul key={`ul-${parts.length}`} className="msg-list">
+          {items.map((item, idx) => (
+            <li key={idx} dir="auto">{renderInline(item)}</li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    // Ordered list
+    if (/^\s*\d+[.)]\s+/.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*\d+[.)]\s+/, ''));
+        i++;
+      }
+      parts.push(
+        <ol key={`ol-${parts.length}`} className="msg-list">
+          {items.map((item, idx) => (
+            <li key={idx} dir="auto">{renderInline(item)}</li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+
+    // Regular paragraph (collect consecutive non-empty lines)
+    if (line.trim()) {
+      const paragraphLines: string[] = [];
+      while (i < lines.length && lines[i].trim() && !lines[i].startsWith('```') && !/^(#{1,4})\s/.test(lines[i]) && !/^\s*[\-\*]\s+/.test(lines[i]) && !/^\s*\d+[.)]\s+/.test(lines[i])) {
+        paragraphLines.push(lines[i]);
+        i++;
+      }
+      parts.push(
+        <p key={`p-${parts.length}`} className="msg-paragraph" dir="auto">
+          {renderInline(paragraphLines.join('\n'))}
+        </p>
+      );
+      continue;
+    }
+
+    // Empty line
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+
+    i++;
+  }
+
+  return parts;
+}
+
+function renderInline(text: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    // Inline code
     const inlineMatch = remaining.match(/`([^`]+)`/);
     if (inlineMatch && inlineMatch.index !== undefined) {
       if (inlineMatch.index > 0) {
-        parts.push(<span key={`t-${parts.length}`} dir="auto">{remaining.slice(0, inlineMatch.index)}</span>);
+        parts.push(<span key={`t-${parts.length}`}>{remaining.slice(0, inlineMatch.index)}</span>);
       }
       parts.push(<code key={`ic-${parts.length}`} className="msg-inline-code">{inlineMatch[1]}</code>);
       remaining = remaining.slice(inlineMatch.index + inlineMatch[0].length);
       continue;
     }
 
+    // Bold
     const boldMatch = remaining.match(/\*\*([^*]+)\*\*/);
     if (boldMatch && boldMatch.index !== undefined) {
       if (boldMatch.index > 0) {
-        parts.push(<span key={`t-${parts.length}`} dir="auto">{remaining.slice(0, boldMatch.index)}</span>);
+        parts.push(<span key={`t-${parts.length}`}>{remaining.slice(0, boldMatch.index)}</span>);
       }
       parts.push(<strong key={`b-${parts.length}`}>{boldMatch[1]}</strong>);
       remaining = remaining.slice(boldMatch.index + boldMatch[0].length);
       continue;
     }
 
+    // Italic
+    const italicMatch = remaining.match(/(?<!\*)\*([^*]+)\*(?!\*)/);
+    if (italicMatch && italicMatch.index !== undefined) {
+      if (italicMatch.index > 0) {
+        parts.push(<span key={`t-${parts.length}`}>{remaining.slice(0, italicMatch.index)}</span>);
+      }
+      parts.push(<em key={`em-${parts.length}`}>{italicMatch[1]}</em>);
+      remaining = remaining.slice(italicMatch.index + italicMatch[0].length);
+      continue;
+    }
+
+    // Link [text](url) — render as compact citation
+    const linkMatch = remaining.match(/\[([^\]]+)\]\(([^)]+)\)/);
+    if (linkMatch && linkMatch.index !== undefined) {
+      if (linkMatch.index > 0) {
+        parts.push(<span key={`t-${parts.length}`}>{remaining.slice(0, linkMatch.index)}</span>);
+      }
+      try {
+        const domain = new URL(linkMatch[2]).hostname.replace(/^www\./, '');
+        parts.push(
+          <a key={`a-${parts.length}`} href={linkMatch[2]} target="_blank" rel="noopener noreferrer" className="msg-link">
+            {linkMatch[1]}
+            <span className="msg-link-domain">{domain}</span>
+          </a>
+        );
+      } catch {
+        parts.push(<span key={`t-${parts.length}`}>{linkMatch[0]}</span>);
+      }
+      remaining = remaining.slice(linkMatch.index + linkMatch[0].length);
+      continue;
+    }
+
     if (remaining.length > 0) {
-      parts.push(<span key={`t-${parts.length}`} dir="auto">{remaining}</span>);
+      parts.push(<span key={`t-${parts.length}`}>{remaining}</span>);
       break;
     }
   }
 
   return parts;
+}
+
+function CopyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12"></polyline>
+    </svg>
+  );
 }
 
 function CodeBlock({ language, code }: { language: string; code: string }) {
@@ -90,18 +251,22 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
   const handleCopy = useCallback(() => {
     navigator.clipboard.writeText(code).catch(() => {});
     setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    setTimeout(() => setCopied(false), 2000);
   }, [code]);
 
   return (
     <div className="msg-code-block" dir="ltr">
       <div className="msg-code-header">
         <span className="msg-code-lang">{language || 'code'}</span>
-        <button className="msg-code-copy" onClick={handleCopy}>
-          {copied ? 'Copied' : 'Copy'}
+        <span className="msg-code-size">{code.split('\n').length} lines</span>
+        <button className={`msg-code-copy${copied ? ' copied' : ''}`} onClick={handleCopy} title="Copy code">
+          {copied ? <CheckIcon /> : <CopyIcon />}
+          <span className="msg-code-copy-label">{copied ? 'Copied' : 'Copy'}</span>
         </button>
       </div>
-      <pre className="msg-code-pre"><code>{code}</code></pre>
+      <div className="msg-code-scroll">
+        <pre className="msg-code-pre"><code className="hljs">{code}</code></pre>
+      </div>
     </div>
   );
 }
@@ -149,7 +314,8 @@ function AttachmentCard({ attachment }: { attachment: Attachment }) {
 }
 
 export default function MessageBubble({ kind, content, attachments, onCopy, sourceFiles, streaming, className }: MessageBubbleProps) {
-  const hasArabic = isArabic(content);
+  const rtl = hasRtlChars(content);
+  const sourceLinks = content ? extractSourceLinks(content) : [];
 
   if (kind === 'assistant') {
     return (
@@ -162,16 +328,31 @@ export default function MessageBubble({ kind, content, attachments, onCopy, sour
             {sourceFiles && (
               <div className="msg-attach-source">Using {sourceFiles}</div>
             )}
-            <div className={`assistant-bubble ${hasArabic ? 'arabic' : ''} ${streaming ? 'streaming' : ''}`}>
-              <div className="assistant-content" dir={hasArabic ? 'rtl' : 'auto'}>
-                {renderMarkdown(content)}
+            <div className={`assistant-bubble ${rtl ? 'arabic' : ''} ${streaming ? 'streaming' : ''}`}>
+              <div className="assistant-content" dir={rtl ? 'rtl' : 'auto'}>
+                {renderMarkdown(content || '')}
               </div>
-              {onCopy && content && (
-                <div className="msg-actions">
-                  <button className="msg-action-btn" onClick={() => onCopy(content)} title="Copy message">Copy</button>
-                </div>
-              )}
             </div>
+            {sourceLinks.length > 0 && !streaming && (
+              <div className="msg-sources">
+                {sourceLinks.map((link, i) => (
+                  <span key={i} className="msg-source-chip">
+                    {link.url ? (
+                      <a href={link.url} target="_blank" rel="noopener noreferrer">{link.domain}</a>
+                    ) : (
+                      link.domain
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
+            {onCopy && content && (
+              <div className="msg-actions">
+                <button className="msg-action-btn" onClick={() => onCopy(content)} title="Copy entire response">
+                  Copy all
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -181,7 +362,9 @@ export default function MessageBubble({ kind, content, attachments, onCopy, sour
   return (
     <div className="msg-row user">
       <div className="user-inner">
-        <div className="user-bubble">{content}</div>
+        <div className={`user-bubble${rtl ? ' rtl' : ''}`} dir={rtl ? 'rtl' : 'auto'}>
+          {content}
+        </div>
         {attachments && attachments.length > 0 && (
           <div className="attachment-list">
             {attachments.map(a => (

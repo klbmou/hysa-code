@@ -79,6 +79,11 @@ export function createSingleClient(
       const routerModel = config?.openaiRouterModel || model;
       return createOpenAICompatibleClient(routerUrl, apiKeys.openai_router, routerModel);
     }
+    case 'ninerouter': {
+      const nrUrl = config?.ninerouterBaseUrl || 'http://localhost:20128/v1';
+      const nrModel = config?.ninerouterModel || 'auto';
+      return createOpenAICompatibleClient(nrUrl, apiKeys.ninerouter, nrModel);
+    }
     default:
       throw new Error(`Unsupported provider: ${provider}`);
   }

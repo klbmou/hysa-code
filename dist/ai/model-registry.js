@@ -8,7 +8,10 @@ const MODEL_REGISTRY = [
     { provider: 'openai_router', model: 'deepseek/deepseek-chat', label: 'OpenAI Router / deepseek/deepseek-chat', capabilities: ['coding_qa', 'long_reasoning', 'general_qa'], priority: 'balanced' },
     { provider: 'openai_router', model: 'openai/gpt-4o-mini', label: 'OpenAI Router / openai/gpt-4o-mini', capabilities: ['general_qa', 'simple_chat', 'unknown'], priority: 'fast' },
     { provider: 'openai_router', model: 'cc/claude-sonnet-4-6', label: 'OpenAI Router / cc/claude-sonnet-4-6', capabilities: ['long_reasoning', 'code_edit', 'coding_qa'], priority: 'stronger' },
-    { provider: 'openai_router', model: 'openai/gpt-4o-mini', label: 'OpenAI Router / openai/gpt-4o-mini', capabilities: ['general_qa', 'simple_chat', 'unknown', 'image_vision'], priority: 'fast' },
+    // openai/gpt-4o-mini vision depends on router backend — not reliable
+    { provider: 'openai_router', model: 'openai/gpt-4o-mini', label: 'OpenAI Router / openai/gpt-4o-mini', capabilities: ['general_qa', 'simple_chat', 'unknown'], priority: 'fast' },
+    // ── ninerouter models ──
+    { provider: 'ninerouter', model: 'auto', label: '9Router / auto', capabilities: ['simple_chat', 'general_qa', 'coding_qa', 'code_edit', 'project_scan', 'long_reasoning', 'web_research', 'unknown'], priority: 'balanced' },
     // ── openrouter models ──
     { provider: 'openrouter', model: 'qwen/qwen3-coder:free', label: 'OpenRouter / qwen/qwen3-coder:free', capabilities: ['simple_chat', 'general_qa', 'coding_qa'], priority: 'fast' },
     { provider: 'openrouter', model: 'openai/gpt-oss-120b:free', label: 'OpenRouter / openai/gpt-oss-120b:free', capabilities: ['general_qa', 'simple_chat'], priority: 'fast' },
@@ -120,6 +123,7 @@ export function getSkippedProviderReasons(config) {
         { provider: 'opencode_zen', check: () => !!config.apiKeys.opencode_zen, reason: 'missing/invalid API key' },
         { provider: 'anthropic_proxy', check: () => !!config.anthropicProxyBaseUrl, reason: 'base URL not configured' },
         { provider: 'openai_router', check: () => !!config.openaiRouterBaseUrl, reason: 'base URL not configured' },
+        { provider: 'ninerouter', check: () => !!config.ninerouterBaseUrl, reason: 'NINEROUTER_URL not set' },
     ];
     for (const c of checks) {
         if (!c.check()) {
@@ -152,6 +156,15 @@ function getRuntimeRegistry(config, runtimeModels) {
             label: `Ollama / ${model}`,
             capabilities: ['simple_chat', 'general_qa', 'coding_qa', 'code_edit', 'project_scan', 'long_reasoning', 'unknown'],
             priority: ollamaPriority(model),
+        });
+    }
+    if (config.currentProvider === 'ninerouter' && config.currentModel && !registry.some(m => m.provider === 'ninerouter' && m.model === config.currentModel)) {
+        registry.push({
+            provider: 'ninerouter',
+            model: config.currentModel,
+            label: `9Router / ${config.currentModel}`,
+            capabilities: ['simple_chat', 'general_qa', 'coding_qa', 'code_edit', 'project_scan', 'long_reasoning', 'web_research', 'unknown'],
+            priority: 'balanced',
         });
     }
     if (config.currentProvider === 'openai_router' && config.currentModel && !registry.some(m => m.provider === 'openai_router' && m.model === config.currentModel)) {

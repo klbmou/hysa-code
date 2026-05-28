@@ -139,6 +139,7 @@ async function setupFirstRun() {
                 { name: `DeepSeek      — ${PROVIDER_DESCRIPTIONS.deepseek}`, value: 'deepseek' },
                 { name: `Gemini        — ${PROVIDER_DESCRIPTIONS.gemini}`, value: 'gemini' },
                 { name: `OpenAI Router — external proxy/router (9router, etc.)`, value: 'openai_router' },
+                { name: `9Router       — ${PROVIDER_DESCRIPTIONS.ninerouter}`, value: 'ninerouter' },
             ],
         });
         if (provider === 'openai_router') {
@@ -165,6 +166,35 @@ async function setupFirstRun() {
             };
             saveConfig(config);
             console.log(pc.green(`\n✓ OpenAI Router configured!${fromEnv ? ' (from env vars)' : ''}`));
+            console.log(pc.dim(`  Base URL: ${baseUrl}`));
+            console.log(pc.dim(`  Model:    ${model}`));
+            console.log(pc.dim('  Start chatting with: hysa chat\n'));
+            return config;
+        }
+        if (provider === 'ninerouter') {
+            const fromEnv = !!process.env.NINEROUTER_URL;
+            let baseUrl = process.env.NINEROUTER_URL;
+            if (!baseUrl) {
+                baseUrl = await input({ message: '9Router base URL\n  Default: http://localhost:20128', default: 'http://localhost:20128' });
+            }
+            baseUrl = baseUrl.replace(/\/+$/, '');
+            let model = process.env.NINEROUTER_MODEL || PROVIDER_DEFAULTS.ninerouter.model;
+            model = await input({ message: 'Model name (auto = automatic routing):', default: model });
+            const askKey = await confirm({ message: 'Does your 9Router require an API key?', default: !!process.env.NINEROUTER_API_KEY });
+            let key = '';
+            if (askKey) {
+                key = await password({ message: 'Enter API key for 9Router:', mask: true });
+            }
+            const config = {
+                currentProvider: 'ninerouter',
+                currentModel: model,
+                apiKeys: { ninerouter: key },
+                ninerouterBaseUrl: baseUrl,
+                ninerouterModel: model,
+                ollamaBaseUrl: 'http://localhost:11434',
+            };
+            saveConfig(config);
+            console.log(pc.green(`\n✓ 9Router configured!${fromEnv ? ' (from env vars)' : ''}`));
             console.log(pc.dim(`  Base URL: ${baseUrl}`));
             console.log(pc.dim(`  Model:    ${model}`));
             console.log(pc.dim('  Start chatting with: hysa chat\n'));
@@ -970,7 +1000,7 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
         configFiles: projectInfo.configFiles,
         fileCount: projectInfo.fileCount,
         tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
-    }, currentAgentMode, lightActive, config.currentProvider, config.promptMode || 'auto');
+    }, currentAgentMode, lightActive, config.currentProvider, config.promptMode || 'auto', config.userName);
     // ── Brain context injection (compact, max 800 tokens) ──
     let brainContext = '';
     try {
@@ -1044,7 +1074,7 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
                 entryPoints: projectInfo.entryPoints,
                 configFiles: projectInfo.configFiles,
                 fileCount: projectInfo.fileCount,
-            }, currentAgentMode, modeLightActive, config.currentProvider, config.promptMode || 'auto');
+            }, currentAgentMode, modeLightActive, config.currentProvider, config.promptMode || 'auto', config.userName);
             if (mode !== 'chat') {
                 currentTask = createTask(`Session in ${mode} mode`, mode);
             }
@@ -1062,7 +1092,7 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
                 entryPoints: projectInfo.entryPoints,
                 configFiles: projectInfo.configFiles,
                 fileCount: projectInfo.fileCount,
-            }, currentAgentMode, modelLightActive, config.currentProvider, config.promptMode || 'auto');
+            }, currentAgentMode, modelLightActive, config.currentProvider, config.promptMode || 'auto', config.userName);
             const newTokenEstimate = messages.reduce((sum, m) => sum + estimateTokens(m.content), 0);
             showHeader(config, gitInfo, newTokenEstimate, currentAgentMode, yoloMode);
             console.log(pc.green(`✓ Switched to ${PROVIDER_DEFAULTS[config.currentProvider].label} (${config.currentModel})\n`));
@@ -2078,7 +2108,7 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
             fileCount: projectInfo.fileCount,
             tree: projectInfo.tree.length < 3000 ? projectInfo.tree : projectInfo.tree.slice(0, 3000) + '\n... (truncated)',
         } : undefined;
-        systemPrompt = buildSystemPrompt(promptProjectInfo, currentAgentMode, lightActive, config.currentProvider, resolvedMode);
+        systemPrompt = buildSystemPrompt(promptProjectInfo, currentAgentMode, lightActive, config.currentProvider, resolvedMode, config.userName);
         recordPromptMode(resolvedMode);
         // ── Web search intent detection ────────────────
         let webSearchResults = null;
@@ -3020,8 +3050,14 @@ export async function start() {
         .description('Run diagnostics to check your setup')
         .option('--debug', 'Show raw provider error details')
         .option('--provider <name>', 'Test a specific provider (e.g. openrouter, hysa-ai, ollama)')
+        .option('--vision', 'Run vision-specific diagnostics (check fallback providers, API keys)')
         .action(async (opts) => {
         const normalized = opts.provider?.replace(/-/g, '_');
+        if (opts.vision) {
+            const { runVisionDiagnostics } = await import('./utils/doctor.js');
+            await runVisionDiagnostics(opts.debug ?? false);
+            return;
+        }
         await runDoctor(opts.debug ?? false, normalized);
     });
     program
@@ -3097,6 +3133,7 @@ export async function start() {
             { id: 'LLM7', tier: 'EXPERIMENTAL FREE', needsKey: 'Opt', needsDownload: 'No', notes: '🧪 OpenAI-compatible, optional key' },
             { id: 'Puter AI', tier: 'EXPERIMENTAL FREE', needsKey: 'No', needsDownload: 'No', notes: '🧪 Web/browser based, not CLI suitable' },
             { id: 'OpenAI Router', tier: 'FREE API KEY', needsKey: 'Opt', needsDownload: 'No', notes: 'OpenAI-compatible router/proxy (9router etc.)' },
+            { id: '9Router', tier: 'FREE API KEY', needsKey: 'Opt', needsDownload: 'No', notes: 'Gateway with auto-model routing and web search' },
         ];
         console.log(pc.cyan('\nAvailable AI Providers:\n'));
         console.log(`  ${pc.bold('Provider'.padEnd(22))} ${pc.bold('Tier'.padEnd(18))} ${pc.bold('Key'.padEnd(10))} ${pc.bold('Download'.padEnd(12))} ${pc.bold('Notes')}`);
@@ -4090,6 +4127,41 @@ export async function start() {
         catch (err) {
             console.log(pc.red(`\nError: ${err.message}\n`));
         }
+    });
+    // ── Profile Commands ──────────────────────────────────
+    const profileCmd = program.command('profile').description('User profile — your name and preferences');
+    profileCmd
+        .command('set')
+        .description('Set profile value (e.g. name "Yahia")')
+        .argument('<key>', 'Profile key (e.g. name)')
+        .argument('<value>', 'Profile value')
+        .action((key, value) => {
+        const config = loadConfig();
+        if (!config) {
+            console.log(pc.red('\nNo config found.\n'));
+            return;
+        }
+        if (key === 'name') {
+            config.userName = value.trim();
+            saveConfig(config);
+            console.log(pc.green(`\n✓ Profile name set to: ${value.trim()}\n`));
+        }
+        else {
+            console.log(pc.yellow(`\nUnknown profile key: ${key}. Supported: name\n`));
+        }
+    });
+    profileCmd
+        .command('get')
+        .description('Show profile')
+        .action(() => {
+        const config = loadConfig();
+        if (!config) {
+            console.log(pc.red('\nNo config found.\n'));
+            return;
+        }
+        console.log(pc.bold(pc.magenta('\n👤 User Profile\n')));
+        console.log(`  Name: ${config.userName || pc.dim('(not set)')}`);
+        console.log();
     });
     program
         .command('web')

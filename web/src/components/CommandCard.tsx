@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 interface CommandResult {
   ok: boolean;
@@ -19,6 +19,23 @@ type Status = 'pending' | 'running' | 'done' | 'failed';
 const COLLAPSE_LIMIT = 500;
 const COLLAPSE_LINES = 10;
 
+function CopyIconSmall() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+    </svg>
+  );
+}
+
+function CheckIconSmall() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12"></polyline>
+    </svg>
+  );
+}
+
 function isDangerous(cmd: string): { dangerous: boolean; reason?: string } {
   const lower = cmd.toLowerCase();
   if (lower.startsWith('rm ') || lower.includes('rm -rf') || lower.includes('rm /')) return { dangerous: true, reason: 'Permanently deletes files' };
@@ -37,6 +54,7 @@ export default function CommandCard({ command, onRun, yolo, autoRun, onComplete 
   const [result, setResult] = useState<{ ok: boolean; msg: string; output?: string } | null>(null);
   const [running, setRunning] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
+  const [outputCopied, setOutputCopied] = useState(false);
   const autoRanRef = useRef(false);
 
   const status: Status = running ? 'running' : result ? (result.ok ? 'done' : 'failed') : 'pending';
@@ -69,9 +87,13 @@ export default function CommandCard({ command, onRun, yolo, autoRun, onComplete 
     }
   };
 
-  const handleCopy = () => {
-    if (result?.output) navigator.clipboard.writeText(result.output).catch(() => {});
-  };
+  const handleCopy = useCallback(() => {
+    if (result?.output) {
+      navigator.clipboard.writeText(result.output).catch(() => {});
+      setOutputCopied(true);
+      setTimeout(() => setOutputCopied(false), 2000);
+    }
+  }, [result?.output]);
 
   return (
     <div className={`command-card${autoRun ? ' auto-run' : ''}${yolo ? ' yolo' : ''}`}>
@@ -127,8 +149,8 @@ export default function CommandCard({ command, onRun, yolo, autoRun, onComplete 
             {status === 'done' && <span className="cc-status-ok">✓ Completed</span>}
             {status === 'failed' && <span className="cc-status-fail">✕ Failed</span>}
             {result.output && (
-              <button className="cc-copy-btn" onClick={handleCopy}>
-                Copy output
+              <button className={`cc-copy-btn${outputCopied ? ' copied' : ''}`} onClick={handleCopy}>
+                {outputCopied ? <CheckIconSmall /> : <CopyIconSmall />}
               </button>
             )}
             {autoRun && <span className="cc-auto-label">Auto-executed via YOLO</span>}

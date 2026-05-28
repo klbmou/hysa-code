@@ -7,6 +7,7 @@ import {
   clearFallbackEvents,
   clearRequestSkips,
   getFallbackEvents,
+  getHealthRecord,
   getProviderCooldownRemaining,
   isOnCooldown,
   isProviderOnCooldown,
@@ -30,6 +31,7 @@ import {
 } from './provider-policy.js';
 import type { RuntimeProviderModels } from './provider-policy.js';
 import { logProviderSuccess, logProviderFailure } from '../brain/graph-store.js';
+import { hasVisionCapability } from './provider-capabilities.js';
 
 const LOG = '[SmartRouter]';
 const ATTEMPT_TIMEOUT_MS = 25000;
@@ -53,6 +55,16 @@ function getAttemptTimeout(provider: string): number {
   const tier = PROVIDER_TIERS[provider as ProviderType];
   if (tier === 'local_free') return LOCAL_TIMEOUT_MS;
   return getEnvInt('HYSA_CHAT_TIMEOUT_MS', ATTEMPT_TIMEOUT_MS);
+}
+
+function validateProviderConsistency(provider: string, model: string, taskKind?: string): boolean {
+  console.log('[provider] selected provider:', provider);
+  console.log('[provider] routed model:', model);
+  if (taskKind === 'image_vision' && !hasVisionCapability(provider, model)) {
+    console.log('[provider] MISMATCH: text-only model selected for vision task');
+    return false;
+  }
+  return true;
 }
 
 export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AIClient {
@@ -142,9 +154,20 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
 
         if (debug) {
           console.log(`${LOG}[req:${reqId}] ${attemptLabel}: ${c.label} (timeout: ${timeoutMs / 1000}s)`);
+          const healthRecord = getHealthRecord(c.provider, c.model);
+          console.log(`[router] candidate ${i + 1} - health: ${healthRecord?.status ?? 'unknown'}`);
         } else {
           console.log(`  Smart: Trying ${c.label}...`);
         }
+
+        validateProviderConsistency(c.provider, c.model, taskKind);
+        
+        // Request tracing
+        console.log('[provider] selected provider:', c.provider);
+        console.log('[provider] actual upstream provider:', c.provider);
+        console.log('[provider] routed model:', c.model);
+        console.log('[provider] payload type: text');
+        console.log('[provider] capability type:', hasVisionCapability(c.provider, c.model) ? 'vision' : 'text-only');
 
         const client = createSingleClient(
           c.provider as ProviderType,
@@ -301,6 +324,7 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
         console.log(`${LOG}[req:${reqId}] Stream: ${first.label}`);
       }
 
+      validateProviderConsistency(first.provider, first.model, taskKind);
       const client = createSingleClient(
         first.provider as ProviderType,
         first.model,
@@ -319,6 +343,17 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
         }
 
         let contentStarted = false;
+
+        // Request tracing and validation before streaming
+        console.log('[provider] selected provider:', first.provider);
+        console.log('[provider] actual upstream provider:', first.provider);
+        console.log('[provider] routed model:', first.model);
+        console.log('[provider] payload type: stream');
+        console.log('[provider] capability type:', hasVisionCapability(first.provider, first.model) ? 'vision' : 'text-only');
+        if (taskKind === 'image_vision' && !hasVisionCapability(first.provider, first.model)) {
+          console.log('[provider] MISMATCH: text-only model for vision stream');
+          throw new Error(`Provider/model mismatch: ${first.provider}/${first.model} is text-only but task is image_vision`);
+        }
 
         try {
           addFallbackEvent(first.provider, first.model, `Streaming ${first.label}...`);
@@ -418,6 +453,7 @@ function getProviderAttemptLimit(provider: string, taskKind: TaskKind): number {
   if (taskKind === 'simple_chat') return provider === 'ollama' ? 2 : 2;
   if (provider === 'openai_router' && (taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review')) return 4;
   if (provider === 'openrouter') return 3;
+  if (provider === 'ninerouter' && (taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review')) return 3;
   return 2;
 }
 

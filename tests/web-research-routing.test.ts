@@ -104,11 +104,35 @@ describe('web research routing', () => {
     assert.ok(typeof diag.configuredKeys !== 'undefined');
   });
 
-  // ── Anti-fake-search: model must not claim search ──
-  // This tests that formatSearchResults includes the anti-fake instruction
-  it('formatSearchResults includes anti-fake instruction', async () => {
+  // ── Search result formatting ──
+  it('formatSearchResults produces concise format', async () => {
     const { formatSearchResults } = await import('../src/tools/web-search.js');
-    const result = formatSearchResults('test', [{ title: 'T', url: 'http://example.com', snippet: 'S' }]);
-    assert.ok(result.includes('Do NOT claim you searched'));
+    const result = formatSearchResults('test query', [
+      { title: 'Example Title', url: 'http://example.com/page', snippet: 'This is a test snippet.' },
+    ]);
+    assert.ok(result.includes('Web Search'), 'should include Web Search header');
+    assert.ok(result.includes('Summary:'), 'should include Summary header');
+    assert.ok(result.includes('Sources:'), 'should include Sources:');
+    assert.ok(result.includes('example.com'), 'should include domain');
+    assert.ok(result.includes('DO NOT include links to YouTube'), 'should exclude videos');
+    assert.ok(result.includes('DO NOT dump raw URLs'), 'should avoid raw URL dumps');
+  });
+
+  it('formatSearchResults does not dump raw URLs in output', async () => {
+    const { formatSearchResults } = await import('../src/tools/web-search.js');
+    const results = [
+      { title: 'First Result', url: 'https://example.com/page1', snippet: 'This is the first test result about something interesting.' },
+      { title: 'Second Result', url: 'https://example.org/page2', snippet: 'This is the second test result about something else.' },
+    ];
+    const output = formatSearchResults('test query', results);
+    const lines = output.split('\n');
+    assert.ok(lines.length < 18, `output should be concise (got ${lines.length} lines)`);
+    // Should NOT contain raw http:// or https:// URLs (uses domain format)
+    assert.ok(!output.includes('http://'), 'should not contain raw http:// URLs');
+    assert.ok(!output.includes('https://'), 'should not contain raw https:// URLs');
+    // Should use domain format
+    assert.ok(output.includes('[example.com]'), 'should use domain format [domain.com]');
+    assert.ok(output.includes('DO NOT include links to YouTube'), 'should exclude videos');
+    assert.ok(output.includes('DO NOT dump raw URLs'), 'should avoid raw URL dumps');
   });
 });

@@ -446,6 +446,37 @@ async function checkAnthropicProxyDetailed(config, debug) {
     }
     return results;
 }
+async function check9RouterDetailed(config, debug) {
+    const results = [];
+    const runtimeModels = await getDoctorRuntimeModels(config);
+    const baseUrl = config.ninerouterBaseUrl || 'http://localhost:20128/v1';
+    try {
+        const parsedUrl = new URL(baseUrl);
+        results.push({ name: 'Base URL', status: 'ok', message: parsedUrl.href });
+    }
+    catch {
+        results.push({ name: 'Base URL', status: 'error', message: `Invalid URL: ${baseUrl}` });
+        return results;
+    }
+    const checkResult = await checkOpenAICompatibleAPI(baseUrl, config.apiKeys.ninerouter);
+    if (checkResult.ok) {
+        results.push({ name: 'API Connection', status: 'ok', message: '9Router endpoint is reachable' });
+    }
+    else {
+        results.push({ name: 'API Connection', status: 'error', message: checkResult.message });
+        return results;
+    }
+    const model = config.ninerouterModel || 'auto (default)';
+    results.push({ name: 'Default Model', status: 'ok', message: model });
+    if (config.apiKeys.ninerouter) {
+        results.push({ name: 'API Key', status: 'ok', message: 'Configured' });
+    }
+    else {
+        results.push({ name: 'API Key', status: 'warn', message: 'Not configured (optional)' });
+    }
+    pushProviderUsability(results, 'ninerouter', config, runtimeModels);
+    return results;
+}
 async function checkOpenAIRouterDetailed(config, debug) {
     const results = [];
     const runtimeModels = await getDoctorRuntimeModels(config);
@@ -616,6 +647,58 @@ async function checkLlamaCppDetailed(config, debug) {
     }
     return results;
 }
+export async function runVisionDiagnostics(debug = false) {
+    console.log(pc.bold(pc.magenta('\n🔍 Vision Diagnostics\n')));
+    const config = loadConfig();
+    if (!config) {
+        console.log(pc.red('\n  No config found. Run: hysa chat\n'));
+        return;
+    }
+    const envModel = process.env.HYSA_VISION_MODEL;
+    console.log(`  ${pc.bold('HYSA_VISION_MODEL')}: ${envModel ? pc.green(envModel) : pc.dim('(not set)')}`);
+    const configuredModel = config.visionModel;
+    if (configuredModel && !envModel) {
+        console.log(`  ${pc.bold('config.visionModel')}: ${pc.cyan(configuredModel)} (from config file)`);
+    }
+    console.log();
+    // Check what the fallback candidates would be
+    const { getVisionFallbackCandidates } = await import('../web/api.js');
+    const candidates = getVisionFallbackCandidates(config);
+    if (candidates.length === 0) {
+        console.log(pc.yellow(`  ✘ No vision-capable fallback models available.`));
+        console.log(pc.dim(`    Configure HYSA_VISION_MODEL=provider/model, or add API keys for Gemini/OpenRouter.\n`));
+        return;
+    }
+    console.log(`  ${pc.bold('Vision Fallback Order')}:`);
+    for (const c of candidates) {
+        const prov = c.provider;
+        const label = c.label;
+        const keyConfig = config.apiKeys[prov];
+        const hasKey = prov === 'openai_router' || !!keyConfig;
+        const hasVision = true; // assume candidate is selected as vision-capable
+        const status = hasKey ? pc.green('✔') : pc.red('✘');
+        const statusText = hasKey ? 'usable' : `${pc.red('missing API key')}`;
+        console.log(`    ${status} ${pc.bold(label.padEnd(50))} ${statusText}`);
+    }
+    console.log();
+    const usable = candidates.filter(c => {
+        if (c.provider === 'openai_router')
+            return true;
+        return !!config.apiKeys[c.provider];
+    });
+    if (usable.length === 0) {
+        console.log(pc.yellow(`  ⚠ No usable vision providers — check your API keys.\n`));
+        const geminiKey = config.apiKeys.gemini;
+        const orKey = config.apiKeys.openrouter;
+        console.log(`  ${geminiKey ? pc.green('✔') : pc.red('✘')} Gemini API key: ${geminiKey ? 'configured' : 'not set'}`);
+        console.log(`  ${orKey ? pc.green('✔') : pc.red('✘')} OpenRouter API key: ${orKey ? 'configured' : 'not set'}`);
+        console.log(pc.dim(`\n  Set HYSA_VISION_MODEL=gemini/gemini-2.5-flash and configure the required API key.\n`));
+    }
+    else {
+        console.log(pc.green(`  ✔ ${usable.length}/${candidates.length} vision provider(s) usable.\n`));
+    }
+    console.log(pc.dim(`  Run tests with: hysa chat (with an image attachment)\n`));
+}
 export async function runDoctor(debug = false, provider) {
     if (provider) {
         const config = loadConfig();
@@ -680,6 +763,9 @@ export async function runDoctor(debug = false, provider) {
         }
         else if (provider === 'openai_router') {
             results = await checkOpenAIRouterDetailed(config, debug);
+        }
+        else if (provider === 'ninerouter') {
+            results = await check9RouterDetailed(config, debug);
         }
         else if (provider === 'anthropic' || provider === 'openai' || provider === 'opencode_zen') {
             console.log(pc.yellow(`  Diagnostics for "${provider}" not yet supported in detailed mode. Try:\n  hysa doctor\n  hysa doctor --provider hysa-ai\n`));
@@ -813,6 +899,23 @@ export async function runDoctor(debug = false, provider) {
         }
         else {
             results.push({ name: 'OpenAI Router', status: 'warn', message: 'Not configured. Set HYSA_OPENAI_ROUTER_BASE_URL.' });
+        }
+        // 9Router status
+        const nrBaseUrl = config.ninerouterBaseUrl || (process.env.NINEROUTER_URL ? process.env.NINEROUTER_URL.replace(/\/+$/, '') : null);
+        if (nrBaseUrl) {
+            results.push({ name: '9Router', status: 'ok', message: `Base URL: ${nrBaseUrl}` });
+            const nrModel = config.ninerouterModel || 'auto (default)';
+            results.push({ name: '9Router Model', status: 'ok', message: nrModel });
+            if (config.apiKeys.ninerouter) {
+                results.push({ name: '9Router Key', status: 'ok', message: 'Configured (optional)' });
+            }
+            else {
+                results.push({ name: '9Router Key', status: 'warn', message: 'Not configured (optional)' });
+            }
+            pushProviderUsability(results, 'ninerouter', config, runtimeModels);
+        }
+        else {
+            results.push({ name: '9Router', status: 'warn', message: 'Not configured. Set NINEROUTER_URL.' });
         }
         const lastChatError = getLastError();
         if (lastChatError) {

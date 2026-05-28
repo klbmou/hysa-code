@@ -29,6 +29,10 @@ declare function buildVisionMessages(messages: {
     role: string;
     content: string;
 }[], attachments: AttachmentPayload[]): any[];
+declare function sanitizeMessagesForTextModel(messages: {
+    role: string;
+    content: string | any[];
+}[], provider: string, model: string): number;
 interface ChatRequest {
     messages: {
         role: string;
@@ -118,7 +122,7 @@ export declare function runCommand(command: string): Promise<{
     stderr: string;
     error?: string;
 }>;
-export { getVisionFallbackCandidates, getVisionFallbackErrorMessage, buildVisionMessages, hasImageAttachments, supportsVision, VISION_FALLBACK_ORDER };
+export { getVisionFallbackCandidates, getVisionFallbackErrorMessage, buildVisionMessages, hasImageAttachments, supportsVision, sanitizeMessagesForTextModel, VISION_FALLBACK_ORDER };
 export declare function getFilePreview(path: string, content: string): string | null;
 export declare function getYoloStatus(): {
     enabled: boolean;

@@ -25,9 +25,13 @@ export function resolvePromptMode(
 
 // ── Minimal prompt (simple questions) ────────────────
 
-export function buildMinimalSystemPrompt(): string {
+export function buildMinimalSystemPrompt(userName?: string): string {
+  const greeting = userName
+    ? `The user's name is ${userName}. Address them by name naturally when appropriate.`
+    : undefined;
   return [
     `You are HYSA Code, a coding assistant with web search and browsing capabilities.`,
+    ...(greeting ? [greeting] : []),
     `Answer the user's question clearly and concisely.`,
     `Do not use tools unless the user explicitly asks you to read, edit, or run something.`,
     `Keep your response brief.`,
@@ -40,10 +44,14 @@ export function buildMinimalSystemPrompt(): string {
 
 export function buildCompactSystemPrompt(
   projectInfo?: { type: string; entryPoints: string[]; fileCount: number },
+  userName?: string,
 ): string {
   const parts: string[] = [];
 
   parts.push(`You are HYSA Code, a coding assistant with web search and browsing capabilities.`);
+  if (userName) {
+    parts.push(`The user's name is ${userName}. Address them by name naturally when appropriate.`);
+  }
 
   if (projectInfo) {
     parts.push(`\nProject: ${projectInfo.type}`);
@@ -81,10 +89,14 @@ Rules:
 function buildFullSystemPrompt(
   projectInfo?: { type: string; entryPoints: string[]; configFiles: string[]; fileCount: number; tree?: string },
   agentMode?: AgentMode,
+  userName?: string,
 ): string {
   const parts: string[] = [];
 
   parts.push(`You are HYSA Code, an AI coding assistant that helps users with their codebase.`);
+  if (userName) {
+    parts.push(`The user's name is ${userName}. Address them by name naturally when appropriate.`);
+  }
 
   if (projectInfo) {
     parts.push(`\n## Project Context`);
@@ -278,20 +290,22 @@ export function buildSystemPrompt(
   lightMode?: boolean,
   provider?: ProviderType,
   promptMode?: PromptMode,
+  userName?: string,
 ): string {
   const resolved = resolvePromptMode(promptMode, provider);
 
   if (resolved === 'minimal') {
-    return buildMinimalSystemPrompt();
+    return buildMinimalSystemPrompt(userName);
   }
 
   if (resolved === 'compact' || lightMode) {
     return buildCompactSystemPrompt(
       projectInfo ? { type: projectInfo.type, entryPoints: projectInfo.entryPoints, fileCount: projectInfo.fileCount } : undefined,
+      userName,
     );
   }
 
-  return buildFullSystemPrompt(projectInfo, agentMode);
+  return buildFullSystemPrompt(projectInfo, agentMode, userName);
 }
 
 export const SYSTEM_PROMPT = buildSystemPrompt();

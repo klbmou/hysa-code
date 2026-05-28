@@ -15,9 +15,13 @@ export function resolvePromptMode(promptMode = 'auto', provider, isSimple) {
     return 'full';
 }
 // ── Minimal prompt (simple questions) ────────────────
-export function buildMinimalSystemPrompt() {
+export function buildMinimalSystemPrompt(userName) {
+    const greeting = userName
+        ? `The user's name is ${userName}. Address them by name naturally when appropriate.`
+        : undefined;
     return [
         `You are HYSA Code, a coding assistant with web search and browsing capabilities.`,
+        ...(greeting ? [greeting] : []),
         `Answer the user's question clearly and concisely.`,
         `Do not use tools unless the user explicitly asks you to read, edit, or run something.`,
         `Keep your response brief.`,
@@ -26,9 +30,12 @@ export function buildMinimalSystemPrompt() {
     ].join('\n');
 }
 // ── Compact prompt (local / experimental providers) ──
-export function buildCompactSystemPrompt(projectInfo) {
+export function buildCompactSystemPrompt(projectInfo, userName) {
     const parts = [];
     parts.push(`You are HYSA Code, a coding assistant with web search and browsing capabilities.`);
+    if (userName) {
+        parts.push(`The user's name is ${userName}. Address them by name naturally when appropriate.`);
+    }
     if (projectInfo) {
         parts.push(`\nProject: ${projectInfo.type}`);
         if (projectInfo.entryPoints.length > 0) {
@@ -57,9 +64,12 @@ Rules:
     return parts.join('\n');
 }
 // ── Full prompt (complex / edit / tool tasks) ─────────
-function buildFullSystemPrompt(projectInfo, agentMode) {
+function buildFullSystemPrompt(projectInfo, agentMode, userName) {
     const parts = [];
     parts.push(`You are HYSA Code, an AI coding assistant that helps users with their codebase.`);
+    if (userName) {
+        parts.push(`The user's name is ${userName}. Address them by name naturally when appropriate.`);
+    }
     if (projectInfo) {
         parts.push(`\n## Project Context`);
         parts.push(`Project type: ${projectInfo.type}`);
@@ -231,15 +241,15 @@ Risk: The calculateTotal function is used in 3 other files, verify they still wo
     return parts.join('\n');
 }
 // ── Public API ───────────────────────────────────────
-export function buildSystemPrompt(projectInfo, agentMode, lightMode, provider, promptMode) {
+export function buildSystemPrompt(projectInfo, agentMode, lightMode, provider, promptMode, userName) {
     const resolved = resolvePromptMode(promptMode, provider);
     if (resolved === 'minimal') {
-        return buildMinimalSystemPrompt();
+        return buildMinimalSystemPrompt(userName);
     }
     if (resolved === 'compact' || lightMode) {
-        return buildCompactSystemPrompt(projectInfo ? { type: projectInfo.type, entryPoints: projectInfo.entryPoints, fileCount: projectInfo.fileCount } : undefined);
+        return buildCompactSystemPrompt(projectInfo ? { type: projectInfo.type, entryPoints: projectInfo.entryPoints, fileCount: projectInfo.fileCount } : undefined, userName);
     }
-    return buildFullSystemPrompt(projectInfo, agentMode);
+    return buildFullSystemPrompt(projectInfo, agentMode, userName);
 }
 export const SYSTEM_PROMPT = buildSystemPrompt();
 //# sourceMappingURL=system.js.map

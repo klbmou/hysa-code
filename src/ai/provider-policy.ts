@@ -256,7 +256,7 @@ export function getProviderPreferenceForTask(taskKind: TaskKind, input?: HysaCon
     : localFallbackEnabled
       ? LOCAL_FREE_PROVIDERS
       : [];
-  const cloudFree: ProviderType[] = ['openai_router', 'openrouter', 'opencode_zen', 'gemini', 'deepseek', 'groq', 'anthropic_proxy'];
+  const cloudFree: ProviderType[] = ['openai_router', 'openrouter', 'ninerouter', 'opencode_zen', 'gemini', 'deepseek', 'groq', 'anthropic_proxy'];
   const experimental: ProviderType[] = ['pollinations', 'llm7', 'puter'];
   const currentOnline = currentProvider && !currentIsLocal ? currentProvider : undefined;
 
@@ -270,6 +270,11 @@ export function getProviderPreferenceForTask(taskKind: TaskKind, input?: HysaCon
 
   if (taskKind === 'code_edit' || taskKind === 'debugging' || taskKind === 'code_review') {
     return dedupeProviders(['openai_router', 'openrouter', currentOnline, ...cloudFree, ...local, ...experimental]);
+  }
+
+  if (taskKind === 'image_vision') {
+    const visionFree: ProviderType[] = ['gemini', 'ninerouter', 'openrouter', 'anthropic_proxy', 'openai_router', 'opencode_zen', 'groq'];
+    return dedupeProviders([currentOnline, ...visionFree, ...local, ...experimental]);
   }
 
   if (taskKind === 'search' || taskKind === 'web_research') {

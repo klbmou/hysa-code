@@ -10,6 +10,7 @@ import type { ErrorCategory } from './model-health.js';
 import { getRetryAfterSeconds } from './provider-policy.js';
 import { recordRequest, recordError } from '../utils/session.js';
 import { logProviderSuccess, logProviderFailure } from '../brain/graph-store.js';
+import { hasVisionCapability } from './provider-capabilities.js';
 
 const CHAT_TIMEOUT_MS = 30000;
 const FALLBACK_ATTEMPT_TIMEOUT_MS = 12000;
@@ -120,6 +121,16 @@ interface FallbackCandidate {
   label: string;
 }
 
+function validateProviderConsistency(provider: string, model: string, taskKind?: string): boolean {
+  console.log('[provider] selected provider:', provider);
+  console.log('[provider] routed model:', model);
+  if (taskKind === 'image_vision' && !hasVisionCapability(provider, model)) {
+    console.log('[provider] MISMATCH: text-only model selected for vision task');
+    return false;
+  }
+  return true;
+}
+
 export function getFallbackCandidates(current: ProviderType, config: HysaConfig): FallbackCandidate[] {
   const tier = PROVIDER_TIERS[current];
   const candidates: FallbackCandidate[] = [];
@@ -131,6 +142,7 @@ export function getFallbackCandidates(current: ProviderType, config: HysaConfig)
     const k = `${provider}:${m}`;
     if (added.has(k)) return;
     added.add(k);
+    validateProviderConsistency(provider, m);
     candidates.push({ provider, model: m, label: `${PROVIDER_DEFAULTS[provider]?.label || provider} / ${m}` });
   }
 
@@ -292,6 +304,18 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
           let streamError: Error | null = null;
 
           try {
+            // Request tracing and hard validation before streaming
+            console.log('[provider] selected provider:', primary);
+            console.log('[provider] actual upstream provider:', primary);
+            console.log('[provider] routed model:', primaryModel);
+            console.log('[provider] payload type: stream');
+            console.log('[provider] capability type:', hasVisionCapability(primary, primaryModel) ? 'vision' : 'text-only');
+            const hasImagePayload = messages.some(m => Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url'));
+            if (hasImagePayload && !hasVisionCapability(primary, primaryModel)) {
+              console.log('[provider] MISMATCH: text-only provider', primary, 'receiving image payload');
+              throw new Error(`Provider/model mismatch detected: selectedModel=${primaryModel} but actual provider=${primary} is text-only. Cannot send vision content to a text-only model.`);
+            }
+            
             const result = await client.sendMessageStream(messages, systemPrompt, (event) => {
               if (event.type === 'token') contentStarted = true;
               onEvent(event);
@@ -393,6 +417,19 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
           if (debug) {
             console.log(`[req:${reqId}] ${attemptLabel}: ${provLabel} / ${model} (timeout: ${timeoutMs / 1000}s)`);
           }
+          // Request tracing
+          console.log('[provider] selected provider:', provider);
+          console.log('[provider] actual upstream provider:', provider);
+          console.log('[provider] routed model:', model);
+          console.log('[provider] capability type:', hasVisionCapability(provider, model) ? 'vision' : 'text-only');
+          
+          // Hard validation: ensure text-only provider never gets image payloads
+          const hasImagePayload = messages.some(m => Array.isArray(m.content) && m.content.some((p: any) => p.type === 'image_url'));
+          if (hasImagePayload && !hasVisionCapability(provider, model)) {
+            console.log('[provider] MISMATCH: text-only provider', provider, 'receiving image payload');
+            throw new Error(`Provider/model mismatch detected: selectedModel=${model} but actual provider=${provider} is text-only. Cannot send vision content to a text-only model.`);
+          }
+          
           return await client.sendMessage(messages, systemPrompt, ac.signal);
         };
 
@@ -475,7 +512,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
               const cooldownSec = getRetryAfterSeconds(err) ?? (cat === 'rate_limit' ? 120 : 60);
               markModelCooldown(provider, model, friendlyError(errMsg, provider), cooldownSec, cat);
-              if ((provider === 'openai_router' || provider === 'openrouter') && cat === 'rate_limit') {
+              if ((provider === 'openai_router' || provider === 'openrouter' || provider === 'ninerouter') && cat === 'rate_limit') {
                 markProviderCooldown(provider, `${PROVIDER_DEFAULTS[provider]?.label || provider} rate-limited; provider cooldown active`, cooldownSec, cat);
               }
             }

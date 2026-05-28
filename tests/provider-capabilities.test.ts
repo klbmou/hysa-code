@@ -27,7 +27,7 @@ describe('provider capability routing', () => {
   it('hasVisionCapability detects vision-capable models', () => {
     assert.ok(hasVisionCapability('gemini', 'gemini-2.5-flash'));
     assert.ok(hasVisionCapability('openrouter', 'google/gemini-2.5-flash'));
-    assert.ok(hasVisionCapability('openai_router', 'openai/gpt-4o-mini'));
+    assert.equal(hasVisionCapability('openai_router', 'openai/gpt-4o-mini'), false, 'openai_router/gpt-4o-mini vision depends on backend');
   });
 
   it('hasVisionCapability returns false for text-only models', () => {

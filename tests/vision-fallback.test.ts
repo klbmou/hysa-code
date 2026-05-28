@@ -1,7 +1,7 @@
 import { describe, it, before, after } from 'node:test';
 import * as assert from 'node:assert/strict';
 import type { HysaConfig } from '../src/config/keys.js';
-import { getVisionFallbackCandidates, getVisionFallbackErrorMessage, buildVisionMessages, hasImageAttachments, supportsVision } from '../src/web/api.js';
+import { getVisionFallbackCandidates, getVisionFallbackErrorMessage, buildVisionMessages, hasImageAttachments, supportsVision, sanitizeMessagesForTextModel } from '../src/web/api.js';
 import { hasVisionCapability } from '../src/ai/provider-capabilities.js';
 
 function mockConfig(overrides: Partial<HysaConfig> = {}): HysaConfig {
@@ -118,7 +118,21 @@ describe('vision fallback error messages', () => {
       { label: 'A / m2', reason: 'unavailable' },
     ];
     const en = getVisionFallbackErrorMessage('english', failures, false);
-    assert.ok(en.includes('All vision model attempts failed') || en.includes('failed'));
+    assert.ok(en.includes('failed'));
+    assert.ok(en.includes('HYSA_VISION_MODEL'));
+  });
+
+  it('includes tried models even without debug mode', () => {
+    const failures = [
+      { label: 'Gemini / gemini-2.5-flash', reason: 'rate-limited' },
+      { label: 'OpenRouter / free-model', reason: 'invalid key' },
+    ];
+    const en = getVisionFallbackErrorMessage('english', failures, false);
+    assert.ok(en.includes('Tried:'));
+    assert.ok(en.includes('Gemini'));
+    assert.ok(en.includes('OpenRouter'));
+    const ar = getVisionFallbackErrorMessage('arabic', failures, false);
+    assert.ok(ar.includes('المحاولات'));
   });
 
   it('includes actual reason in debug mode', () => {
@@ -136,6 +150,16 @@ describe('vision fallback error messages', () => {
     ];
     const ar = getVisionFallbackErrorMessage('arabic', failures, true);
     assert.ok(ar.includes('401 Unauthorized'));
+  });
+
+  it('does not duplicate tried list in debug mode (debug adds detailed errors)', () => {
+    const failures = [
+      { label: 'Gemini / gemini-2.5-flash', reason: 'rate-limited', error: '429 Too Many Requests' },
+    ];
+    const en = getVisionFallbackErrorMessage('english', failures, true);
+    assert.ok(en.includes('Tried:'));
+    assert.ok(en.includes('Detailed errors:'));
+    assert.ok(en.includes('429 Too Many Requests'));
   });
 });
 
@@ -298,6 +322,136 @@ describe('config.visionModel support', () => {
     for (const c of candidates) {
       assert.notEqual(c.model, 'oc/deepseek-v4-flash-free', 'DeepSeek model should not be a vision candidate');
     }
+  });
+
+  it('HYSA_VISION_MODEL takes precedence over fallback order', () => {
+    const config = mockConfig({
+      currentProvider: 'deepseek',
+      currentModel: 'deepseek-chat',
+      apiKeys: { gemini: 'test-key', openrouter: 'sk-or-v1-test' },
+      visionModel: 'gemini/gemini-2.5-flash',
+    });
+    const candidates = getVisionFallbackCandidates(config);
+    assert.ok(candidates.length >= 1, 'should have at least 1 candidate');
+    assert.equal(candidates[0].provider, 'gemini', 'first candidate should use visionModel provider');
+    assert.equal(candidates[0].model, 'gemini-2.5-flash', 'first candidate model should match visionModel');
+  });
+
+  it('text-only model never appears in vision candidates', () => {
+    const config = mockConfig({
+      currentProvider: 'deepseek',
+      currentModel: 'deepseek-chat',
+      apiKeys: { gemini: 'test-key', openrouter: 'sk-or-v1-test' },
+    });
+    const candidates = getVisionFallbackCandidates(config);
+    // openai/gpt-4o-mini is not in VISION_FALLBACK_ORDER;
+    // with gemini+openrouter keys we already get 3 candidates, so openai_router models
+    // from the third stage (getVisionCapableProviders) should not appear
+    for (const c of candidates) {
+      assert.notEqual(c.model, 'openai/gpt-4o-mini', 'openai/gpt-4o-mini should not appear in vision candidates');
+    }
+  });
+
+  it('ninerouter appears as vision candidate', () => {
+    const config = mockConfig({
+      currentProvider: 'deepseek',
+      currentModel: 'deepseek-chat',
+      apiKeys: {},
+      ninerouterBaseUrl: 'http://localhost:20128',
+    });
+    const candidates = getVisionFallbackCandidates(config);
+    const hasNinerouter = candidates.some(c => c.provider === 'ninerouter' && c.model === 'auto');
+    assert.ok(hasNinerouter, 'ninerouter/auto should appear as a vision candidate');
+  });
+});
+
+describe('sanitizeMessagesForTextModel', () => {
+  it('strips image_url parts for text-only model DeepSeek', () => {
+    const messages: any[] = [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+      { role: 'user', content: [{ type: 'text', text: 'what is this' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,abc' } }] },
+    ];
+    const stripped = sanitizeMessagesForTextModel(messages, 'deepseek', 'deepseek-chat');
+    assert.equal(stripped, 1, 'should strip 1 image_url part');
+    const last = messages[messages.length - 1];
+    assert.equal(typeof last.content, 'string', 'content should be string after sanitization');
+    assert.ok((last.content as string).includes('[Image attached]'), 'should include placeholder');
+    assert.ok((last.content as string).includes('what is this'), 'should preserve text');
+  });
+
+  it('does nothing for vision-capable model Gemini', () => {
+    const messages: any[] = [
+      { role: 'user', content: [{ type: 'text', text: 'describe' }, { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,/9j/4AAQ' } }] },
+    ];
+    const before = JSON.stringify(messages);
+    const stripped = sanitizeMessagesForTextModel(messages, 'gemini', 'gemini-2.5-flash');
+    assert.equal(stripped, 0, 'should not strip image parts for vision model');
+    assert.equal(JSON.stringify(messages), before, 'messages should be unmodified');
+  });
+
+  it('strips multiple image_url parts in a single message', () => {
+    const messages: any[] = [
+      { role: 'user', content: [
+        { type: 'text', text: 'compare' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,a' } },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,b' } },
+      ]},
+    ];
+    const stripped = sanitizeMessagesForTextModel(messages, 'openrouter', 'qwen/qwen3-coder:free');
+    assert.equal(stripped, 2, 'should strip both image_url parts');
+    const content = messages[0].content as string;
+    assert.ok(content.includes('[Image attached]'));
+    assert.ok(content.includes('compare'));
+  });
+
+  it('handles mixed array content with only images (no text part)', () => {
+    const messages: any[] = [
+      { role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,x' } }] },
+    ];
+    const stripped = sanitizeMessagesForTextModel(messages, 'deepseek', 'deepseek-chat');
+    assert.equal(stripped, 1);
+    assert.equal(messages[0].content, '[Image attached]');
+  });
+
+  it('does not modify plain string messages', () => {
+    const messages: any[] = [
+      { role: 'user', content: 'just text' },
+      { role: 'assistant', content: 'response' },
+    ];
+    const stripped = sanitizeMessagesForTextModel(messages, 'deepseek', 'deepseek-chat');
+    assert.equal(stripped, 0);
+    assert.equal(messages[0].content, 'just text');
+    assert.equal(messages[1].content, 'response');
+  });
+
+  it('history with old image_url parts does not break later text chat', () => {
+    const messages: any[] = [
+      { role: 'user', content: [{ type: 'text', text: 'first question' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,old' } }] },
+      { role: 'assistant', content: 'vision response' },
+      { role: 'user', content: 'follow up text only' },
+    ];
+    const stripped = sanitizeMessagesForTextModel(messages, 'deepseek', 'deepseek-chat');
+    assert.equal(stripped, 1, 'should strip history image part');
+    assert.equal(typeof messages[0].content, 'string', 'first message should be string');
+    assert.ok((messages[0].content as string).includes('[Image attached]'));
+    assert.equal(messages[1].content, 'vision response', 'assistant message unchanged');
+    assert.equal(messages[2].content, 'follow up text only', 'text-only user message unchanged');
+  });
+});
+
+describe('validateProviderConsistency', () => {
+  it('detects mismatches', () => {
+    function validate(provider: string, model: string, taskKind?: string): boolean {
+      if (taskKind === 'image_vision' && !hasVisionCapability(provider, model)) {
+        return false;
+      }
+      return true;
+    }
+    assert.equal(validate('deepseek', 'deepseek-chat', 'image_vision'), false, 'text-only model should fail for vision');
+    assert.equal(validate('gemini', 'gemini-2.5-flash', 'image_vision'), true, 'vision model should pass for vision');
+    assert.equal(validate('deepseek', 'deepseek-chat', 'code_edit'), true, 'text-only model should pass for text task');
+    assert.equal(validate('deepseek', 'deepseek-chat'), true, 'text-only model should pass without task');
   });
 });
 

@@ -210,24 +210,29 @@ export function getCapabilityResponse(text, isReliable) {
 }
 export function formatSearchResults(query, results) {
     if (results.length === 0)
-        return `No search results found for: ${query}`;
-    let output = `Web search results for: ${query}\n\n`;
-    for (let i = 0; i < results.length; i++) {
-        const r = results[i];
-        output += `${i + 1}. ${r.title}\n`;
-        output += `URL: ${r.url}\n`;
-        output += `Snippet: ${r.snippet}\n`;
-        if (r.source)
-            output += `Source: ${r.source}`;
-        output += '\n\n';
+        return `No search results found for: "${query}"`;
+    const top = results.slice(0, 5);
+    const domain = (url) => {
+        try {
+            return new URL(url).hostname.replace(/^www\./, '');
+        }
+        catch {
+            return url;
+        }
+    };
+    let out = `[Web Search: "${query}" — ${results.length} result(s)]\n\n`;
+    out += 'Summary:\n';
+    for (const r of top) {
+        const finding = r.snippet.split(/[.!?]/, 1)[0]?.trim() || r.snippet;
+        out += `\u2022 ${finding}\n`;
     }
-    output += 'Instructions:\n';
-    output += '- Use these results to answer.\n';
-    output += '- Cite URLs naturally.\n';
-    output += '- For each source, include: the title, the URL, and a 1-2 line summary of what it says.\n';
-    output += '- If results are insufficient or no reliable result was found, say so clearly.\n';
-    output += '- Match the user\'s language.\n';
-    output += '- CRITICAL: Do NOT claim you searched the web unless these actual results are present.\n';
-    return output.trim();
+    out += '\nSources:\n';
+    top.forEach((r, i) => {
+        out += `${i + 1}. [${domain(r.url)}] ${r.title || r.snippet.slice(0, 80)}\n`;
+    });
+    out += '\nSummarize findings naturally with inline citations (domain name only, no raw URLs).\n';
+    out += 'DO NOT include links to YouTube or video platforms unless the user explicitly requests video content.\n';
+    out += 'DO NOT dump raw URLs in the response.\n';
+    return out.trim();
 }
 //# sourceMappingURL=web-search.js.map
