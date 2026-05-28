@@ -185,7 +185,21 @@ function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderTy
     return !!key;
   }
 
-  // Try preferred vision fallback order first
+  // If user explicitly configured a vision model (e.g. "openrouter/google/gemini-2.5-flash:free"),
+  // use it as the highest-priority vision candidate
+  if (config.visionModel) {
+    const slashIdx = config.visionModel.indexOf('/');
+    if (slashIdx > 0) {
+      const visionProv = config.visionModel.slice(0, slashIdx) as ProviderType;
+      const visionMod = config.visionModel.slice(slashIdx + 1);
+      if (hasKeyFor(visionProv) && hasVisionCapability(visionProv, visionMod)) {
+        const label = `${PROVIDER_DEFAULTS[visionProv]?.label || visionProv} / ${visionMod}`;
+        candidates.push({ provider: visionProv, model: visionMod, label });
+      }
+    }
+  }
+
+  // Try preferred vision fallback order
   for (const fb of VISION_FALLBACK_ORDER) {
     if (candidates.length >= 3) break;
     if (fb.requiresKey && !hasKeyFor(fb.provider)) continue;
@@ -402,10 +416,16 @@ interface ChatResult {
   };
 }
 
-export function getStatus(): { provider: string; model: string; tier: string; visionCapable: boolean; git: { branch: string | null; hasChanges: boolean } | null } {
+export function getStatus(): {
+  provider: string; model: string; tier: string;
+  visionCapable: boolean;
+  visionModel: string | null;
+  textModel: string | null;
+  git: { branch: string | null; hasChanges: boolean } | null;
+} {
   const config = loadConfig();
   if (!config) {
-    return { provider: 'not configured', model: '', tier: '', visionCapable: false, git: null };
+    return { provider: 'not configured', model: '', tier: '', visionCapable: false, visionModel: null, textModel: null, git: null };
   }
   const prov = (getDefaultProviderFromEnv() || config.currentProvider) as ProviderType;
   const label = PROVIDER_DEFAULTS[prov]?.label || prov;
@@ -417,6 +437,8 @@ export function getStatus(): { provider: string; model: string; tier: string; vi
     model: config.currentModel,
     tier: tierLabel,
     visionCapable: supportsVision(prov, config.currentModel),
+    visionModel: config.visionModel || null,
+    textModel: config.textModel || null,
     git: gitInfo.isRepo ? { branch: gitInfo.branch, hasChanges: gitInfo.hasChanges } : null,
   };
 }
@@ -513,9 +535,12 @@ export async function handleChatStream(
 
   const reqId = ++apiRequestCounter;
   console.log(LOG, `[req:${reqId}] handleChatStream called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
+  const textModelLabel = `${PROVIDER_DEFAULTS[prov]?.label || prov} / ${config.currentModel}`;
   if (config.debug) {
     console.log(LOG, `[req:${reqId}] Provider: ${PROVIDER_DEFAULTS[prov]?.label || prov}, Model: ${config.currentModel}`);
     console.log(LOG, `[req:${reqId}] Tier: ${PROVIDER_TIERS[prov]}, Keys: openrouter=${!!config.apiKeys.openrouter}, gemini=${!!config.apiKeys.gemini}, deepseek=${!!config.apiKeys.deepseek}, opencode_zen=${!!config.apiKeys.opencode_zen}, groq=${!!config.apiKeys.groq}, anthropic_proxy=${!!config.apiKeys.anthropic_proxy}, openai_router=${!!config.apiKeys.openai_router}`);
+    console.log(LOG, `[debug] text/code provider: ${textModelLabel}`);
+    if (config.visionModel) console.log(LOG, `[debug] vision provider: ${config.visionModel} (from HYSA_VISION_MODEL)`);
   }
   try {
     const hasImages = hasImageAttachments(req.attachments);
@@ -525,7 +550,10 @@ export async function handleChatStream(
     if (hasImages && !visionAvailable) {
       const visionTimer = Date.now();
       const imageCount = req.attachments?.filter(a => a.kind === 'image').length || 0;
-      console.log(LOG, `[req:${reqId}] Vision pipeline: taskKind=image_vision, requiredCapability=vision, currentProvider=${prov}, currentModel=${config.currentModel}, providerSupportsVision=${visionAvailable}, imageCount=${imageCount}`);
+      console.log(LOG, `[req:${reqId}] Vision pipeline: taskKind=image_vision, requiredCapability=vision, text/code provider: ${textModelLabel}, providerSupportsVision=${visionAvailable}, imageCount=${imageCount}`);
+      if (config.debug) {
+        console.log(LOG, `[debug] text model: ${config.textModel || config.currentModel}${config.visionModel ? `, vision model: ${config.visionModel}` : ', no explicit vision model configured'}`);
+      }
 
       if (req.attachments) {
         for (const att of req.attachments) {
@@ -985,9 +1013,12 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
 
   const reqId = ++apiRequestCounter;
   console.log(LOG, `[req:${reqId}] handleChat called, messages=${req.messages.length}, attachments=${req.attachments?.length || 0}`);
+  const textModelLabel = `${PROVIDER_DEFAULTS[prov]?.label || prov} / ${config.currentModel}`;
   if (config.debug) {
     console.log(LOG, `[req:${reqId}] Provider: ${PROVIDER_DEFAULTS[prov]?.label || prov}, Model: ${config.currentModel}`);
     console.log(LOG, `[req:${reqId}] Tier: ${PROVIDER_TIERS[prov]}, Keys: openrouter=${!!config.apiKeys.openrouter}, gemini=${!!config.apiKeys.gemini}, deepseek=${!!config.apiKeys.deepseek}, opencode_zen=${!!config.apiKeys.opencode_zen}, groq=${!!config.apiKeys.groq}, anthropic_proxy=${!!config.apiKeys.anthropic_proxy}, openai_router=${!!config.apiKeys.openai_router}`);
+    console.log(LOG, `[debug] text/code provider: ${textModelLabel}`);
+    if (config.visionModel) console.log(LOG, `[debug] vision provider: ${config.visionModel} (from HYSA_VISION_MODEL)`);
   }
   try {
     const hasImages = hasImageAttachments(req.attachments);
@@ -997,7 +1028,10 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
     if (hasImages && !visionAvailable) {
       const visionTimer = Date.now();
       const imageCount = req.attachments?.filter(a => a.kind === 'image').length || 0;
-      console.log(LOG, `[req:${reqId}] Vision pipeline: taskKind=image_vision, requiredCapability=vision, currentProvider=${prov}, currentModel=${config.currentModel}, providerSupportsVision=${visionAvailable}, imageCount=${imageCount}`);
+      console.log(LOG, `[req:${reqId}] Vision pipeline: taskKind=image_vision, requiredCapability=vision, text/code provider: ${textModelLabel}, providerSupportsVision=${visionAvailable}, imageCount=${imageCount}`);
+      if (config.debug) {
+        console.log(LOG, `[debug] text model: ${config.textModel || config.currentModel}${config.visionModel ? `, vision model: ${config.visionModel}` : ', no explicit vision model configured'}`);
+      }
 
       if (req.attachments) {
         for (const att of req.attachments) {

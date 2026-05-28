@@ -44,6 +44,8 @@ export interface HysaConfig {
   debug?: boolean;
   lightMode?: boolean;
   promptMode?: 'full' | 'compact' | 'minimal' | 'auto';
+  textModel?: string;
+  visionModel?: string;
 }
 
 export const PROVIDER_CATEGORIES: Record<ProviderType, ProviderCategory> = {
@@ -306,6 +308,12 @@ function applyEnvOverrides(config: HysaConfig): void {
   }
   if (process.env.HYSA_ENABLE_LOCAL_FALLBACK !== undefined) {
     config.enableLocalFallback = isLocalFallbackEnabled(config);
+  }
+  if (process.env.HYSA_TEXT_MODEL) {
+    config.textModel = process.env.HYSA_TEXT_MODEL.trim();
+  }
+  if (process.env.HYSA_VISION_MODEL) {
+    config.visionModel = process.env.HYSA_VISION_MODEL.trim();
   }
 }
 

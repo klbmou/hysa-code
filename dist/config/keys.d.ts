@@ -34,6 +34,8 @@ export interface HysaConfig {
     debug?: boolean;
     lightMode?: boolean;
     promptMode?: 'full' | 'compact' | 'minimal' | 'auto';
+    textModel?: string;
+    visionModel?: string;
 }
 export declare const PROVIDER_CATEGORIES: Record<ProviderType, ProviderCategory>;
 export declare const PROVIDER_CATEGORY_LABELS: Record<ProviderCategory, string>;

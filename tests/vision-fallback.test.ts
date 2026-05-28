@@ -237,4 +237,68 @@ describe('supportsVision', () => {
     assert.equal(supportsVision('deepseek', 'deepseek-chat'), false);
     assert.equal(supportsVision('groq', 'llama3-70b-8192'), false);
   });
+
+  it('oc/deepseek-v4-flash-free is NOT vision-capable', () => {
+    assert.equal(hasVisionCapability('openai_router', 'oc/deepseek-v4-flash-free'), false);
+    assert.equal(supportsVision('openai_router', 'oc/deepseek-v4-flash-free'), false);
+  });
 });
+
+describe('config.visionModel support', () => {
+  it('uses config.visionModel as first candidate when set and valid', () => {
+    const config = mockConfig({
+      currentProvider: 'openai_router',
+      currentModel: 'oc/deepseek-v4-flash-free',
+      apiKeys: { openrouter: 'sk-or-v1-test' },
+      visionModel: 'openrouter/google/gemini-2.5-flash:free',
+    });
+    const candidates = getVisionFallbackCandidates(config);
+    assert.ok(candidates.length >= 1, 'should have at least 1 candidate');
+    assert.equal(candidates[0].provider, 'openrouter', 'first candidate uses visionModel provider');
+    assert.equal(candidates[0].model, 'google/gemini-2.5-flash:free', 'first candidate uses visionModel model');
+  });
+
+  it('falls back to default order if config.visionModel provider has no key', () => {
+    const config = mockConfig({
+      currentProvider: 'openai_router',
+      currentModel: 'oc/deepseek-v4-flash-free',
+      apiKeys: {}, // No keys at all
+      visionModel: 'gemini/gemini-2.5-flash',
+    });
+    const candidates = getVisionFallbackCandidates(config);
+    // gemini requires a key which is not set, so falls to defaults
+    // openai_router is current provider so hasKeyFor returns true
+    // only openai_router/openai/gpt-4o-mini (requiresKey: false) is viable
+    for (const c of candidates) {
+      assert.notEqual(c.provider, 'gemini', 'gemini should be skipped without key');
+    }
+  });
+
+  it('ignores invalid visionModel format (no slash)', () => {
+    const config = mockConfig({
+      currentProvider: 'openai_router',
+      currentModel: 'oc/deepseek-v4-flash-free',
+      apiKeys: { gemini: 'test-key', openrouter: 'sk-or-v1-test' },
+      visionModel: 'gemini-2.5-flash', // no provider prefix
+    });
+    const candidates = getVisionFallbackCandidates(config);
+    // Should not crash, should fall back to normal order
+    assert.ok(candidates.length >= 1, 'should still find candidates');
+    // First candidate should be from default order (gemini/gemini-2.5-flash)
+    assert.equal(candidates[0].provider, 'gemini');
+  });
+
+  it('text/code model (oc/deepseek-v4-flash-free) is never a vision candidate', () => {
+    const config = mockConfig({
+      currentProvider: 'openai_router',
+      currentModel: 'oc/deepseek-v4-flash-free',
+      apiKeys: { openrouter: 'sk-or-v1-test' },
+    });
+    const candidates = getVisionFallbackCandidates(config);
+    for (const c of candidates) {
+      assert.notEqual(c.model, 'oc/deepseek-v4-flash-free', 'DeepSeek model should not be a vision candidate');
+    }
+  });
+});
+
+

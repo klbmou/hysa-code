@@ -239,6 +239,12 @@ function applyEnvOverrides(config) {
     if (process.env.HYSA_ENABLE_LOCAL_FALLBACK !== undefined) {
         config.enableLocalFallback = isLocalFallbackEnabled(config);
     }
+    if (process.env.HYSA_TEXT_MODEL) {
+        config.textModel = process.env.HYSA_TEXT_MODEL.trim();
+    }
+    if (process.env.HYSA_VISION_MODEL) {
+        config.visionModel = process.env.HYSA_VISION_MODEL.trim();
+    }
 }
 export function getDefaultProviderFromEnv() {
     const fromEnv = process.env.HYSA_DEFAULT_PROVIDER;

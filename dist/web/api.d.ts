@@ -1,4 +1,4 @@
-import type { HysaConfig } from '../config/keys.js';
+import type { ProviderType, HysaConfig } from '../config/keys.js';
 import type { ExecutionPlan, PlanReport } from '../ai/planner.js';
 interface AttachmentPayload {
     name: string;
@@ -8,6 +8,27 @@ interface AttachmentPayload {
     textContent?: string;
     dataUrl?: string;
 }
+declare function supportsVision(provider: string, model: string): boolean;
+declare const VISION_FALLBACK_ORDER: {
+    provider: ProviderType;
+    model: string;
+    requiresKey: boolean;
+}[];
+declare function hasImageAttachments(attachments?: AttachmentPayload[]): boolean;
+declare function getVisionFallbackCandidates(config: HysaConfig): {
+    provider: ProviderType;
+    model: string;
+    label: string;
+}[];
+declare function getVisionFallbackErrorMessage(lang: 'arabic' | 'english', failures: {
+    label: string;
+    reason: string;
+    error?: string;
+}[], debug: boolean): string;
+declare function buildVisionMessages(messages: {
+    role: string;
+    content: string;
+}[], attachments: AttachmentPayload[]): any[];
 interface ChatRequest {
     messages: {
         role: string;
@@ -29,12 +50,27 @@ interface ChatResult {
     provider?: string;
     model?: string;
     timing?: Record<string, number>;
+    visionDebug?: {
+        taskKind: string;
+        requiredCapability: string;
+        selectedProvider: string;
+        selectedModel: string;
+        providerSupportsVision: boolean;
+        imageCount: number;
+        failures: {
+            label: string;
+            reason: string;
+            error?: string;
+        }[];
+    };
 }
 export declare function getStatus(): {
     provider: string;
     model: string;
     tier: string;
     visionCapable: boolean;
+    visionModel: string | null;
+    textModel: string | null;
     git: {
         branch: string | null;
         hasChanges: boolean;
@@ -82,6 +118,7 @@ export declare function runCommand(command: string): Promise<{
     stderr: string;
     error?: string;
 }>;
+export { getVisionFallbackCandidates, getVisionFallbackErrorMessage, buildVisionMessages, hasImageAttachments, supportsVision, VISION_FALLBACK_ORDER };
 export declare function getFilePreview(path: string, content: string): string | null;
 export declare function getYoloStatus(): {
     enabled: boolean;
@@ -108,5 +145,4 @@ export declare function getFallbackStatus(): {
         category: string | null;
     };
 };
-export {};
 //# sourceMappingURL=api.d.ts.map
