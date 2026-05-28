@@ -178,8 +178,8 @@ async function setupFirstRun() {
                 baseUrl = await input({ message: '9Router base URL\n  Default: http://localhost:20128', default: 'http://localhost:20128' });
             }
             baseUrl = baseUrl.replace(/\/+$/, '');
-            let model = process.env.NINEROUTER_MODEL || PROVIDER_DEFAULTS.ninerouter.model;
-            model = await input({ message: 'Model name (auto = automatic routing):', default: model });
+            let model = process.env.NINEROUTER_MODEL || process.env.HYSA_9ROUTER_CHAT_MODEL || PROVIDER_DEFAULTS.ninerouter.model;
+            model = await input({ message: 'Model name\n  Default: oc/deepseek-v4-flash-free (safe)\n  Or try: auto (auto-routes, needs credentials):', default: model });
             const askKey = await confirm({ message: 'Does your 9Router require an API key?', default: !!process.env.NINEROUTER_API_KEY });
             let key = '';
             if (askKey) {

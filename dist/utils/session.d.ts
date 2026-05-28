@@ -49,6 +49,23 @@ export interface ChatRuntimeState {
     lastSuccessfulModel?: string | null;
     providerCooldowns?: ProviderCooldownEntry[];
     fallbackEvents?: FallbackEventEntry[];
+    providerAnalytics?: {
+        provider: string;
+        model: string;
+        analytics: {
+            totalRequests: number;
+            totalErrors: number;
+            timeoutCount: number;
+            rateLimitCount: number;
+            recoverySuccessCount: number;
+            streamInterruptionCount: number;
+            lastLatencyMs: number;
+            minLatencyMs: number;
+            maxLatencyMs: number;
+            totalLatencyMs: number;
+            lastRecoveryTime?: number;
+        };
+    }[];
     updatedAt?: number;
 }
 export interface SessionUsage {

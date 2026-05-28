@@ -19,6 +19,11 @@ const CAPABILITY_MAP = [
     // openai/gpt-4o-mini removed from vision here: router backend may not support vision.
     // ── 9Router — auto model may be vision-capable depending on backend ──
     { provider: 'ninerouter', model: 'auto', capabilities: ['text', 'code', 'tool_use', 'vision', 'free'] },
+    // 9Router explicit vision model combos
+    { provider: 'ninerouter', model: 'gemini/gemini-2.5-flash', capabilities: ['text', 'code', 'tool_use', 'vision', 'free'] },
+    { provider: 'ninerouter', model: 'gemini/gemini-1.5-flash', capabilities: ['text', 'code', 'tool_use', 'vision', 'free'] },
+    { provider: 'ninerouter', model: 'openai/gpt-4o', capabilities: ['text', 'code', 'tool_use', 'vision'] },
+    { provider: 'ninerouter', model: 'openai/gpt-4o-mini', capabilities: ['text', 'code', 'tool_use', 'vision'] },
     // ── Anthropic Proxy vision models ──
     { provider: 'anthropic_proxy', model: 'claude-sonnet-4-6', capabilities: ['text', 'code', 'tool_use', 'vision'] },
     // ── Local ──

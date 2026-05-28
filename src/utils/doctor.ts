@@ -523,8 +523,49 @@ async function check9RouterDetailed(config: HysaConfig, debug: boolean): Promise
     return results;
   }
 
-  const model = config.ninerouterModel || 'auto (default)';
+  const model = config.ninerouterModel || 'oc/deepseek-v4-flash-free (default)';
   results.push({ name: 'Default Model', status: 'ok', message: model });
+
+  // Check if model is "auto" and health-check it
+  if (config.ninerouterModel === 'auto' || (!config.ninerouterModel && false)) {
+    try {
+      const autoTestResp = await withTimeout(
+        fetch(`${baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(config.apiKeys.ninerouter ? { 'Authorization': `Bearer ${config.apiKeys.ninerouter}` } : {}),
+          },
+          body: JSON.stringify({ model: 'auto', messages: [], max_tokens: 1 }),
+          signal: AbortSignal.timeout(3000),
+        }),
+        3000,
+      );
+      if (autoTestResp.ok || autoTestResp.status === 400) {
+        results.push({ name: 'Auto Model', status: 'ok', message: 'auto routing works' });
+      } else if (autoTestResp.status === 401 || autoTestResp.status === 403) {
+        results.push({ name: 'Auto Model', status: 'warn', message: `auto requires credentials: HTTP ${autoTestResp.status}` });
+      } else {
+        const text = await autoTestResp.text();
+        const isNoCredentialsError = text.includes('No available models') || text.includes('openai total connections: 0');
+        results.push({
+          name: 'Auto Model',
+          status: isNoCredentialsError ? 'warn' : 'error',
+          message: isNoCredentialsError
+            ? 'auto routes to provider with no credentials - using oc/deepseek-v4-flash-free fallback'
+            : `HTTP ${autoTestResp.status}`,
+        });
+      }
+    } catch (err) {
+      results.push({ name: 'Auto Model', status: 'warn', message: `Test failed: ${(err as Error).message}` });
+    }
+  }
+
+  // HYSA_9ROUTER_CHAT_MODEL env var check
+  const nrChatModelEnv = process.env.HYSA_9ROUTER_CHAT_MODEL;
+  if (nrChatModelEnv) {
+    results.push({ name: 'HYSA_9ROUTER_CHAT_MODEL', status: 'ok', message: nrChatModelEnv });
+  }
 
   if (config.apiKeys.ninerouter) {
     results.push({ name: 'API Key', status: 'ok', message: 'Configured' });
@@ -533,6 +574,33 @@ async function check9RouterDetailed(config: HysaConfig, debug: boolean): Promise
   }
 
   pushProviderUsability(results, 'ninerouter', config, runtimeModels);
+
+  // 9Router vision check
+  try {
+    const visionUrl = `${baseUrl.replace(/\/+$/, '')}/models/image-to-text`;
+    const visionResp = await fetch(visionUrl, { signal: AbortSignal.timeout(5000) });
+    if (visionResp.ok) {
+      const visionData = await visionResp.json() as { data?: { id: string }[] };
+      const visionModels = (visionData?.data || []).map((m: { id: string }) => m.id);
+      if (visionModels.length > 0) {
+        results.push({ name: 'Vision Models', status: 'ok', message: visionModels.join(', ') });
+      } else {
+        results.push({ name: 'Vision Models', status: 'warn', message: 'No vision models returned by /v1/models/image-to-text' });
+      }
+    } else {
+      results.push({ name: 'Vision Models', status: 'warn', message: `GET /v1/models/image-to-text returned ${visionResp.status}` });
+    }
+  } catch (err) {
+    results.push({ name: 'Vision Models', status: 'warn', message: `Failed to check: ${(err as Error).message}` });
+  }
+
+  // HYSA_9ROUTER_VISION_MODEL env var check
+  const nrVisionEnv = process.env.HYSA_9ROUTER_VISION_MODEL;
+  if (nrVisionEnv) {
+    results.push({ name: 'HYSA_9ROUTER_VISION_MODEL', status: 'ok', message: nrVisionEnv });
+  } else {
+    results.push({ name: 'HYSA_9ROUTER_VISION_MODEL', status: 'warn', message: 'Not set (uses auto fallback)' });
+  }
 
   return results;
 }
@@ -735,9 +803,12 @@ export async function runVisionDiagnostics(debug = false): Promise<void> {
   const envModel = process.env.HYSA_VISION_MODEL;
   console.log(`  ${pc.bold('HYSA_VISION_MODEL')}: ${envModel ? pc.green(envModel) : pc.dim('(not set)')}`);
 
+  const nrVisionEnv = process.env.HYSA_9ROUTER_VISION_MODEL;
+  console.log(`  ${pc.bold('HYSA_9ROUTER_VISION_MODEL')}: ${nrVisionEnv ? pc.green(nrVisionEnv) : pc.dim('(not set)')}`);
+
   const configuredModel = config.visionModel;
   if (configuredModel && !envModel) {
-    console.log(`  ${pc.bold('config.visionModel')}: ${pc.cyan(configuredModel)} (from config file)`);
+    console.log(`  ${pc.bold('config.visionModel')}: ${configuredModel} (from config file)`);
   }
 
   console.log();

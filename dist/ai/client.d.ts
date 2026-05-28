@@ -1,6 +1,7 @@
-import type { AIClient } from './types.js';
+import type { AIClient, Message } from './types.js';
 import type { ProviderType, HysaConfig } from '../config/keys.js';
 import type { ErrorCategory } from './model-health.js';
+export declare function setMessagesForTimeout(messages: Message[]): void;
 export declare function categorizeError(msg: string): ErrorCategory;
 interface FallbackCandidate {
     provider: ProviderType;

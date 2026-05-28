@@ -21,6 +21,20 @@ export interface FallbackEvent {
   timestamp: number;
 }
 
+export interface ProviderAnalytics {
+  totalRequests: number;
+  totalErrors: number;
+  timeoutCount: number;
+  rateLimitCount: number;
+  recoverySuccessCount: number;
+  streamInterruptionCount: number;
+  lastLatencyMs: number;
+  minLatencyMs: number;
+  maxLatencyMs: number;
+  totalLatencyMs: number;
+  lastRecoveryTime?: number;
+}
+
 export interface ProviderHealthRecord {
   status: 'healthy' | 'unhealthy';
   reason: string;
@@ -37,6 +51,7 @@ export interface ProviderHealthRecord {
   averageResponseTimeMs?: number;
   requestCount: number;
   totalResponseTimeMs: number;
+  analytics?: ProviderAnalytics;
 }
 
 export interface LastErrorInfo {
@@ -89,6 +104,8 @@ const DEFAULT_COOLDOWN_MS = parseInt(process.env.HYSA_MODEL_COOLDOWN_MS || '6000
 const RATE_LIMIT_COOLDOWN_MS = parseInt(process.env.HYSA_RATE_LIMIT_COOLDOWN_MS || '120000', 10);
 const PROVIDER_COOLDOWN_MS = parseInt(process.env.HYSA_PROVIDER_COOLDOWN_MS || '120000', 10);
 
+const providerAnalyticsStore = new Map<string, ProviderAnalytics>();
+
 let loadedFromSession = false;
 let lastError: LastErrorInfo | null = null;
 let lastFallbackUsed: string | null = null;
@@ -128,12 +145,15 @@ function normalizeCategory(category: string | undefined): ErrorCategory {
   return 'unknown';
 }
 
+const TIMEOUT_COOLDOWN_MS = 30000;
+const NETWORK_COOLDOWN_MS = 20000;
+
 function getCooldownMs(category: ErrorCategory): number {
   switch (category) {
+    case 'timeout': return TIMEOUT_COOLDOWN_MS;
     case 'rate_limit': return RATE_LIMIT_COOLDOWN_MS;
-    case 'timeout': return DEFAULT_COOLDOWN_MS;
     case 'model_unavailable': return DEFAULT_COOLDOWN_MS;
-    case 'network': return Math.max(15000, DEFAULT_COOLDOWN_MS / 2);
+    case 'network': return NETWORK_COOLDOWN_MS;
     case 'quota': return Math.max(RATE_LIMIT_COOLDOWN_MS, DEFAULT_COOLDOWN_MS);
     case 'invalid_key': return Math.max(300000, DEFAULT_COOLDOWN_MS);
     default: return DEFAULT_COOLDOWN_MS;
@@ -219,6 +239,7 @@ function persistState(): void {
     lastSuccessfulModel,
     providerCooldowns: buildProviderCooldownEntries(),
     fallbackEvents: fallbackEvents.slice(-30).map(e => ({ ...e })),
+    providerAnalytics: buildAnalyticsEntries(),
     updatedAt: Date.now(),
   };
 
@@ -269,6 +290,15 @@ function buildProviderCooldownEntries(): ProviderCooldownEntry[] {
       cooldownUntil: cd.until,
       failedCount: cd.failedCount,
     });
+  }
+  return entries;
+}
+
+function buildAnalyticsEntries(): { provider: string; model: string; analytics: ProviderAnalytics }[] {
+  const entries: { provider: string; model: string; analytics: ProviderAnalytics }[] = [];
+  for (const [k, a] of providerAnalyticsStore) {
+    const { provider, model } = splitKey(k);
+    entries.push({ provider, model, analytics: a });
   }
   return entries;
 }
@@ -581,12 +611,137 @@ export function clearRequestSkips(): void {
   requestSkipped.clear();
 }
 
+let analyticsInitialized = false;
+
+function ensureAnalytics(): void {
+  if (analyticsInitialized) return;
+  analyticsInitialized = true;
+  loadAnalytics();
+}
+
+function analyticsKey(provider: string, model: string): string {
+  return `${provider}${KEY_SEP}${model}`;
+}
+
+function loadAnalytics(): void {
+  const state = getChatRuntimeState();
+  if (state.providerAnalytics) {
+    for (const entry of state.providerAnalytics) {
+      const k = analyticsKey(entry.provider, entry.model);
+      providerAnalyticsStore.set(k, entry.analytics);
+    }
+  }
+}
+
+function persistAnalytics(): void {
+  const entries: { provider: string; model: string; analytics: ProviderAnalytics }[] = [];
+  for (const [k, a] of providerAnalyticsStore) {
+    const { provider, model } = splitKey(k);
+    entries.push({ provider, model, analytics: a });
+  }
+  try {
+    const state = getChatRuntimeState();
+    state.providerAnalytics = entries;
+    saveChatRuntimeState(state);
+  } catch {
+    // best-effort
+  }
+}
+
+function getOrCreateAnalytics(provider: string, model: string): ProviderAnalytics {
+  const k = analyticsKey(provider, model);
+  let a = providerAnalyticsStore.get(k);
+  if (!a) {
+    a = {
+      totalRequests: 0,
+      totalErrors: 0,
+      timeoutCount: 0,
+      rateLimitCount: 0,
+      recoverySuccessCount: 0,
+      streamInterruptionCount: 0,
+      lastLatencyMs: 0,
+      minLatencyMs: Infinity,
+      maxLatencyMs: 0,
+      totalLatencyMs: 0,
+    };
+    providerAnalyticsStore.set(k, a);
+  }
+  return a;
+}
+
+export function recordRequestLatency(provider: string, model: string, latencyMs: number): void {
+  ensureAnalytics();
+  const a = getOrCreateAnalytics(provider, model);
+  a.totalRequests++;
+  a.lastLatencyMs = latencyMs;
+  a.totalLatencyMs += latencyMs;
+  if (latencyMs < a.minLatencyMs) a.minLatencyMs = latencyMs;
+  if (latencyMs > a.maxLatencyMs) a.maxLatencyMs = latencyMs;
+  persistAnalytics();
+}
+
+export function recordErrorAnalytics(provider: string, model: string, category: ErrorCategory): void {
+  ensureAnalytics();
+  const a = getOrCreateAnalytics(provider, model);
+  a.totalErrors++;
+  if (category === 'timeout') a.timeoutCount++;
+  if (category === 'rate_limit') a.rateLimitCount++;
+  persistAnalytics();
+}
+
+export function recordRecoverySuccess(provider: string, model: string): void {
+  ensureAnalytics();
+  const a = getOrCreateAnalytics(provider, model);
+  a.recoverySuccessCount++;
+  a.lastRecoveryTime = Date.now();
+  persistAnalytics();
+}
+
+export function recordStreamInterruption(provider: string, model: string): void {
+  ensureAnalytics();
+  const a = getOrCreateAnalytics(provider, model);
+  a.streamInterruptionCount++;
+  persistAnalytics();
+}
+
+export function getProviderAnalytics(provider: string, model: string): ProviderAnalytics | null {
+  ensureAnalytics();
+  return providerAnalyticsStore.get(analyticsKey(provider, model)) ?? null;
+}
+
+export function getAllProviderAnalytics(): Map<string, ProviderAnalytics> {
+  ensureAnalytics();
+  return new Map(providerAnalyticsStore);
+}
+
+export function getTimeoutRate(provider: string, model: string): number {
+  ensureAnalytics();
+  const a = providerAnalyticsStore.get(analyticsKey(provider, model));
+  if (!a || a.totalRequests === 0) return 0;
+  return a.timeoutCount / a.totalRequests;
+}
+
+export function getRecoveryRate(provider: string, model: string): number {
+  ensureAnalytics();
+  const a = providerAnalyticsStore.get(analyticsKey(provider, model));
+  if (!a || a.streamInterruptionCount === 0) return 1;
+  return a.recoverySuccessCount / a.streamInterruptionCount;
+}
+
+export function getAverageLatency(provider: string, model: string): number {
+  ensureAnalytics();
+  const a = providerAnalyticsStore.get(analyticsKey(provider, model));
+  if (!a || a.totalRequests === 0) return 0;
+  return a.totalLatencyMs / a.totalRequests;
+}
+
 export function resetHealth(): void {
   ensureLoaded();
   healthStore.clear();
   requestSkipped.clear();
   cooldowns.clear();
   providerCooldowns.clear();
+  providerAnalyticsStore.clear();
   lastError = null;
   lastFallbackUsed = null;
   lastSuccessfulProvider = null;

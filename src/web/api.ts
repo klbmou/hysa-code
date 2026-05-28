@@ -18,7 +18,7 @@ import { shouldInjectProjectContext } from '../ai/provider-policy.js';
 import { rankFiles } from '../context/ranker.js';
 import { decideProjectMode } from '../context/project-router.js';
 import { getYolo, setYolo, getProviderHealth } from '../utils/session.js';
-import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents, getLastSuccessfulProvider, getLastSuccessfulModel, getAllHealth, isProviderOnCooldown } from '../ai/model-health.js';
+import { toHealthSummary, getLastError, getLastFallbackUsed, getFallbackEvents, getLastSuccessfulProvider, getLastSuccessfulModel, getAllHealth, isProviderOnCooldown, recordRequestLatency, recordRecoverySuccess } from '../ai/model-health.js';
 import { detectSecrets } from '../utils/secrets.js';
 import { translateCommand, shellInfo } from '../utils/shell.js';
 import { searchWeb, formatSearchResults, getSearchDiagnostics, isCapabilityQuestion, getCapabilityResponse } from '../tools/web-search.js';
@@ -160,15 +160,59 @@ function supportsVision(provider: string, model: string): boolean {
 
 // Preferred ordered list of vision fallback models (max 3 attempted).
 // FREE models first, paid models last. Direct Gemini (free with API key) before OpenRouter.
-const VISION_FALLBACK_ORDER: { provider: ProviderType; model: string; requiresKey: boolean }[] = [
+const VISION_FALLBACK_ORDER: { provider: ProviderType; model: string; requiresKey: boolean; requiresHealthCheck?: boolean }[] = [
   { provider: 'gemini', model: 'gemini-2.5-flash', requiresKey: true },
   { provider: 'gemini', model: 'gemini-1.5-flash', requiresKey: true },
   { provider: 'openrouter', model: 'google/gemini-2.5-flash:free', requiresKey: true },
   { provider: 'openrouter', model: 'qwen/qwen2.5-vl-72b-instruct:free', requiresKey: true },
   { provider: 'openrouter', model: 'google/gemini-2.5-flash', requiresKey: true },
   { provider: 'openrouter', model: 'qwen/qwen-vl-plus', requiresKey: true },
-  { provider: 'ninerouter', model: 'auto', requiresKey: false },
+  { provider: 'ninerouter', model: 'auto', requiresKey: false, requiresHealthCheck: true },
 ];
+
+// 9Router vision model cache (lazy, per-process)
+let cachedNinerouterVisionModels: { model: string; label: string }[] | null = null;
+
+async function discoverNinerouterVisionModels(config: HysaConfig): Promise<{ model: string; label: string }[]> {
+  if (cachedNinerouterVisionModels) return cachedNinerouterVisionModels;
+  const baseUrl = config.ninerouterBaseUrl || 'http://localhost:20128/v1';
+  try {
+    const response = await fetch(`${baseUrl}/models/image-to-text`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) {
+      console.log('[vision] 9Router /v1/models/image-to-text returned', response.status);
+      return [];
+    }
+    const data = await response.json() as { data?: { id: string }[] };
+    const models = (data?.data || []).map((m: { id: string }) => ({
+      model: m.id,
+      label: `9Router / ${m.id}`,
+    }));
+    cachedNinerouterVisionModels = models;
+    console.log('[vision] 9Router discovered', models.length, 'vision model(s):', models.map(m => m.model).join(', '));
+    return models;
+  } catch (err) {
+    console.log('[vision] 9Router vision discovery failed:', (err as Error).message);
+    return [];
+  }
+}
+
+export function clearNinerouterVisionCache(): void {
+  cachedNinerouterVisionModels = null;
+}
+
+async function ensureNinerouterVisionCache(config: HysaConfig): Promise<void> {
+  if (cachedNinerouterVisionModels === null) {
+    await discoverNinerouterVisionModels(config);
+  }
+}
+
+// Warm the 9Router vision cache if 9Router is configured (runs once at module load)
+const initConfig = loadConfig();
+if (initConfig?.ninerouterBaseUrl || process.env.NINEROUTER_URL) {
+  ensureNinerouterVisionCache(initConfig!).catch(() => {});
+}
 
 function hasImageAttachments(attachments?: AttachmentPayload[]): boolean {
   if (!attachments || attachments.length === 0) return false;
@@ -209,9 +253,32 @@ function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderTy
     }
   }
 
+  // Check HYSA_9ROUTER_VISION_MODEL (e.g., "ninerouter/gemini/gemini-2.5-flash")
+  const nrVisionModel = process.env.HYSA_9ROUTER_VISION_MODEL;
+  if (nrVisionModel && candidates.length < 3) {
+    const parts = nrVisionModel.split('/').filter(Boolean);
+    if (parts.length >= 2 && parts[0] === 'ninerouter') {
+      const nrMod = parts.slice(1).join('/'); // could be "gemini/gemini-2.5-flash" or just a model name
+      const label = `9Router / ${nrMod}`;
+      console.log('[vision] HYSA_9ROUTER_VISION_MODEL found:', nrMod);
+      if (hasVisionCapability('ninerouter', nrMod)) {
+        candidates.push({ provider: 'ninerouter' as ProviderType, model: nrMod, label });
+        console.log('[vision] added HYSA_9ROUTER_VISION_MODEL:', label);
+      } else {
+        console.log('[vision] HYSA_9ROUTER_VISION_MODEL not vision-capable:', nrMod);
+      }
+    } else {
+      console.log('[vision] invalid HYSA_9ROUTER_VISION_MODEL format (expected ninerouter/...):', nrVisionModel);
+    }
+  }
+
   // Try preferred vision fallback order
   for (const fb of VISION_FALLBACK_ORDER) {
     if (candidates.length >= 3) break;
+
+    // Skip 9Router if HYSA_9ROUTER_VISION_MODEL already added it
+    if (fb.provider === 'ninerouter' && candidates.some(c => c.provider === 'ninerouter')) continue;
+
     if (fb.requiresKey && !hasKeyFor(fb.provider)) {
       console.log('[vision] skipped (no key):', fb.provider, '/', fb.model);
       continue;
@@ -224,9 +291,25 @@ function getVisionFallbackCandidates(config: HysaConfig): { provider: ProviderTy
       console.log('[vision] provider skipped (cooldown):', fb.provider);
       continue;
     }
-    const label = `${PROVIDER_DEFAULTS[fb.provider]?.label || fb.provider} / ${fb.model}`;
-    console.log('[vision] candidate added:', label);
-    candidates.push({ provider: fb.provider, model: fb.model, label });
+
+    // For 9Router/auto, only add if health-check cache is populated
+    if (fb.requiresHealthCheck) {
+      if (cachedNinerouterVisionModels !== null) {
+        // Health-checked successfully (cache populated by async discovery)
+        const label = `${PROVIDER_DEFAULTS[fb.provider]?.label || fb.provider} / ${fb.model}`;
+        console.log('[vision] candidate added (health-checked):', label);
+        candidates.push({ provider: fb.provider, model: fb.model, label });
+      } else {
+        // No health check cache yet — still add as last resort, but log warning
+        console.log('[vision] 9Router not yet health-checked, adding as fallback candidate');
+        const label = `${PROVIDER_DEFAULTS[fb.provider]?.label || fb.provider} / ${fb.model}`;
+        candidates.push({ provider: fb.provider, model: fb.model, label });
+      }
+    } else {
+      const label = `${PROVIDER_DEFAULTS[fb.provider]?.label || fb.provider} / ${fb.model}`;
+      console.log('[vision] candidate added:', label);
+      candidates.push({ provider: fb.provider, model: fb.model, label });
+    }
   }
 
   // If still need more candidates, try any vision-capable provider from the registry
@@ -267,6 +350,7 @@ function getVisionFallbackErrorMessage(
   const allRateLimit = reasons.every(r => r === 'rate-limited' || r === 'quota exceeded');
   const allInvalidKey = reasons.every(r => r === 'invalid key');
   const allUnavailable = reasons.every(r => r === 'unavailable');
+  const allCredentialError = reasons.some(r => r === 'no active credentials' || r.includes('credential'));
 
   let actualReason: string;
   if (failures.length === 0) actualReason = 'no configured vision model';
@@ -274,9 +358,15 @@ function getVisionFallbackErrorMessage(
   else if (allRateLimit) actualReason = 'rate-limited or quota exceeded on all vision models';
   else if (allInvalidKey) actualReason = 'invalid API key for all configured vision models';
   else if (allUnavailable) actualReason = 'all vision models are unavailable';
+  else if (allCredentialError) actualReason = '9Router selected a provider without active credentials';
   else actualReason = 'all vision model attempts failed';
 
-  const hint = '\n\nTip: Set HYSA_VISION_MODEL to a vision-capable model, or ensure your API keys for Gemini/OpenRouter are configured.';
+  let hint: string;
+  if (allCredentialError) {
+    hint = '\n\nTip: 9Router / auto is configured to use a provider (e.g., OpenAI) that has no active credentials. Configure a Gemini vision provider (HYSA_VISION_MODEL=gemini/gemini-2.5-flash) or create a 9Router vision combo with HYSA_9ROUTER_VISION_MODEL.';
+  } else {
+    hint = '\n\nTip: Set HYSA_VISION_MODEL to a vision-capable model, or ensure your API keys for Gemini/OpenRouter are configured.';
+  }
 
   if (lang === 'arabic') {
     let msg = 'لم أستطع تحليل الصورة الآن.';
@@ -350,6 +440,10 @@ const ERROR_MESSAGES: Record<string, { arabic: string; english: string }> = {
     arabic: 'المزود الحالي غير متاح حاليًا. جرّب بعد قليل أو غيّر المزود من الإعدادات.',
     english: 'The current provider is not available right now. Try again shortly or switch providers.',
   },
+  credential_error: {
+    arabic: 'المزود الحالي ليس لديه بيانات اعتماد صالحة للمهمة المطلوبة. جرّب مزودًا آخر أو تحقق من الإعدادات.',
+    english: 'The current provider does not have valid credentials for the requested task. Try a different provider or check the configuration.',
+  },
   generic: {
     arabic: 'حدث خطأ غير متوقع. جرّب بعد قليل أو غيّر المزود.',
     english: 'An unexpected error occurred. Try again shortly or switch providers.',
@@ -358,6 +452,7 @@ const ERROR_MESSAGES: Record<string, { arabic: string; english: string }> = {
 
 function categorizeErrorMessage(msg: string): string {
   const lower = msg.toLowerCase();
+  if (lower.includes('no active credentials') || lower.includes('active credential') || lower.includes('no credentials')) return 'credential_error';
   if (lower.includes('rate') || lower.includes('limit') || lower.includes('quota') || lower.includes('429') || lower.includes('overloaded')) return 'rate_limit';
   if (lower.includes('401') || lower.includes('403') || lower.includes('invalid') && lower.includes('key') || lower.includes('auth')) return 'invalid_key';
   if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('timedout')) return 'timeout';
@@ -752,7 +847,8 @@ export async function handleChatStream(
           } catch (err: unknown) {
             const e = err as Error;
             const duration = Date.now() - attemptStart;
-            const cat = categorizeError(e.message || '');
+            const errMsg = e.message || '';
+            const cat = categorizeError(errMsg);
             let reasonStr: string;
             if (cat === 'rate_limit') reasonStr = 'rate-limited';
             else if (cat === 'quota') reasonStr = 'quota exceeded';
@@ -760,9 +856,10 @@ export async function handleChatStream(
             else if (cat === 'invalid_key') reasonStr = 'invalid key';
             else if (cat === 'model_unavailable') reasonStr = 'unavailable';
             else if (cat === 'network') reasonStr = 'network error';
+            else if (errMsg.toLowerCase().includes('no active credentials') || errMsg.toLowerCase().includes('active credential')) reasonStr = 'no active credentials';
             else reasonStr = 'failed';
-            failures.push({ label: c.label, reason: reasonStr, error: e.message?.slice(0, 200) });
-            console.log(LOG, `[req:${reqId}] ❌ Vision fallback failed: selectedProvider=${c.provider}, selectedModel=${c.model}, reason=${reasonStr}, error=${e.message?.slice(0, 200)} (${(duration / 1000).toFixed(1)}s)`);
+            failures.push({ label: c.label, reason: reasonStr, error: errMsg.slice(0, 200) });
+            console.log(LOG, `[req:${reqId}] ❌ Vision fallback failed: selectedProvider=${c.provider}, selectedModel=${c.model}, reason=${reasonStr}, error=${errMsg.slice(0, 200)} (${(duration / 1000).toFixed(1)}s)`);
           }
         }
       }
@@ -955,13 +1052,18 @@ export async function handleChatStream(
 
     // ── YOLO tool continuation loop (streaming) ──
     let steps = 0;
+    let stepsWithoutProgress = 0;
+    const maxSteps = getMaxToolSteps(taskKind);
     let streamMessages = [...messages];
+    resetToolProgress();
 
     // Track the active provider for continuation (may differ from original if vision fallback was used)
     let activeProvider = prov;
     let activeModel = config.currentModel;
+    let continuationProvider: string | null = null;
+    let continuationModel: string | null = null;
 
-    while (steps < MAX_TOOL_STEPS && response.toolCalls.length > 0) {
+    while (steps < maxSteps && response.toolCalls.length > 0) {
       const yoloMode = getYolo();
       if (!yoloMode) break;
 
@@ -973,7 +1075,7 @@ export async function handleChatStream(
 
       steps++;
       if (config?.debug) {
-        console.log(LOG, `[req:${reqId}] YOLO stream tool loop step ${steps}/${MAX_TOOL_STEPS}: ${autoTools.length} tools`);
+        console.log(LOG, `[req:${reqId}] YOLO stream tool loop step ${steps}/${maxSteps}: ${autoTools.length} tools`);
       }
 
       writeEvent(`data: ${JSON.stringify({ type: 'tool_result', step: steps, total: autoTools.length, status: 'executing' })}\n\n`);
@@ -1019,14 +1121,58 @@ export async function handleChatStream(
 
       writeEvent(`data: ${JSON.stringify({ type: 'tool_result', step: steps, total: autoTools.length, status: 'done', results: formatToolResults(autoTools, results) })}\n\n`);
 
+      // Check if progress is being made — break if stuck in a loop
+      if (!isMakingProgress(autoTools, results)) {
+        stepsWithoutProgress++;
+        if (stepsWithoutProgress >= 3) {
+          if (config?.debug) console.log(LOG, `[req:${reqId}] Tool loop: no progress for ${stepsWithoutProgress} steps, stopping`);
+          break;
+        }
+      } else {
+        stepsWithoutProgress = 0;
+      }
+
       // Sanitize and validate for the ACTIVE provider (not the original)
       sanitizeMessagesForTextModel(streamMessages, activeProvider, activeModel);
       assertNoImagePayload(streamMessages as any, activeProvider, activeModel);
-      response = await client.sendMessageStream(streamMessages as any, perQueryPrompt, (event) => {
-        if (event.type === 'token') {
-          writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
+      try {
+        response = await client.sendMessageStream(streamMessages as any, perQueryPrompt, (event) => {
+          if (event.type === 'token') {
+            writeEvent(`data: ${JSON.stringify({ type: 'token', text: event.text })}\n\n`);
+          }
+        });
+      } catch (err) {
+        // Background continuation: if provider fails mid-tool-loop, try fallback
+        const errMsg = (err as Error).message || '';
+        console.log(LOG, `[req:${reqId}] Tool loop provider failed at step ${steps}: ${errMsg}`);
+        writeEvent(`data: ${JSON.stringify({ type: 'tool_result', step: steps, total: autoTools.length, status: 'error', error: errMsg.slice(0, 200) })}\n\n`);
+
+        // Try fallback via non-streaming with current state
+        try {
+          const fallbackClient = createClient(config);
+          const fallbackResult = await fallbackClient.sendMessage(
+            streamMessages as any,
+            perQueryPrompt,
+          );
+          if (fallbackResult.message) {
+            const fallbackLabel = PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider;
+            const continuationMsg = `\n\n[${fallbackLabel} continuing after interruption]\n\n`;
+            writeEvent(`data: ${JSON.stringify({ type: 'token', text: continuationMsg })}\n\n`);
+            for (const chunk of fallbackResult.message) {
+              writeEvent(`data: ${JSON.stringify({ type: 'token', text: chunk })}\n\n`);
+            }
+            response = fallbackResult;
+          } else {
+            throw new Error('Fallback returned empty response');
+          }
+        } catch (fallbackErr) {
+          const fallbackMsg = (fallbackErr as Error).message || 'Fallback also failed';
+          console.log(LOG, `[req:${reqId}] Tool loop background continuation also failed: ${fallbackMsg}`);
+          // Emit what we have so far as the final response
+          writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response?.message || 'Tool loop interrupted', toolCalls: response?.toolCalls || [], timing: timingReport, plan: currentPlan })}\n\n`);
+          return;
         }
-      });
+      }
     }
 
     const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun) : undefined;
@@ -1044,6 +1190,25 @@ export async function handleChatStream(
       friendlyMsg = lang === 'arabic'
         ? 'جميع المزودات المجانية مشغولة أو وصلت للحد المسموح حاليًا. جرّب بعد قليل أو استخدم مزود مدفوع.'
         : 'All free providers are currently busy or rate-limited. Try again shortly or configure a paid/stable provider.';
+    } else if (rawMsg.includes('timed out') || rawMsg.includes('timeout') || rawMsg.includes('did not respond')) {
+      const provLabel = PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider;
+      const fbEvents2 = getFallbackEvents();
+      const fallbackUsed = fbEvents2.find(e => e.reason.includes('Switched to') || e.reason.includes('succeeded'));
+      if (fallbackUsed) {
+        friendlyMsg = lang === 'arabic'
+          ? `${provLabel} لم يستجب في الوقت المحدد. تم التبديل التلقائي إلى مزود آخر.`
+          : `${provLabel} timed out, continuing with fallback provider.`;
+      } else {
+        friendlyMsg = lang === 'arabic'
+          ? `${provLabel} لم يستجب في الوقت المحدد. جارٍ محاولة مزود بديل...`
+          : `${provLabel} timed out. Trying alternative provider...`;
+      }
+      // Append fallback event details
+      const fbEvents3 = getFallbackEvents();
+      if (fbEvents3.length > 0) {
+        const fallbackLines = fbEvents3.slice(-3).map(e => `  • ${e.reason}`).join('\n');
+        friendlyMsg += `\n\n${fallbackLines}`;
+      }
     } else {
       friendlyMsg = getFriendlyErrorMessage(lang, rawMsg, !!config?.debug, config?.currentProvider ? PROVIDER_DEFAULTS[config.currentProvider]?.label || config.currentProvider : undefined);
     }
@@ -1058,7 +1223,54 @@ export async function handleChatStream(
   }
 }
 
-export const MAX_TOOL_STEPS = 5;
+export const MAX_TOOL_STEPS = 10;
+
+function getAdaptiveToolBudget(taskKind: TaskKind): number {
+  switch (taskKind) {
+    case 'code_edit':
+    case 'debugging':
+    case 'code_review':
+    case 'project_scan':
+    case 'long_reasoning':
+      return 10;
+    case 'coding_qa':
+    case 'planning':
+      return 8;
+    case 'long_context':
+      return 8;
+    case 'simple_chat':
+    case 'general_qa':
+      return 3;
+    default:
+      return 6;
+  }
+}
+
+export function getMaxToolSteps(taskKind: TaskKind): number {
+  return getAdaptiveToolBudget(taskKind);
+}
+
+let lastToolResults = new Map<string, string>();
+const SIMILARITY_THRESHOLD = 0.8;
+
+function isMakingProgress(toolCalls: { type: string; params: Record<string, string> }[], results: string[]): boolean {
+  if (toolCalls.length === 0) return false;
+  for (let i = 0; i < toolCalls.length; i++) {
+    const tc = toolCalls[i];
+    const result = results[i] || '';
+    const key = `${tc.type}:${tc.params.command || tc.params.filePath || ''}`;
+    const prev = lastToolResults.get(key);
+    if (prev !== result) {
+      lastToolResults.set(key, result);
+      return true;
+    }
+  }
+  return false;
+}
+
+function resetToolProgress(): void {
+  lastToolResults.clear();
+}
 
 export function formatToolResults(toolCalls: { type: string; params: Record<string, string> }[], results: string[]): string {
   return toolCalls.map((tc, i) => {
@@ -1131,13 +1343,31 @@ export async function continueChat(messages: { role: string; content: string }[]
   assertNoImagePayload(messages as any, prov, config.currentModel);
 
   try {
+    const startTime = Date.now();
     const response = await client.sendMessage(messages as any, systemPrompt);
+    recordRequestLatency(prov, config.currentModel, Date.now() - startTime);
     return {
       message: response.message,
       toolCalls: response.toolCalls.map(tc => ({ type: tc.type, params: tc.params })),
     };
   } catch (err: unknown) {
     const e = err as Error;
+    const startTime = Date.now();
+    // Try background continuation with fallback provider
+    try {
+      const fallbackClient = createClient(config);
+      const fallbackResponse = await fallbackClient.sendMessage(messages as any, systemPrompt);
+      if (fallbackResponse.message) {
+        recordRecoverySuccess(prov, config.currentModel);
+        return {
+          message: `[Previous provider failed, continuing with fallback]\n\n${fallbackResponse.message}`,
+          toolCalls: fallbackResponse.toolCalls.map(tc => ({ type: tc.type, params: tc.params })),
+        };
+      }
+    } catch {
+      // Both failed
+    }
+    recordRequestLatency(prov, config.currentModel, Date.now() - startTime);
     return { message: `Tool continuation failed: ${e.message}`, toolCalls: [] };
   }
 }
@@ -1239,7 +1469,8 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
           } catch (err: unknown) {
             const e = err as Error;
             const duration = Date.now() - attemptStart;
-            const cat = categorizeError(e.message || '');
+            const errMsg = e.message || '';
+            const cat = categorizeError(errMsg);
             let reasonStr: string;
             if (cat === 'rate_limit') reasonStr = 'rate-limited';
             else if (cat === 'quota') reasonStr = 'quota exceeded';
@@ -1247,9 +1478,10 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
             else if (cat === 'invalid_key') reasonStr = 'invalid key';
             else if (cat === 'model_unavailable') reasonStr = 'unavailable';
             else if (cat === 'network') reasonStr = 'network error';
+            else if (errMsg.toLowerCase().includes('no active credentials') || errMsg.toLowerCase().includes('active credential')) reasonStr = 'no active credentials';
             else reasonStr = 'failed';
-            failures.push({ label: c.label, reason: reasonStr, error: e.message?.slice(0, 200) });
-            console.log(LOG, `[req:${reqId}] ❌ Vision fallback failed: selectedProvider=${c.provider}, selectedModel=${c.model}, reason=${reasonStr}, error=${e.message?.slice(0, 200)} (${(duration / 1000).toFixed(1)}s)`);
+            failures.push({ label: c.label, reason: reasonStr, error: errMsg.slice(0, 200) });
+            console.log(LOG, `[req:${reqId}] ❌ Vision fallback failed: selectedProvider=${c.provider}, selectedModel=${c.model}, reason=${reasonStr}, error=${errMsg.slice(0, 200)} (${(duration / 1000).toFixed(1)}s)`);
           }
         }
       }
@@ -1563,11 +1795,14 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
 
     // ── YOLO tool continuation loop ──────────────
     let steps = 0;
+    let stepsWithoutProgress = 0;
+    const toolMaxSteps = getMaxToolSteps(taskKind);
     let currentMessages = [...messages];
     let activeProvider = config.currentProvider;
     let activeModel = config.currentModel;
+    resetToolProgress();
 
-    while (steps < MAX_TOOL_STEPS && response.toolCalls.length > 0) {
+    while (steps < toolMaxSteps && response.toolCalls.length > 0) {
       const yoloMode = getYolo();
       if (!yoloMode) break;
 
@@ -1581,7 +1816,7 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
 
       steps++;
       if (config.debug) {
-        console.log(LOG, `[req:${reqId}] YOLO tool loop step ${steps}/${MAX_TOOL_STEPS}: ${autoTools.length} tools`);
+        console.log(LOG, `[req:${reqId}] YOLO tool loop step ${steps}/${toolMaxSteps}: ${autoTools.length} tools`);
       }
 
       // ── Update plan state: mark inferred step running ──
@@ -1620,6 +1855,17 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
         ? `${response.message}\n\nTool results:\n${formatToolResults(autoTools, results)}`
         : `Tool results:\n${formatToolResults(autoTools, results)}`;
       currentMessages.push({ role: 'assistant' as const, content: feedText });
+
+      // Check if progress is being made — break if stuck in a loop
+      if (!isMakingProgress(autoTools, results)) {
+        stepsWithoutProgress++;
+        if (stepsWithoutProgress >= 3) {
+          if (config.debug) console.log(LOG, `[req:${reqId}] Tool loop: no progress for ${stepsWithoutProgress} steps, stopping`);
+          break;
+        }
+      } else {
+        stepsWithoutProgress = 0;
+      }
 
       // Sanitize and validate against the active provider
       sanitizeMessagesForTextModel(currentMessages, activeProvider, activeModel);

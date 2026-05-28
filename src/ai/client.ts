@@ -5,25 +5,32 @@ import { createSingleClient } from './client-factory.js';
 import { createSmartRouter } from './smart-router.js';
 import { checkOllama } from './ollama.js';
 import { checkOpenAICompatibleAPI } from './openai-compatible.js';
-import { markHealth, markModelCooldown, markProviderCooldown, isOnCooldown, isProviderOnCooldown, isUnhealthy, isSkippedForRequest, getHealthRecord, getFallbackEvents, setLastFallbackUsed, setLastSuccessfulProvider, clearRequestSkips, addFallbackEvent, clearFallbackEvents } from './model-health.js';
+import { markHealth, markModelCooldown, markProviderCooldown, isOnCooldown, isProviderOnCooldown, isUnhealthy, isSkippedForRequest, getHealthRecord, getFallbackEvents, setLastFallbackUsed, setLastSuccessfulProvider, clearRequestSkips, addFallbackEvent, clearFallbackEvents, recordRequestLatency, recordErrorAnalytics, recordRecoverySuccess, recordStreamInterruption } from './model-health.js';
 import type { ErrorCategory } from './model-health.js';
 import { getRetryAfterSeconds } from './provider-policy.js';
 import { recordRequest, recordError } from '../utils/session.js';
 import { logProviderSuccess, logProviderFailure } from '../brain/graph-store.js';
 import { hasVisionCapability } from './provider-capabilities.js';
+import { estimateTimeoutFromMessages } from './timeout-utils.js';
 
 const CHAT_TIMEOUT_MS = 30000;
-const FALLBACK_ATTEMPT_TIMEOUT_MS = 12000;
+const FALLBACK_ATTEMPT_TIMEOUT_MS = 15000;
 const EXPERIMENTAL_TIMEOUT_MS = 4000;
 const EXPERIMENTAL_RETRY_TIMEOUT_MS = 2000;
 const LOCAL_TIMEOUT_MS = 15000;
-const MAX_TOTAL_TIME_MS = 60000;
+const MAX_TOTAL_TIME_MS = 120000;
 const MAX_FALLBACK_MODELS = 10;
 const MAX_FALLBACK_PROVIDERS = 10;
 
 let requestCounter = 0;
 
-function getProviderTimeout(provider: ProviderType, isPrimary: boolean): number {
+let lastMessagesForTimeout: Message[] = [];
+
+export function setMessagesForTimeout(messages: Message[]): void {
+  lastMessagesForTimeout = messages;
+}
+
+function getProviderTimeout(provider: ProviderType, isPrimary: boolean, messages?: Message[]): number {
   // Env var overrides
   const envChatTimeout = process.env.HYSA_CHAT_TIMEOUT_MS;
   const envFallbackTimeout = process.env.HYSA_FALLBACK_TIMEOUT_MS;
@@ -40,6 +47,13 @@ function getProviderTimeout(provider: ProviderType, isPrimary: boolean): number 
   const tier = PROVIDER_TIERS[provider];
   if (tier === 'experimental_free') return EXPERIMENTAL_TIMEOUT_MS;
   if (tier === 'local_free') return LOCAL_TIMEOUT_MS;
+
+  // Use adaptive timeout based on message content size
+  const msgs = messages || lastMessagesForTimeout;
+  if (isPrimary && msgs.length > 0) {
+    return Math.max(CHAT_TIMEOUT_MS, estimateTimeoutFromMessages(msgs));
+  }
+
   if (isPrimary) return CHAT_TIMEOUT_MS;
   return FALLBACK_ATTEMPT_TIMEOUT_MS;
 }
@@ -283,8 +297,9 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
       const streamReqId = ++requestCounter;
       const startTime = Date.now();
       clearFallbackEvents();
+      setMessagesForTimeout(messages);
       const primaryModel = config.currentModel;
-      const primaryTimeout = getProviderTimeout(primary, true);
+      const primaryTimeout = getProviderTimeout(primary, true, messages);
       if (config.debug) console.log(`[req:${streamReqId}] sendMessageStream starting: ${primary} / ${primaryModel}`);
 
       if (!shouldSkipProvider(primary, primaryModel)) {
@@ -334,9 +349,28 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             markHealth(primary, primaryModel, 'unhealthy', friendlyError(errMsg, primary), cat);
             logProviderFailure(primary, primaryModel, errMsg).catch(() => {});
             recordError(errMsg, primary, primaryModel);
+            recordErrorAnalytics(primary, primaryModel, cat);
 
             if (contentStarted) {
-              // Some content was already emitted — cannot cleanly fallback
+              recordStreamInterruption(primary, primaryModel);
+              // Try non-streaming fallback with partial content context
+              try {
+                const continuationMsg = `[Previous response was interrupted. Continuing with fallback.]`;
+                const continuedMessages = [...messages, { role: 'assistant' as const, content: continuationMsg }];
+                const fallbackResult = await sendMessageFallback(continuedMessages, systemPrompt, signal);
+                if (fallbackResult.message) {
+                  recordRecoverySuccess(primary, primaryModel);
+                  // Emit the fallback result
+                  onEvent({ type: 'token', text: `\n\n[${PROVIDER_DEFAULTS[primary]?.label || primary} interrupted, continuing with fallback]\n\n` });
+                  if (fallbackResult.message) {
+                    onEvent({ type: 'token', text: fallbackResult.message });
+                  }
+                  onEvent({ type: 'done', fullText: fallbackResult.message, toolCalls: fallbackResult.toolCalls });
+                  return fallbackResult;
+                }
+              } catch {
+                // Fallback also failed — rethrow original
+              }
               throw streamError;
             }
             // No content yet — fall through to non-streaming fallback
@@ -461,6 +495,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             markHealth(provider, model, 'healthy', 'success', 'unknown', duration);
             logProviderSuccess(provider, model).catch(() => {});
             recordRequest(duration);
+            recordRequestLatency(provider, model, duration);
             setLastSuccessfulProvider(provider, model);
             return result;
           } catch (err: unknown) {
@@ -470,6 +505,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             const errMsg = lastError.message || '';
             const cat = categorizeError(errMsg);
             const attemptDuration = Date.now() - attemptStart;
+            recordErrorAnalytics(provider, model, cat);
 
             if (cat === 'timeout') {
               addFallbackEvent(provider, model, `${provLabel} timed out (${timeoutMs / 1000}s)`);
@@ -510,7 +546,7 @@ function createFallbackClient(primary: ProviderType, config: HysaConfig): AIClie
             markHealth(provider, model, 'unhealthy', friendlyError(errMsg, provider), cat, attemptDuration);
             logProviderFailure(provider, model, errMsg).catch(() => {});
             if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
-              const cooldownSec = getRetryAfterSeconds(err) ?? (cat === 'rate_limit' ? 120 : 60);
+              const cooldownSec = getRetryAfterSeconds(err) ?? (cat === 'rate_limit' ? 120 : cat === 'timeout' ? 30 : 60);
               markModelCooldown(provider, model, friendlyError(errMsg, provider), cooldownSec, cat);
               if ((provider === 'openai_router' || provider === 'openrouter' || provider === 'ninerouter') && cat === 'rate_limit') {
                 markProviderCooldown(provider, `${PROVIDER_DEFAULTS[provider]?.label || provider} rate-limited; provider cooldown active`, cooldownSec, cat);

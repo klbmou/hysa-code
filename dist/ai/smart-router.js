@@ -1,15 +1,16 @@
 import { PROVIDER_TIERS, isLocalFallbackEnabled } from '../config/keys.js';
 import { createSingleClient } from './client-factory.js';
-import { addFallbackEvent, clearFallbackEvents, clearRequestSkips, getFallbackEvents, getHealthRecord, getProviderCooldownRemaining, isOnCooldown, isProviderOnCooldown, isUnhealthy, markHealth, markModelCooldown, markProviderCooldown, setLastFallbackUsed, setLastSuccessfulProvider, } from './model-health.js';
+import { addFallbackEvent, clearFallbackEvents, clearRequestSkips, getFallbackEvents, getHealthRecord, getProviderCooldownRemaining, isOnCooldown, isProviderOnCooldown, isUnhealthy, markHealth, markModelCooldown, markProviderCooldown, setLastFallbackUsed, setLastSuccessfulProvider, recordRequestLatency, recordErrorAnalytics, recordRecoverySuccess, recordStreamInterruption, } from './model-health.js';
 import { classifyTask } from './task-classifier.js';
 import { getCandidatesForTask, getSkippedProviderReasons } from './model-registry.js';
 import { listOllamaModels } from './ollama.js';
 import { getBestProviderForTask, getRetryAfterSeconds, isRateLimitError, isTimeoutError, } from './provider-policy.js';
 import { logProviderSuccess, logProviderFailure } from '../brain/graph-store.js';
 import { hasVisionCapability } from './provider-capabilities.js';
+import { getProviderTimeoutForTask } from './timeout-utils.js';
 const LOG = '[SmartRouter]';
 const ATTEMPT_TIMEOUT_MS = 25000;
-const MAX_TOTAL_TIME_MS = 60000;
+const MAX_TOTAL_TIME_MS = 120000;
 const LOCAL_TIMEOUT_MS = 15000;
 const PROVIDER_FAILURE_COOLDOWN_THRESHOLD = 3;
 const ONLINE_FREE_UNAVAILABLE_MESSAGE = 'All configured online free providers are currently unavailable or rate-limited. Try again shortly or configure another provider.';
@@ -23,11 +24,15 @@ function getEnvInt(key, defaultVal) {
     }
     return defaultVal;
 }
+let lastTaskKind = 'unknown';
 function getAttemptTimeout(provider) {
     const tier = PROVIDER_TIERS[provider];
     if (tier === 'local_free')
         return LOCAL_TIMEOUT_MS;
-    return getEnvInt('HYSA_CHAT_TIMEOUT_MS', ATTEMPT_TIMEOUT_MS);
+    const envTimeout = getEnvInt('HYSA_CHAT_TIMEOUT_MS', 0);
+    if (envTimeout > 0)
+        return envTimeout;
+    return getProviderTimeoutForTask(provider, lastTaskKind);
 }
 function validateProviderConsistency(provider, model, taskKind) {
     console.log('[provider] selected provider:', provider);
@@ -56,6 +61,7 @@ export function createSmartRouter(config, _signal) {
             const lastText = typeof lastUser?.content === 'string' ? lastUser.content : '';
             // ── Classify task ──
             const taskKind = classifyTask(messages);
+            lastTaskKind = taskKind;
             if (debug)
                 console.log(`${LOG}[req:${reqId}] Task: ${taskKind}`);
             // ── Browser / skill tasks — no model call ──
@@ -231,6 +237,7 @@ export function createSmartRouter(config, _signal) {
             const lastUser = [...messages].reverse().find(m => m.role === 'user');
             const lastText = typeof lastUser?.content === 'string' ? lastUser.content : '';
             const taskKind = classifyTask(messages);
+            lastTaskKind = taskKind;
             if (debug)
                 console.log(`${LOG}[req:${reqId}] Stream task: ${taskKind}`);
             if (taskKind === 'browser_task' || taskKind === 'skill_task') {
@@ -265,6 +272,7 @@ export function createSmartRouter(config, _signal) {
                     signal.addEventListener('abort', () => { clearTimeout(timer); ac.abort(); }, { once: true });
                 }
                 let contentStarted = false;
+                let partialTokens = '';
                 // Request tracing and validation before streaming
                 console.log('[provider] selected provider:', first.provider);
                 console.log('[provider] actual upstream provider:', first.provider);
@@ -278,8 +286,10 @@ export function createSmartRouter(config, _signal) {
                 try {
                     addFallbackEvent(first.provider, first.model, `Streaming ${first.label}...`);
                     const result = await client.sendMessageStream(messages, systemPrompt, (event) => {
-                        if (event.type === 'token')
+                        if (event.type === 'token') {
                             contentStarted = true;
+                            partialTokens += event.text;
+                        }
                         onEvent(event);
                     }, ac.signal);
                     clearTimeout(timer);
@@ -287,6 +297,7 @@ export function createSmartRouter(config, _signal) {
                     markHealth(first.provider, first.model, 'healthy', 'success', 'unknown', duration);
                     logProviderSuccess(first.provider, first.model).catch(() => { });
                     setLastSuccessfulProvider(first.provider, first.model);
+                    recordRequestLatency(first.provider, first.model, duration);
                     return result;
                 }
                 catch (err) {
@@ -297,16 +308,42 @@ export function createSmartRouter(config, _signal) {
                     const cooldownSec = retryAfter ?? getCooldownSeconds(cat);
                     markHealth(first.provider, first.model, 'unhealthy', errMsg, cat);
                     logProviderFailure(first.provider, first.model, errMsg).catch(() => { });
+                    recordErrorAnalytics(first.provider, first.model, cat);
+                    const isTimeout = cat === 'timeout';
                     if (cat === 'rate_limit' || cat === 'timeout' || cat === 'quota') {
                         markModelCooldown(first.provider, first.model, errMsg, cooldownSec, cat);
                     }
                     addFallbackEvent(first.provider, first.model, `Stream ${first.label} - ${cat}`);
                     if (contentStarted) {
-                        if (cat === 'rate_limit') {
-                            markProviderCooldown(first.provider, `${first.provider} streaming failed with rate_limit; switching providers on the next request`, Math.max(cooldownSec, 120), cat);
+                        recordStreamInterruption(first.provider, first.model);
+                        if (isTimeout && partialTokens.length > 20) {
+                            // ── Partial recovery: preserve partial output, fallback with context ──
+                            const partialResponse = {
+                                message: partialTokens,
+                                toolCalls: [],
+                            };
+                            const continuationMsg = `[Previous response was interrupted after generating partial content. Continuing with fallback provider.]
+Previous partial response: ${partialTokens.slice(0, 500)}`;
+                            const continuedMessages = [...messages, { role: 'assistant', content: continuationMsg }];
+                            const fallbackResult = await this.sendMessage(continuedMessages, systemPrompt, signal);
+                            if (fallbackResult.message) {
+                                recordRecoverySuccess(first.provider, first.model);
+                                if (debug)
+                                    console.log(`${LOG}[req:${reqId}] Partial recovery succeeded via fallback`);
+                                onEvent({ type: 'token', text: `\n\n[Partial recovery: ${first.provider} timed out, continuing with fallback]\n\n` });
+                                onEvent({ type: 'token', text: fallbackResult.message });
+                                onEvent({ type: 'done', fullText: partialTokens + '\n\n[continued below]\n\n' + fallbackResult.message, toolCalls: fallbackResult.toolCalls });
+                                return {
+                                    message: partialTokens + '\n\n[continued]\n\n' + fallbackResult.message,
+                                    toolCalls: fallbackResult.toolCalls,
+                                };
+                            }
                         }
-                        // Already emitted content — rethrow
+                        // Content too short or non-timeout — rethrow
                         throw err;
+                    }
+                    if (cat === 'rate_limit') {
+                        markProviderCooldown(first.provider, `${first.provider} streaming failed with rate_limit; switching providers on the next request`, Math.max(cooldownSec, 120), cat);
                     }
                     console.log(`  Stream ${first.label} failed (${cat}). Trying another model/provider...`);
                 }
@@ -410,10 +447,10 @@ function categorizeError(msg) {
 }
 function getCooldownSeconds(cat) {
     switch (cat) {
-        case 'timeout': return 60;
+        case 'timeout': return 30;
         case 'rate_limit': return 120;
         case 'model_unavailable': return 60;
-        case 'network': return 30;
+        case 'network': return 20;
         case 'invalid_key': return 300;
         default: return 60;
     }

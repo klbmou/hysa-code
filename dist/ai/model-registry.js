@@ -11,7 +11,11 @@ const MODEL_REGISTRY = [
     // openai/gpt-4o-mini vision depends on router backend — not reliable
     { provider: 'openai_router', model: 'openai/gpt-4o-mini', label: 'OpenAI Router / openai/gpt-4o-mini', capabilities: ['general_qa', 'simple_chat', 'unknown'], priority: 'fast' },
     // ── ninerouter models ──
-    { provider: 'ninerouter', model: 'auto', label: '9Router / auto', capabilities: ['simple_chat', 'general_qa', 'coding_qa', 'code_edit', 'project_scan', 'long_reasoning', 'web_research', 'unknown'], priority: 'balanced' },
+    { provider: 'ninerouter', model: 'auto', label: '9Router / auto', capabilities: ['simple_chat', 'general_qa', 'coding_qa', 'code_edit', 'project_scan', 'long_reasoning', 'web_research', 'unknown', 'image_vision'], priority: 'balanced' },
+    { provider: 'ninerouter', model: 'gemini/gemini-2.5-flash', label: '9Router / gemini/gemini-2.5-flash', capabilities: ['general_qa', 'coding_qa', 'long_reasoning', 'image_vision', 'simple_chat', 'unknown'], priority: 'balanced' },
+    { provider: 'ninerouter', model: 'gemini/gemini-1.5-flash', label: '9Router / gemini/gemini-1.5-flash', capabilities: ['general_qa', 'simple_chat', 'image_vision', 'unknown'], priority: 'fast' },
+    { provider: 'ninerouter', model: 'openai/gpt-4o', label: '9Router / openai/gpt-4o', capabilities: ['general_qa', 'coding_qa', 'long_reasoning', 'image_vision', 'unknown'], priority: 'stronger' },
+    { provider: 'ninerouter', model: 'openai/gpt-4o-mini', label: '9Router / openai/gpt-4o-mini', capabilities: ['general_qa', 'simple_chat', 'image_vision', 'unknown'], priority: 'fast' },
     // ── openrouter models ──
     { provider: 'openrouter', model: 'qwen/qwen3-coder:free', label: 'OpenRouter / qwen/qwen3-coder:free', capabilities: ['simple_chat', 'general_qa', 'coding_qa'], priority: 'fast' },
     { provider: 'openrouter', model: 'openai/gpt-oss-120b:free', label: 'OpenRouter / openai/gpt-oss-120b:free', capabilities: ['general_qa', 'simple_chat'], priority: 'fast' },

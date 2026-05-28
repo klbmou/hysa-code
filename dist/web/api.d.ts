@@ -1,4 +1,5 @@
 import type { ProviderType, HysaConfig } from '../config/keys.js';
+import type { TaskKind } from '../ai/task-classifier.js';
 import type { ExecutionPlan, PlanReport } from '../ai/planner.js';
 interface AttachmentPayload {
     name: string;
@@ -13,7 +14,9 @@ declare const VISION_FALLBACK_ORDER: {
     provider: ProviderType;
     model: string;
     requiresKey: boolean;
+    requiresHealthCheck?: boolean;
 }[];
+export declare function clearNinerouterVisionCache(): void;
 declare function hasImageAttachments(attachments?: AttachmentPayload[]): boolean;
 declare function getVisionFallbackCandidates(config: HysaConfig): {
     provider: ProviderType;
@@ -97,7 +100,8 @@ export declare function saveFile(path: string, content: string): {
     diff?: string;
 };
 export declare function handleChatStream(req: ChatRequest, writeEvent: (event: string) => void): Promise<void>;
-export declare const MAX_TOOL_STEPS = 5;
+export declare const MAX_TOOL_STEPS = 10;
+export declare function getMaxToolSteps(taskKind: TaskKind): number;
 export declare function formatToolResults(toolCalls: {
     type: string;
     params: Record<string, string>;

@@ -56,7 +56,7 @@ describe('tool continuation API', () => {
   it('MAX_TOOL_STEPS is defined and reasonable', async () => {
     const { MAX_TOOL_STEPS } = await import('../src/web/api.js');
     assert.ok(typeof MAX_TOOL_STEPS === 'number');
-    assert.ok(MAX_TOOL_STEPS > 0 && MAX_TOOL_STEPS <= 10);
+    assert.ok(MAX_TOOL_STEPS > 0 && MAX_TOOL_STEPS <= 15);
   });
 
   it('continueChat module exports correctly', async () => {

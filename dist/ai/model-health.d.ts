@@ -6,6 +6,19 @@ export interface FallbackEvent {
     reason: string;
     timestamp: number;
 }
+export interface ProviderAnalytics {
+    totalRequests: number;
+    totalErrors: number;
+    timeoutCount: number;
+    rateLimitCount: number;
+    recoverySuccessCount: number;
+    streamInterruptionCount: number;
+    lastLatencyMs: number;
+    minLatencyMs: number;
+    maxLatencyMs: number;
+    totalLatencyMs: number;
+    lastRecoveryTime?: number;
+}
 export interface ProviderHealthRecord {
     status: 'healthy' | 'unhealthy';
     reason: string;
@@ -22,6 +35,7 @@ export interface ProviderHealthRecord {
     averageResponseTimeMs?: number;
     requestCount: number;
     totalResponseTimeMs: number;
+    analytics?: ProviderAnalytics;
 }
 export interface LastErrorInfo {
     provider: string;
@@ -73,6 +87,15 @@ export declare function addFallbackEvent(provider: string, model: string, reason
 export declare function getFallbackEvents(): FallbackEvent[];
 export declare function clearFallbackEvents(): void;
 export declare function clearRequestSkips(): void;
+export declare function recordRequestLatency(provider: string, model: string, latencyMs: number): void;
+export declare function recordErrorAnalytics(provider: string, model: string, category: ErrorCategory): void;
+export declare function recordRecoverySuccess(provider: string, model: string): void;
+export declare function recordStreamInterruption(provider: string, model: string): void;
+export declare function getProviderAnalytics(provider: string, model: string): ProviderAnalytics | null;
+export declare function getAllProviderAnalytics(): Map<string, ProviderAnalytics>;
+export declare function getTimeoutRate(provider: string, model: string): number;
+export declare function getRecoveryRate(provider: string, model: string): number;
+export declare function getAverageLatency(provider: string, model: string): number;
 export declare function resetHealth(): void;
 export declare function toHealthSummary(): string[];
 export declare function toHealthEntries(): ProviderHealthEntry[];

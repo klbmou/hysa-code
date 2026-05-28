@@ -94,7 +94,7 @@ export const PROVIDER_DEFAULTS: Record<ProviderType, { model: string; label: str
   hysa_ai: { model: 'hysa-coder-lite', label: 'HYSA AI' },
   anthropic_proxy: { model: 'claude-3-5-sonnet-latest', label: 'Anthropic Proxy' },
   openai_router: { model: 'gpt-4o-mini', label: 'OpenAI Router' },
-  ninerouter: { model: 'auto', label: '9Router' },
+   ninerouter: { model: 'oc/deepseek-v4-flash-free', label: '9Router' },
 };
 
 export const PROVIDER_MODELS: Record<ProviderType, string[]> = {
@@ -136,7 +136,7 @@ export const PROVIDER_MODELS: Record<ProviderType, string[]> = {
   hysa_ai: ['hysa-coder-lite', 'hysa-coder', 'hysa-fast'],
   anthropic_proxy: ['claude-3-5-sonnet-latest', 'claude-3-opus-latest', 'claude-3-haiku-latest'],
   openai_router: ['qw/qwen3-coder-flash', 'oc/deepseek-v4-flash-free', 'qw/qwen3-coder-plus', 'oc/nemotron-3-super-free', 'deepseek/deepseek-chat', 'openai/gpt-4o-mini', 'cc/claude-sonnet-4-6'],
-  ninerouter: ['auto'],
+   ninerouter: ['oc/deepseek-v4-flash-free', 'auto'],
 };
 
 export type ProviderTier = 'free_api' | 'local_free' | 'premium_api' | 'experimental_free';
@@ -327,12 +327,16 @@ function applyEnvOverrides(config: HysaConfig): void {
   if (nrKey) {
     config.apiKeys.ninerouter = nrKey.trim();
   }
-  const nrModel = process.env.NINEROUTER_MODEL;
-  if (nrModel) {
-    config.ninerouterModel = nrModel.trim();
-  }
+   const nrModel = process.env.NINEROUTER_MODEL;
+   if (nrModel) {
+     config.ninerouterModel = nrModel.trim();
+   }
+   const nrChatModel = process.env.HYSA_9ROUTER_CHAT_MODEL;
+   if (nrChatModel) {
+     config.ninerouterModel = nrChatModel.trim();
+   }
 
-  if (process.env.HYSA_TEXT_MODEL) {
+   if (process.env.HYSA_TEXT_MODEL) {
     config.textModel = process.env.HYSA_TEXT_MODEL.trim();
   }
   if (process.env.HYSA_VISION_MODEL) {
