@@ -1,0 +1,67 @@
+warning: in the working copy of 'dist/ai/client.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/ai/model-registry.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/ai/ninerouter.d.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/ai/ninerouter.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/ai/provider-capabilities.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/ai/provider-policy.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/ai/smart-router.d.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/ai/smart-router.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/ai/task-classifier.d.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/ai/task-classifier.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/tools/web-search.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/utils/doctor.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'dist/web/api.js', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/ai/client.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/ai/model-registry.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/ai/ninerouter.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/ai/provider-capabilities.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/ai/provider-policy.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/ai/smart-router.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/ai/task-classifier.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/tools/web-search.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/utils/doctor.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'src/web/api.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/provider-capabilities.test.ts', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'tests/web-research-routing.test.ts', LF will be replaced by CRLF the next time Git touches it
+ dist/ai/client.js                                  |   2 [32m+[m[31m-[m
+ dist/ai/client.js.map                              |   2 [32m+[m[31m-[m
+ dist/ai/model-registry.d.ts.map                    |   2 [32m+[m[31m-[m
+ dist/ai/model-registry.js                          |  14 [32m++[m[31m-[m
+ dist/ai/model-registry.js.map                      |   2 [32m+[m[31m-[m
+ dist/ai/ninerouter.d.ts                            |   3 [32m+[m
+ dist/ai/ninerouter.js                              |  70 [32m+++++++++++[m[31m-[m
+ dist/ai/provider-capabilities.js                   |   3 [32m+[m
+ dist/ai/provider-policy.d.ts.map                   |   2 [32m+[m[31m-[m
+ dist/ai/provider-policy.js                         |   8 [32m+[m[31m-[m
+ dist/ai/provider-policy.js.map                     |   2 [32m+[m[31m-[m
+ dist/ai/smart-router.d.ts                          |  11 [32m++[m
+ dist/ai/smart-router.d.ts.map                      |   2 [32m+[m[31m-[m
+ dist/ai/smart-router.js                            |  98 [32m+++++++++++++++[m[31m-[m
+ dist/ai/smart-router.js.map                        |   2 [32m+[m[31m-[m
+ dist/ai/task-classifier.d.ts                       |   1 [32m+[m
+ dist/ai/task-classifier.d.ts.map                   |   2 [32m+[m[31m-[m
+ dist/ai/task-classifier.js                         |   6 [32m+[m
+ dist/ai/task-classifier.js.map                     |   2 [32m+[m[31m-[m
+ .../builtin/browser-testing-planning/SKILL.md      |  38 [31m-------[m
+ dist/tools/web-search.d.ts.map                     |   2 [32m+[m[31m-[m
+ dist/tools/web-search.js                           |  29 [32m++++[m[31m-[m
+ dist/tools/web-search.js.map                       |   2 [32m+[m[31m-[m
+ dist/utils/doctor.d.ts.map                         |   2 [32m+[m[31m-[m
+ dist/utils/doctor.js                               |  54 [32m++++++++[m[31m-[m
+ dist/utils/doctor.js.map                           |   2 [32m+[m[31m-[m
+ dist/web/api.d.ts.map                              |   2 [32m+[m[31m-[m
+ dist/web/api.js                                    |  12 [32m+[m[31m-[m
+ dist/web/api.js.map                                |   2 [32m+[m[31m-[m
+ src/ai/client.ts                                   |   2 [32m+[m[31m-[m
+ src/ai/model-registry.ts                           |  13 [32m++[m[31m-[m
+ src/ai/ninerouter.ts                               |  72 [32m+++++++++++[m[31m-[m
+ src/ai/provider-capabilities.ts                    |   3 [32m+[m
+ src/ai/provider-policy.ts                          |   9 [32m+[m[31m-[m
+ src/ai/smart-router.ts                             | 123 [32m++++++++++++++++++++[m[31m-[m
+ src/ai/task-classifier.ts                          |   7 [32m++[m
+ src/tools/web-search.ts                            |  31 [32m+++++[m[31m-[m
+ src/utils/doctor.ts                                |  55 [32m++++++++[m[31m-[m
+ src/web/api.ts                                     |  17 [32m++[m[31m-[m
+ tests/provider-capabilities.test.ts                |  85 [32m++++++++++++++[m
+ tests/web-research-routing.test.ts                 |  51 [32m+++++++[m[31m--[m
+ 41 files changed, 734 insertions(+), 113 deletions(-)

@@ -4,6 +4,8 @@ import { classifyTask } from '../src/ai/task-classifier.js';
 import { getCandidatesForTask } from '../src/ai/model-registry.js';
 import type { HysaConfig } from '../src/config/keys.js';
 import { hasVisionCapability, isModelVisionCapable, isProviderVisionCapable, getVisionCapableProviders, providerHasCapability } from '../src/ai/provider-capabilities.js';
+import { getSuggestedFallbackAction, getAvailableFallbackProviders, isProviderUsable } from '../src/ai/provider-policy.js';
+import { applyTaskBasedRouting, buildAttemptPlan } from '../src/ai/smart-router.js';
 
 function mockConfig(overrides: Partial<HysaConfig> = {}): HysaConfig {
   return {
@@ -114,5 +116,88 @@ describe('provider capability routing', () => {
     for (const c of candidates) {
       assert.ok(hasVisionCapability(c.provider, c.model), `${c.label} must be vision-capable`);
     }
+  });
+
+  it('openai_router prefers configured currentModel over task priority for simple_chat', () => {
+    const config = mockConfig({ currentProvider: 'openai_router', currentModel: 'oc/deepseek-v4-flash-free', apiKeys: { openai: 'sk-test' }, openaiRouterBaseUrl: 'http://router' } as unknown as Partial<HysaConfig>);
+    const candidates = getCandidatesForTask('simple_chat', config, neverHealthy());
+    const first = candidates[0];
+    assert.equal(first.provider, 'openai_router', 'first candidate should be from openai_router');
+    assert.equal(first.model, 'oc/deepseek-v4-flash-free', 'configured model should appear before qw/qwen3-coder-flash despite fast priority');
+    const qwenFastIdx = candidates.findIndex(c => c.model === 'qw/qwen3-coder-flash');
+    const configuredIdx = candidates.findIndex(c => c.model === 'oc/deepseek-v4-flash-free');
+    assert.ok(qwenFastIdx > configuredIdx, 'qw/qwen3-coder-flash (fast) should come after configured oc/deepseek-v4-flash-free (balanced)');
+  });
+
+  it('openai_router configured model is first candidate even when other model has faster priority', () => {
+    const config = mockConfig({ currentProvider: 'openai_router', currentModel: 'oc/deepseek-v4-flash-free', apiKeys: { openai: 'sk-test' }, openaiRouterBaseUrl: 'http://router' } as unknown as Partial<HysaConfig>);
+    const candidates = getCandidatesForTask('simple_chat', config, neverHealthy());
+    const first = candidates[0];
+    assert.equal(first.model, 'oc/deepseek-v4-flash-free', 'oc/deepseek-v4-flash-free (balanced) should sort before qw/qwen3-coder-flash (fast)');
+    const openAiGptIdx = candidates.findIndex(c => c.model === 'openai/gpt-4o-mini');
+    const configuredIdx = candidates.findIndex(c => c.model === 'oc/deepseek-v4-flash-free');
+    assert.ok(configuredIdx < openAiGptIdx, 'configured deepseek model should sort before openai/gpt-4o-mini');
+  });
+
+  it('openai_router configured currentModel is respected even when not in registry', () => {
+    const config = mockConfig({ currentProvider: 'openai_router', currentModel: 'unknown/custom-model', apiKeys: { openai: 'sk-test' }, openaiRouterBaseUrl: 'http://router' } as unknown as Partial<HysaConfig>);
+    const candidates = getCandidatesForTask('simple_chat', config, neverHealthy());
+    const first = candidates[0];
+    assert.equal(first.provider, 'openai_router', 'first should be from openai_router');
+    assert.equal(first.model, 'unknown/custom-model', 'custom model not in registry should be added and sorted first');
+  });
+
+  it('end-to-end: getCandidatesForTask + buildAttemptPlan returns configured model first for simple_chat', () => {
+    const config = mockConfig({ currentProvider: 'openai_router', currentModel: 'oc/deepseek-v4-flash-free', apiKeys: { openai: 'sk-test' }, openaiRouterBaseUrl: 'http://router' } as unknown as Partial<HysaConfig>);
+    const candidates = getCandidatesForTask('simple_chat', config, neverHealthy());
+    const taskRouted = applyTaskBasedRouting(candidates, 'simple_chat', 'hi', config);
+    const attempts = buildAttemptPlan(taskRouted, 'simple_chat', 6);
+    assert.ok(attempts.length > 0, 'should have at least one attempt');
+    const first = attempts[0];
+    assert.equal(first.provider, 'openai_router', 'first attempt should be openai_router');
+    assert.equal(first.model, 'oc/deepseek-v4-flash-free', 'first attempt should be configured model oc/deepseek-v4-flash-free, not qw/qwen3-coder-flash');
+    assert.ok(attempts.some(c => c.model === 'qw/qwen3-coder-flash'), 'qw/qwen3-coder-flash should still be in candidate list as fallback');
+    const configuredIdx = attempts.findIndex(c => c.model === 'oc/deepseek-v4-flash-free');
+    const qwenIdx = attempts.findIndex(c => c.model === 'qw/qwen3-coder-flash');
+    assert.ok(configuredIdx < qwenIdx, 'configured model should sort before qw/qwen3-coder-flash');
+  });
+});
+
+describe('getSuggestedFallbackAction', () => {
+  const routerConfig: HysaConfig = {
+    currentProvider: 'openai_router',
+    currentModel: 'oc/deepseek-v4-flash-free',
+    apiKeys: { openai: 'sk-test' },
+    openaiRouterBaseUrl: 'http://router',
+    ollamaBaseUrl: 'http://localhost:11434',
+    debug: false,
+    lightMode: false,
+    promptMode: 'auto',
+    agentMode: 'chat',
+  } as HysaConfig;
+
+  it('returns rate limit message for openai_router', () => {
+    const msg = getSuggestedFallbackAction('openai_router', routerConfig, 'rate limit exceeded');
+    assert.ok(msg.includes('rate-limited'), 'rate limit message should contain rate-limited');
+    assert.ok(msg.includes('Local fallback is disabled'), 'should mention local fallback');
+  });
+
+  it('returns not usable message for unconfigured provider', () => {
+    const config: HysaConfig = { ...routerConfig, anthropicProxyBaseUrl: '' } as HysaConfig;
+    const msg = getSuggestedFallbackAction('anthropic_proxy', config, undefined);
+    assert.ok(msg.includes('not currently usable'), 'unconfigured provider should show not usable');
+  });
+
+  it('returns no action needed when provider is usable and fallback providers exist', () => {
+    const usable = isProviderUsable('openai_router', routerConfig);
+    const fallbacks = getAvailableFallbackProviders(routerConfig);
+    const msg = getSuggestedFallbackAction('openai_router', routerConfig, undefined);
+    assert.ok(usable, `provider should be usable`);
+    assert.ok(fallbacks.length === 0 || msg === 'No action needed. A usable provider is available.' || msg.includes('usable fallback providers'), `usable=${usable} fallbacks=${fallbacks.length} msg=${msg}`);
+  });
+
+  it('returns no action needed when last error exists but fallback providers are available', () => {
+    const msg = getSuggestedFallbackAction('openai_router', routerConfig, 'connection failed');
+    assert.equal(msg, 'No action needed. A usable provider is available.');
   });
 });

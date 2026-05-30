@@ -91,7 +91,7 @@ export function isNetworkError(error: string | Error | unknown): boolean {
     : error instanceof Error
       ? error.message
       : String(error ?? '');
-  return /econnrefused|econnreset|fetch failed|network|enotfound|unavailable|econnaborted/i.test(msg);
+  return /econnrefused|econnreset|fetch failed|network|enotfound|unavailable|econnaborted|connection/i.test(msg);
 }
 
 export function getRetryAfterSeconds(error: unknown): number | null {
@@ -341,6 +341,13 @@ export function getSuggestedFallbackAction(provider: string, config: HysaConfig,
 
   if (!isProviderUsable(provider, config, runtimeModels)) {
     return `${PROVIDER_DEFAULTS[provider as ProviderType]?.label || provider} is not currently usable. Run hysa config to switch providers or wait for cooldowns to expire.`;
+  }
+
+  if (!isLocalFallbackEnabled(config)) {
+    const fallbacks = getAvailableFallbackProviders(config, runtimeModels);
+    if (fallbacks.length === 0) {
+      return 'No usable fallback providers available. Local fallback is disabled. Enable HYSA_ENABLE_LOCAL_FALLBACK=true or configure another online provider.';
+    }
   }
 
   return 'No action needed. A usable provider is available.';

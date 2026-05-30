@@ -12,7 +12,7 @@ import { checkPlaywrightInstalled, checkChromiumInstalled, getBrowserConfig, cli
 import { getBrainStatus } from '../brain/store.js';
 import { getGraphStats, experienceGraphExists } from '../brain/graph-store.js';
 import { isRecallAvailable } from '../brain/recall.js';
-import { DEFAULT_NINEROUTER_CHAT_MODEL, DEFAULT_NINEROUTER_ROOT_URL, discoverNinerouter, hydrateNinerouterConfig, orderNinerouterChatModels, probe9RouterModel, } from '../ai/ninerouter.js';
+import { DEFAULT_NINEROUTER_CHAT_MODEL, DEFAULT_NINEROUTER_ROOT_URL, discoverNinerouter, getNinerouterCandidateRoots, hydrateNinerouterConfig, orderNinerouterChatModels, probe9RouterModel, } from '../ai/ninerouter.js';
 const DOCTOR_TIMEOUT_MS = 15000;
 async function withTimeout(promise, timeoutMs) {
     const timeoutPromise = new Promise((_, reject) => {
@@ -261,7 +261,7 @@ async function checkOpenAICompatibleEndpoint(label, baseURL, apiKey, debug) {
     }
 }
 async function checkChatCompletion(provider, baseURL, apiKey, debug) {
-    const label = `${PROVIDER_DEFAULTS[provider]?.label || provider} POST /chat`;
+    const label = `${PROVIDER_DEFAULTS[provider]?.label || provider} POST /v1/chat/completions`;
     try {
         const headers = {
             'Content-Type': 'application/json',
@@ -462,11 +462,17 @@ async function checkAnthropicProxyDetailed(config, debug) {
 async function check9RouterDetailed(config, debug, options = {}) {
     const results = [];
     const discovery = await discoverNinerouter(config, { includeVision: true, timeoutMs: DOCTOR_TIMEOUT_MS, force: true });
+    const allRoots = getNinerouterCandidateRoots(config);
+    const rootsDisplay = allRoots.join(', ');
     results.push({ name: 'Root URL', status: 'ok', message: discovery.rootUrl });
     results.push({ name: 'API Base URL', status: 'ok', message: discovery.apiBaseUrl });
     if (!discovery.available) {
         results.push({ name: 'API Health', status: 'error', message: discovery.reason || '9Router is not reachable' });
-        results.push({ name: 'Discovery', status: 'warn', message: `Checked NINEROUTER_URL or ${DEFAULT_NINEROUTER_ROOT_URL}` });
+        results.push({ name: 'Discovery', status: 'warn', message: `Attempted roots: ${rootsDisplay}` });
+        if (!discovery.rootUrl.includes('127.0.0.1') && allRoots.some(r => r.includes('localhost'))) {
+            results.push({ name: 'Windows Hint', status: 'warn', message: 'Try: $env:NINEROUTER_URL="http://127.0.0.1:20128" then re-run hysa doctor' });
+        }
+        results.push({ name: 'Test Commands', status: 'warn', message: 'In PowerShell: curl http://127.0.0.1:20128/api/health ; curl http://127.0.0.1:20128/v1/models' });
         return results;
     }
     results.push({ name: 'API Health', status: 'ok', message: 'GET /api/health returned ok' });
@@ -515,6 +521,17 @@ async function check9RouterDetailed(config, debug, options = {}) {
     }
     const runtimeModels = await getDoctorRuntimeModels(config);
     pushProviderUsability(results, 'ninerouter', config, runtimeModels);
+    // Test POST /v1/chat/completions with the recommended model
+    const probeModel = recommended || DEFAULT_NINEROUTER_CHAT_MODEL;
+    const probeResult = await probe9RouterModel(config, probeModel, { timeoutMs: 10000 });
+    const probeStatus = probeResult.usable ? 'ok' : 'error';
+    const probeMsg = probeResult.usable
+        ? `POST /v1/chat/completions works (${probeResult.latencyMs}ms)`
+        : `POST /v1/chat/completions failed: ${probeResult.status} — ${probeResult.reason}${probeResult.httpStatus ? ` (HTTP ${probeResult.httpStatus})` : ''}${probeResult.errorMessage ? `. ${probeResult.errorMessage}` : ''}`;
+    if (discovery.available && !probeResult.usable && probeResult.status === 'unavailable') {
+        results.push({ name: 'Models vs Chat', status: 'warn', message: 'Models endpoint is reachable, but chat completion failed. The 9Router may be overloaded or the model may not be loadable.' });
+    }
+    results.push({ name: 'POST /v1/chat/completions', status: probeStatus, message: probeMsg });
     if (discovery.visionModel) {
         results.push({ name: 'Vision Model', status: 'ok', message: discovery.visionModel });
     }
@@ -588,10 +605,14 @@ async function checkOpenAIRouterDetailed(config, debug) {
         results.push({ name: 'API Key', status: 'warn', message: 'Not configured (optional)' });
     }
     pushProviderUsability(results, 'openai_router', config, runtimeModels);
+    // Test POST /v1/chat/completions with the configured model
+    const chatModel = config.openaiRouterModel || config.currentModel || PROVIDER_DEFAULTS.openai_router.model;
+    const chatTest = await checkChatCompletionForModel('openai_router', baseUrl, config.apiKeys.openai_router, chatModel, debug);
+    results.push(chatTest);
     return results;
 }
 async function checkChatCompletionForModel(provider, baseURL, apiKey, model, debug) {
-    const label = `${provider} POST /chat`;
+    const label = `${provider} POST /v1/chat/completions`;
     try {
         const headers = { 'Content-Type': 'application/json' };
         if (apiKey)
@@ -976,6 +997,14 @@ export async function runDoctor(debug = false, provider, options = {}) {
                 results.push({ name: 'Router Key', status: 'warn', message: 'Not configured (optional)' });
             }
             pushProviderUsability(results, 'openai_router', config, runtimeModels);
+            // Test POST /v1/chat/completions
+            const chatModel = config.openaiRouterModel || config.currentModel || PROVIDER_DEFAULTS.openai_router.model;
+            const orModelsOk = results.some(r => r.name === 'OpenAI Router Usable' && r.status === 'ok');
+            const orChatResult = await checkChatCompletionForModel('openai_router', config.openaiRouterBaseUrl, config.apiKeys.openai_router, chatModel, debug);
+            if (orModelsOk && orChatResult.status === 'error') {
+                results.push({ name: 'Models vs Chat', status: 'warn', message: 'Models endpoint is reachable, but chat completion endpoint is not responding.' });
+            }
+            results.push(orChatResult);
         }
         else {
             results.push({ name: 'OpenAI Router', status: 'warn', message: 'Not configured. Set HYSA_OPENAI_ROUTER_BASE_URL.' });
@@ -993,9 +1022,24 @@ export async function runDoctor(debug = false, provider, options = {}) {
                 results.push({ name: '9Router Key', status: 'warn', message: 'Not configured (optional)' });
             }
             pushProviderUsability(results, 'ninerouter', config, runtimeModels);
+            const nrModelsOk = results.some(r => r.status === 'ok' && r.name === '9Router Usable');
+            if (nrModelsOk && !results.some(r => r.name.includes('POST /v1/chat/completions'))) {
+                const nrChatResult = await checkChatCompletionForModel('9Router', config.ninerouterBaseUrl, config.apiKeys.ninerouter, config.ninerouterModel || DEFAULT_NINEROUTER_CHAT_MODEL, debug);
+                if (nrChatResult.status === 'error') {
+                    results.push({ name: 'Models vs Chat', status: 'warn', message: 'Models endpoint is reachable, but chat completion endpoint is not responding.' });
+                }
+                results.push(nrChatResult);
+            }
         }
         else {
-            results.push({ name: '9Router', status: 'warn', message: `Not discovered at NINEROUTER_URL or ${DEFAULT_NINEROUTER_ROOT_URL}.` });
+            const allRoots = config.openaiRouterBaseUrl ? getNinerouterCandidateRoots(config) : [];
+            const rootList = allRoots.length > 0 ? allRoots.join(', ') : `NINEROUTER_URL or ${DEFAULT_NINEROUTER_ROOT_URL}`;
+            results.push({ name: '9Router', status: 'warn', message: `Not discovered. Attempted: ${rootList}` });
+            if (!config.ninerouterRootUrl && !process.env.NINEROUTER_URL) {
+                results.push({ name: '9Router Hint (Windows)', status: 'warn', message: 'In PowerShell: $env:NINEROUTER_URL="http://127.0.0.1:20128" then re-run' });
+                results.push({ name: '9Router Test Health/Models', status: 'warn', message: 'curl http://127.0.0.1:20128/api/health ; curl http://127.0.0.1:20128/v1/models' });
+                results.push({ name: '9Router Test Chat', status: 'warn', message: `Invoke-RestMethod -Uri "http://127.0.0.1:20128/v1/chat/completions" -Method Post -ContentType "application/json" -Body '{"model":"oc/deepseek-v4-flash-free","messages":[{"role":"user","content":"hi"}],"stream":false}'` });
+            }
         }
         const lastChatError = getLastError();
         if (lastChatError) {

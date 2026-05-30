@@ -1,3 +1,4 @@
+export declare function isArabicText(text: string): boolean;
 export type TaskKind = 'simple_chat' | 'code_review' | 'search' | 'planning' | 'long_context' | 'debugging' | 'general_qa' | 'coding_qa' | 'code_edit' | 'project_scan' | 'web_research' | 'browser_task' | 'image_vision' | 'skill_task' | 'long_reasoning' | 'unknown';
 export declare function classifyTask(messages: {
     role: string;

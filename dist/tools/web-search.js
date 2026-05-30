@@ -220,19 +220,38 @@ export function formatSearchResults(query, results) {
             return url;
         }
     };
+    const isArabic = /[\u0600-\u06FF]/.test(query);
     let out = `[Web Search: "${query}" — ${results.length} result(s)]\n\n`;
     out += 'Summary:\n';
     for (const r of top) {
         const finding = r.snippet.split(/[.!?]/, 1)[0]?.trim() || r.snippet;
         out += `\u2022 ${finding}\n`;
     }
-    out += '\nSources:\n';
+    const sourcesHeader = isArabic ? 'المصادر' : 'Sources';
+    out += `\n${sourcesHeader}:\n`;
     top.forEach((r, i) => {
-        out += `${i + 1}. [${domain(r.url)}] ${r.title || r.snippet.slice(0, 80)}\n`;
+        const snippetLine = r.snippet.slice(0, 120).replace(/\n/g, ' ');
+        out += `${i + 1}. [${domain(r.url)}] ${r.title || 'Untitled'}\n`;
+        out += `   ${snippetLine}\n`;
     });
-    out += '\nSummarize findings naturally with inline citations (domain name only, no raw URLs).\n';
-    out += 'DO NOT include links to YouTube or video platforms unless the user explicitly requests video content.\n';
-    out += 'DO NOT dump raw URLs in the response.\n';
+    if (isArabic) {
+        out += '\nتعليمات للإجابة:\n';
+        out += '- يجب أن تتضمن الإجابة النهائية دائماً قسم "مصادر" في النهاية.\n';
+        out += '- ادرج 3-5 من أفضل المصادر في قسم المصادر.\n';
+        out += '- لكل مصدر: اذكر العنوان، اسم النطاق أو الرابط، وملخص من سطر واحد.\n';
+        out += '- لا تضع روابط طويلة داخل فقرات النص.\n';
+        out += '- إذا قلت "بحثت" في الإجابة، تأكد من عرض مصدر واحد على الأقل.\n';
+        out += '- لا تدرج روابط يوتيوب أو منصات فيديو ما لم يطلبها المستخدم صراحةً.\n';
+    }
+    else {
+        out += '\nAnswer requirements:\n';
+        out += '- The final answer MUST include a "Sources" section at the end.\n';
+        out += '- List 3-5 of the best sources in the Sources section.\n';
+        out += '- For each source, show: title, domain or URL, and a 1-line summary.\n';
+        out += '- Do NOT dump raw long URLs inside the paragraph text.\n';
+        out += '- If you say "I searched" in the answer, you MUST show at least one source.\n';
+        out += '- Do NOT include links to YouTube or video platforms unless the user explicitly requests video content.\n';
+    }
     return out.trim();
 }
 //# sourceMappingURL=web-search.js.map

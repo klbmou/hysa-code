@@ -10,6 +10,8 @@ export interface NinerouterDiscovery {
     visionModels: string[];
     chatModel: string;
     visionModel?: string;
+    promotedVisionModels?: string[];
+    visionPromotionReason?: string;
     autoHealthChecked: boolean;
     reason?: string;
 }
@@ -45,6 +47,7 @@ export declare function hydrateNinerouterConfig(config: HysaConfig, options?: {
 export declare function clearNinerouterDiscoveryCache(): void;
 export declare function orderNinerouterChatModels(models: string[], preferred?: string): string[];
 export declare function isUsableNinerouterChatModel(model: string): boolean;
+export declare function getNinerouterPromotableVisionChatModels(models: string[]): string[];
 export declare function extractNinerouterErrorDetails(error: unknown): NinerouterErrorDetails;
 export declare function classifyNinerouterFailure(errorOrDetails: unknown): NinerouterProbeStatus;
 export declare function ninerouterProbeStatusToErrorCategory(status: NinerouterProbeStatus): 'rate_limit' | 'invalid_key' | 'model_unavailable' | 'network' | 'unknown';

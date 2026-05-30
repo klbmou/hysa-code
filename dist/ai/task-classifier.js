@@ -1,3 +1,9 @@
+const ARABIC_PATTERN = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+export function isArabicText(text) {
+    if (!text)
+        return false;
+    return ARABIC_PATTERN.test(text);
+}
 const GREETINGS = ['hi', 'hello', 'hey', 'yo', 'sup', 'hiya', 'howdy', 'greetings', 'salam', 'thanks', 'ok', 'nice', 'good', 'great', 'perfect', 'yes', 'no', 'sure', 'okay', 'bye', 'goodbye', 'cya', 'see ya', 'later'];
 const ARABIC_GREETINGS = ['السلام', 'صباح', 'مساء', 'مرحبا', 'اهلا', 'اه', 'اوك', 'تمام', 'نعم', 'لا', 'شكرا'];
 const ALL_GREETINGS = [...GREETINGS, ...ARABIC_GREETINGS];

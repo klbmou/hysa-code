@@ -155,6 +155,12 @@ async function discoverNinerouterVisionModels(config) {
         model,
         label: `9Router / ${model}`,
     }));
+    const promoted = new Set(discovery.promotedVisionModels || []);
+    for (const model of models) {
+        if (promoted.has(model.model)) {
+            console.log('[vision] promoted chat model to vision candidate:', model.model, 'reason:', discovery.visionPromotionReason || 'model is multimodal-capable in /v1/models');
+        }
+    }
     cachedNinerouterVisionModels = models;
     console.log('[vision] 9Router discovered', models.length, 'vision model(s):', models.map(m => m.model).join(', '));
     return models;
@@ -181,6 +187,7 @@ function hasImageAttachments(attachments) {
 async function getVisionFallbackCandidates(config) {
     const candidates = [];
     const currentProv = config.currentProvider;
+    const configuredNinerouterVisionModel = config.ninerouterVisionModel || process.env.HYSA_9ROUTER_VISION_MODEL;
     await hydrateNinerouterConfig(config, { includeVision: true });
     function hasKeyFor(provider) {
         if (provider === 'ninerouter')
@@ -231,7 +238,7 @@ async function getVisionFallbackCandidates(config) {
         }
     }
     // Check HYSA_9ROUTER_VISION_MODEL (e.g., "gemini/gemini-2.5-flash" or "ninerouter/gemini/gemini-2.5-flash")
-    const nrVisionModel = config.ninerouterVisionModel || process.env.HYSA_9ROUTER_VISION_MODEL;
+    const nrVisionModel = configuredNinerouterVisionModel;
     if (nrVisionModel && candidates.length < 3) {
         const nrMod = nrVisionModel.replace(/^ninerouter\//, '');
         if (nrMod) {
@@ -256,6 +263,7 @@ async function getVisionFallbackCandidates(config) {
             continue;
         candidates.push({ provider: 'ninerouter', model: discovered.model, label: discovered.label });
         console.log('[vision] added discovered 9Router vision model:', discovered.label);
+        console.log('[vision] selected vision fallback:', discovered.label);
     }
     // Try preferred vision fallback order
     for (const fb of VISION_FALLBACK_ORDER) {
@@ -736,6 +744,7 @@ export async function handleChatStream(req, writeEvent) {
                 injectLanguageInstruction(fbMessages);
                 for (const c of visionCandidates) {
                     console.log('[vision] using provider', c.provider, 'for vision messages');
+                    console.log('[vision] selected vision fallback:', c.label);
                     const timeoutMs = 30000;
                     const attemptStart = Date.now();
                     try {
@@ -1323,6 +1332,7 @@ export async function handleChat(req) {
                 injectLanguageInstruction(fbMessages);
                 for (const c of visionCandidates) {
                     console.log('[vision] using provider', c.provider, 'for vision messages');
+                    console.log('[vision] selected vision fallback:', c.label);
                     const timeoutMs = 30000;
                     const attemptStart = Date.now();
                     try {

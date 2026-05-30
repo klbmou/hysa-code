@@ -63,7 +63,7 @@ export function categorizeError(msg) {
         return 'quota';
     if (lower.includes('timeout') || lower.includes('timed out') || lower.includes('abort'))
         return 'timeout';
-    if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed') || lower.includes('network') || lower.includes('enotfound') || lower.includes('econnaborted'))
+    if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed') || lower.includes('network') || lower.includes('enotfound') || lower.includes('econnaborted') || lower.includes('connection'))
         return 'network';
     if (lower.includes('404') || lower.includes('model not found') || lower.includes('not found') || lower.includes('does not support') || lower.includes('not support') || lower.includes('unavailable') || lower.includes('no free') || lower.includes('not supported') || lower.includes('503') || lower.includes('service unavailable') || lower.includes('overloaded') || lower.includes('overload'))
         return 'model_unavailable';

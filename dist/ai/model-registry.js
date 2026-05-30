@@ -77,16 +77,17 @@ export function getCandidatesForTask(taskKind, config, healthChecker, runtimeMod
         for (const mc of registry) {
             if (mc.priority !== pri)
                 continue;
+            const isConfiguredModel = mc.provider === config.currentProvider && mc.model === config.currentModel;
             if (normalizedTask === 'image_vision') {
-                if (!mc.capabilities.includes('image_vision'))
+                if (!isConfiguredModel && !mc.capabilities.includes('image_vision'))
                     continue;
             }
             else if (normalizedTask !== 'unknown') {
-                if (!mc.capabilities.includes(normalizedTask))
+                if (!isConfiguredModel && !mc.capabilities.includes(normalizedTask))
                     continue;
             }
             else {
-                if (!mc.capabilities.includes('unknown'))
+                if (!isConfiguredModel && !mc.capabilities.includes('unknown'))
                     continue;
             }
             const key = `${mc.provider}:${mc.model}`;
@@ -121,6 +122,13 @@ export function getCandidatesForTask(taskKind, config, healthChecker, runtimeMod
             const bIndex = modelIndex(ordered, b.model);
             if (aIndex !== bIndex)
                 return aIndex - bIndex;
+        }
+        // Prefer the configured current model for its own provider
+        if (a.provider === config.currentProvider && b.provider === config.currentProvider) {
+            if (a.model === config.currentModel && b.model !== config.currentModel)
+                return -1;
+            if (a.model !== config.currentModel && b.model === config.currentModel)
+                return 1;
         }
         const priorityDelta = priorityIndex(priorityOrder, a.priority) - priorityIndex(priorityOrder, b.priority);
         if (priorityDelta !== 0)

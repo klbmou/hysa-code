@@ -1,3 +1,4 @@
+import { hasVisionCapability } from './provider-capabilities.js';
 export const DEFAULT_NINEROUTER_ROOT_URL = 'http://localhost:20128';
 export const DEFAULT_NINEROUTER_CHAT_MODEL = 'oc/deepseek-v4-flash-free';
 const CACHE_TTL_MS = 30000;
@@ -26,13 +27,41 @@ export function getPreferredNinerouterVisionModel(config) {
         return undefined;
     return normalizeNinerouterModelId(envModel.trim());
 }
+function isLikelyLocalUrl(url) {
+    try {
+        const parsed = new URL(url);
+        const h = parsed.hostname;
+        return h === 'localhost' || h === '127.0.0.1' || h === '::1'
+            || /^10\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) || /^192\.168\./.test(h);
+    }
+    catch {
+        return false;
+    }
+}
+function addIpv4Fallback(url) {
+    const result = [url];
+    try {
+        const parsed = new URL(url);
+        if (parsed.hostname === 'localhost') {
+            parsed.hostname = '127.0.0.1';
+            result.push(parsed.toString().replace(/\/+$/, ''));
+        }
+    }
+    catch { /* invalid URL, keep as-is */ }
+    return result;
+}
 export function getNinerouterCandidateRoots(config) {
+    const extras = [];
+    if (config.openaiRouterBaseUrl && isLikelyLocalUrl(config.openaiRouterBaseUrl)) {
+        extras.push(config.openaiRouterBaseUrl);
+    }
     return dedupe([
         process.env.NINEROUTER_URL,
         config.ninerouterRootUrl,
         config.ninerouterBaseUrl,
+        ...extras,
         DEFAULT_NINEROUTER_ROOT_URL,
-    ].filter((url) => !!url && !!url.trim()).map(normalizeNinerouterRootUrl));
+    ].filter((url) => !!url && !!url.trim()).map(normalizeNinerouterRootUrl).flatMap(addIpv4Fallback));
 }
 export async function discoverNinerouter(config, options = {}) {
     const includeVision = options.includeVision === true;
@@ -56,10 +85,18 @@ export async function discoverNinerouter(config, options = {}) {
     for (const rootUrl of roots) {
         const apiBaseUrl = toNinerouterApiBaseUrl(rootUrl);
         try {
+            // Health check is optional — if /api/health doesn't exist (404) or fails,
+            // proceed to check /v1/models. Only fail for this root if the server is
+            // completely unreachable at the network level.
             const health = await fetchJson(`${rootUrl}/api/health`, config.apiKeys.ninerouter, timeoutMs);
             if (!health.ok) {
-                lastReason = `GET /api/health failed: ${health.reason}`;
-                continue;
+                const healthReason = health.reason || 'unknown';
+                if (/fetch failed|econnrefused|econnreset|enotfound|econnaborted|network|timeout/i.test(healthReason)) {
+                    lastReason = `GET /api/health failed: ${healthReason}`;
+                    continue;
+                }
+                // Non-critical failure (404, 4xx, etc.) — log but proceed
+                lastReason = `GET /api/health (non-critical): ${healthReason}`;
             }
             const modelsResult = await fetchJson(`${apiBaseUrl}/models`, config.apiKeys.ninerouter, timeoutMs);
             if (!modelsResult.ok) {
@@ -73,10 +110,19 @@ export async function discoverNinerouter(config, options = {}) {
             }
             let visionModels = [];
             let visionModel = preferredVisionModel;
+            let promotedVisionModels = [];
+            let visionPromotionReason;
             if (includeVision) {
                 const visionResult = await fetchJson(`${apiBaseUrl}/models/image-to-text`, config.apiKeys.ninerouter, timeoutMs);
                 if (visionResult.ok) {
                     visionModels = extractModelIds(visionResult.data).filter(model => !isAutoModel(model));
+                }
+                if (visionModels.length === 0) {
+                    promotedVisionModels = getNinerouterPromotableVisionChatModels(models);
+                    if (promotedVisionModels.length > 0) {
+                        visionModels = promotedVisionModels;
+                        visionPromotionReason = 'GET /v1/models/image-to-text returned no models; promoted multimodal Gemini chat models from /v1/models';
+                    }
                 }
                 if (!visionModel)
                     visionModel = visionModels[0];
@@ -89,6 +135,8 @@ export async function discoverNinerouter(config, options = {}) {
                 visionModels,
                 chatModel: isAutoModel(preferredChatModel) ? DEFAULT_NINEROUTER_CHAT_MODEL : preferredChatModel,
                 visionModel,
+                promotedVisionModels,
+                visionPromotionReason,
                 autoHealthChecked: models.some(isAutoModel),
             };
             setCached(cacheKey, result);
@@ -107,6 +155,7 @@ export async function discoverNinerouter(config, options = {}) {
         visionModels: [],
         chatModel: isAutoModel(preferredChatModel) ? DEFAULT_NINEROUTER_CHAT_MODEL : preferredChatModel,
         visionModel: preferredVisionModel,
+        promotedVisionModels: [],
         autoHealthChecked: false,
         reason: lastReason,
     };
@@ -163,6 +212,11 @@ export function isUsableNinerouterChatModel(model) {
         return false;
     return true;
 }
+export function getNinerouterPromotableVisionChatModels(models) {
+    return orderNinerouterChatModels(models)
+        .filter(model => /^gemini\//i.test(model))
+        .filter(model => hasVisionCapability('ninerouter', model));
+}
 export function extractNinerouterErrorDetails(error) {
     const record = isRecord(error) ? error : {};
     const response = isRecord(record.response) ? record.response : {};
@@ -173,9 +227,15 @@ export function extractNinerouterErrorDetails(error) {
     const rawError = isRecord(parsedRaw?.error) ? parsedRaw.error : isRecord(parsedRaw) ? parsedRaw : undefined;
     const errObj = parsedError ?? rawError;
     const httpStatus = firstNumber(record.status, record.statusCode, response.status, errObj?.status) ?? parseStatusFromText(firstString(record.message, rawBody));
-    const errorType = firstNonEmptyString(errObj?.type, errObj?.code, record.type, record.code, parsedRaw?.type, parsedRaw?.code);
+    let errorType = firstNonEmptyString(errObj?.type, errObj?.code, record.type, record.code, parsedRaw?.type, parsedRaw?.code);
     const errorMessage = firstNonEmptyString(errObj?.message, parsedRaw?.message, record.message, rawBody);
     const upstreamProvider = firstNonEmptyString(errObj?.upstream_provider, errObj?.upstreamProvider, errObj?.provider, parsedRaw?.upstream_provider, parsedRaw?.upstreamProvider, parsedRaw?.provider, record.upstreamProvider, record.provider);
+    if (!errorType && httpStatus === undefined && errorMessage) {
+        const lowerMsg = errorMessage.toLowerCase();
+        if (/econnrefused|econnreset|enotfound|econnaborted|fetch failed|network|connection|timeout|timed out|aborted|service unavailable|unavailable|dns|resolve|hostname/i.test(lowerMsg)) {
+            errorType = 'network';
+        }
+    }
     return {
         httpStatus,
         errorType,
@@ -209,7 +269,7 @@ export function classifyNinerouterFailure(errorOrDetails) {
         return 'invalid_model';
     }
     if (details.httpStatus && details.httpStatus >= 500 ||
-        /econnrefused|econnreset|enotfound|fetch failed|network|timeout|timed out|aborted|service unavailable|unavailable/i.test(combined)) {
+        /econnrefused|econnreset|enotfound|fetch failed|network|connection|timeout|timed out|aborted|service unavailable|unavailable/i.test(combined)) {
         return 'unavailable';
     }
     return 'unknown_error';

@@ -23,7 +23,7 @@ import {
   recordStreamInterruption,
 } from './model-health.js';
 import type { ErrorCategory } from './model-health.js';
-import { classifyTask } from './task-classifier.js';
+import { classifyTask, isArabicText } from './task-classifier.js';
 import type { TaskKind } from './task-classifier.js';
 import { getCandidatesForTask, getSkippedProviderReasons } from './model-registry.js';
 import { listOllamaModels } from './ollama.js';
@@ -119,7 +119,8 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
       const healthChecker = { isOnCooldown, isUnhealthy, isProviderOnCooldown };
       const candidates = getCandidatesForTask(taskKind, config, healthChecker, runtimeModels);
       const maxAttempts = getMaxAttempts();
-      const attempts = buildAttemptPlan(candidates, taskKind, maxAttempts);
+      const taskRoutedCandidates = applyTaskBasedRouting(candidates, taskKind, lastText, config, runtimeModels);
+      const attempts = buildAttemptPlan(taskRoutedCandidates, taskKind, maxAttempts);
       const bestProvider = getBestProviderForTask(taskKind, config, runtimeModels);
 
       if (debug) {
@@ -136,6 +137,15 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
           for (const s of skipped) {
             console.log(`  - ${s.provider} — ${s.reason}`);
           }
+        }
+      }
+
+      // ── Force configured model as first attempt ──
+      if (config.currentProvider && config.currentModel) {
+        const cfgIdx = attempts.findIndex(c => c.provider === config.currentProvider && c.model === config.currentModel);
+        if (cfgIdx > 0) {
+          const [configured] = attempts.splice(cfgIdx, 1);
+          attempts.unshift(configured);
         }
       }
 
@@ -358,7 +368,17 @@ export function createSmartRouter(config: HysaConfig, _signal?: AbortSignal): AI
 
       const runtimeModels = await getRuntimeProviderModels(config, taskKind);
       const healthChecker = { isOnCooldown, isUnhealthy, isProviderOnCooldown };
-      const candidates = buildAttemptPlan(getCandidatesForTask(taskKind, config, healthChecker, runtimeModels), taskKind, getMaxAttempts());
+      const rawCandidates = getCandidatesForTask(taskKind, config, healthChecker, runtimeModels);
+      const routedCandidates = applyTaskBasedRouting(rawCandidates, taskKind, lastText, config, runtimeModels);
+      const candidates = buildAttemptPlan(routedCandidates, taskKind, getMaxAttempts());
+      // ── Force configured model as first candidate ──
+      if (config.currentProvider && config.currentModel) {
+        const cfgIdx = candidates.findIndex(c => c.provider === config.currentProvider && c.model === config.currentModel);
+        if (cfgIdx > 0) {
+          const [configured] = candidates.splice(cfgIdx, 1);
+          candidates.unshift(configured);
+        }
+      }
       if (candidates.length === 0) {
         const localHint = isLocalFallbackEnabled(config)
           ? 'Local fallback is enabled, but no local chat-capable model is currently usable.'
@@ -486,7 +506,42 @@ Previous partial response: ${partialTokens.slice(0, 500)}`;
           if (cat === 'rate_limit' && first.provider !== 'ninerouter') {
             markProviderCooldown(first.provider, `${first.provider} streaming failed with rate_limit; switching providers on the next request`, Math.max(cooldownSec, 120), cat);
           }
-          console.log(`  Stream ${first.label} failed (${cat}). Trying another model/provider...`);
+          console.log(`  Stream ${first.label} failed (${cat}). Retrying same model non-stream...`);
+
+          // Retry the SAME model non-stream before trying other models/fallbacks
+          const sameModelClient = createSingleClient(
+            first.provider as ProviderType,
+            first.model,
+            config.apiKeys,
+            config.ollamaBaseUrl,
+            config.localOpenAiBaseUrl,
+            config.localOpenAiModel,
+            config,
+          );
+          try {
+            const nonStreamResult = await sameModelClient.sendMessage(messages, systemPrompt, signal);
+            if (nonStreamResult.message?.trim() || (nonStreamResult.toolCalls && nonStreamResult.toolCalls.length > 0)) {
+              const duration = Date.now() - startTime;
+              markHealth(first.provider, first.model, 'healthy', 'success', 'unknown', duration);
+              logProviderSuccess(first.provider, first.model).catch(() => {});
+              setLastSuccessfulProvider(first.provider, first.model);
+              addFallbackEvent(first.provider, first.model, `Non-stream retry of ${first.label} succeeded`);
+              console.log(`  ✅ ${first.label} non-stream retry succeeded in ${(duration / 1000).toFixed(1)}s`);
+              if (nonStreamResult.message) {
+                onEvent({ type: 'token', text: nonStreamResult.message });
+              }
+              onEvent({ type: 'done', fullText: nonStreamResult.message, toolCalls: nonStreamResult.toolCalls, provider: first.provider, model: first.model, fallbackEvents: getFallbackEvents().map(e => e.reason) });
+              return {
+                ...nonStreamResult,
+                provider: PROVIDER_DEFAULTS[first.provider as ProviderType]?.label || first.provider,
+                model: first.model,
+                fallbackEvents: getFallbackEvents().map(e => e.reason),
+              };
+            }
+          } catch (nsErr) {
+            const nsMsg = (nsErr as Error).message || '';
+            console.log(`  Non-stream retry of ${first.label} also failed: ${nsMsg.slice(0, 200)}`);
+          }
         }
       }
 
@@ -544,7 +599,63 @@ async function getRuntimeProviderModels(config: HysaConfig, taskKind: TaskKind):
   return runtime;
 }
 
-function buildAttemptPlan(candidates: RouterCandidate[], taskKind: TaskKind, maxAttempts: number): RouterCandidate[] {
+export function applyTaskBasedRouting(
+  candidates: RouterCandidate[],
+  taskKind: TaskKind,
+  userText: string,
+  config: HysaConfig,
+  _runtimeModels?: RuntimeProviderModels,
+): RouterCandidate[] {
+  const isArabic = userText.length > 0 && isArabicText(userText);
+  const codeProjectTasks: TaskKind[] = ['code_edit', 'code_review', 'debugging', 'project_scan', 'coding_qa', 'long_reasoning'];
+  const isCodeProjectTask = codeProjectTasks.includes(taskKind);
+  const codeKeywords = /\b(code|file|files|repo|project|debug|bug|error|stack|trace|fix|edit|change|modify|implement|refactor|review|search|find|grep|read|run|test|build|compile|function|class|type|interface|component|route|api)\b/i;
+  const isCodeText = isCodeProjectTask || (userText.length > 0 && codeKeywords.test(userText));
+
+  const isGeminiCandidate = (c: RouterCandidate) => c.provider === 'ninerouter' && /gemini/i.test(c.model);
+
+  function healthyGemini(cands: RouterCandidate[]): RouterCandidate[] {
+    return cands.filter(c =>
+      isGeminiCandidate(c) &&
+      !isOnCooldown(c.provider, c.model) &&
+      !isUnhealthy(c.provider, c.model)
+    );
+  }
+
+  // 1. Arabic + non-code + not project + not vision -> prefer Gemini via 9Router
+  if (isArabic && !isCodeText && taskKind !== 'image_vision') {
+    const geminiCandidates = healthyGemini(candidates);
+    if (geminiCandidates.length > 0) {
+      console.log('Gemini selected: Arabic general question');
+      const others = candidates.filter(c => !isGeminiCandidate(c));
+      return [...geminiCandidates, ...others];
+    }
+    if (candidates.some(isGeminiCandidate)) {
+      console.log('Gemini unavailable for Arabic general question (cooldown/unhealthy), using best available model');
+    }
+  }
+
+  // 2. search / web_research -> prefer Gemini for summarization
+  if (taskKind === 'search' || taskKind === 'web_research') {
+    const geminiCandidates = healthyGemini(candidates);
+    if (geminiCandidates.length > 0) {
+      console.log('Gemini selected: search summarization');
+      const others = candidates.filter(c => !isGeminiCandidate(c));
+      return [...geminiCandidates, ...others];
+    }
+  }
+
+  // 3. image_vision -> keep existing working vision route (no change)
+
+  // 4. code / project / debug -> keep existing coding router
+  if (isCodeProjectTask || isCodeText) {
+    console.log('DeepSeek selected: coding/project task');
+  }
+
+  return candidates;
+}
+
+export function buildAttemptPlan(candidates: RouterCandidate[], taskKind: TaskKind, maxAttempts: number): RouterCandidate[] {
   const groups = new Map<string, RouterCandidate[]>();
   for (const candidate of candidates) {
     const group = groups.get(candidate.provider);
@@ -646,7 +757,7 @@ function categorizeError(msg: string): ErrorCategory {
   if (isRateLimitError(msg)) return 'rate_limit';
   if (lower.includes('quota') || lower.includes('402') || lower.includes('payment') || lower.includes('billing')) return 'quota';
   if (isTimeoutError(msg)) return 'timeout';
-  if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed') || lower.includes('network') || lower.includes('enotfound')) return 'network';
+  if (lower.includes('econnrefused') || lower.includes('econnreset') || lower.includes('fetch failed') || lower.includes('network') || lower.includes('enotfound') || lower.includes('connection')) return 'network';
   if (lower.includes('404') || lower.includes('model not found') || lower.includes('does not support') || lower.includes('not support') || lower.includes('unavailable') || lower.includes('empty') || lower.includes('503')) return 'model_unavailable';
   return 'unknown';
 }
