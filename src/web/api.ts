@@ -2117,11 +2117,14 @@ export function getFallbackStatus(): {
   };
 }
 
-// ── Image generation (placeholder / experimental) ──
+// ── Image generation via Pollinations free API ──
 
 export async function handleImageGen(prompt: string): Promise<{ imageUrl?: string; error?: string }> {
-  const config = loadConfig();
-  // Check if any provider supports image generation
-  // Currently only a placeholder - returns "not configured" message
-  return { error: 'Image generation is not configured yet. Set an image generation provider (OpenAI DALL-E, Stability AI, etc.) to use this feature.' };
+  try {
+    const encodedPrompt = encodeURIComponent(prompt);
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nofeed=true`;
+    return { imageUrl };
+  } catch {
+    return { error: 'Image generation failed. Please try again or change the prompt.' };
+  }
 }

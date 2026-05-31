@@ -21,6 +21,7 @@ interface ComposerProps {
   onCancel?: () => void;
   prefillValue?: string;
   onClearPrefill?: () => void;
+  hideSuggestions?: boolean;
 }
 
 const ACCEPT = '.txt,.md,.json,.js,.ts,.tsx,.jsx,.css,.html,.png,.jpg,.jpeg,.webp,.pdf,.docx';
@@ -99,7 +100,7 @@ function readImageFile(f: File): Promise<string> {
   });
 }
 
-export default function Composer({ onSend, loading, status, onCancel, prefillValue, onClearPrefill }: ComposerProps) {
+export default function Composer({ onSend, loading, status, onCancel, prefillValue, onClearPrefill, hideSuggestions }: ComposerProps) {
   const [value, setValue] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -307,7 +308,7 @@ export default function Composer({ onSend, loading, status, onCancel, prefillVal
         style={{ display: 'none' }}
       />
 
-      {!loading && showSuggestions && (
+      {!loading && showSuggestions && !hideSuggestions && (
         <div className="composer-suggestions">
           {suggestions.slice(0, 4).map(s => (
             <button key={s.label} className="composer-suggestion-btn" onClick={() => handleSuggestion(s.action)}>

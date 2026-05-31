@@ -64,7 +64,7 @@ type ChatItem = {
   | { kind: 'user_msg'; content: string; attachments?: Attachment[] }
   | { kind: 'ai_msg'; content: string }
   | { kind: 'plan_card'; plan: any; currentStep?: number }
-  | { kind: 'tool_event'; eventType: 'read' | 'edit' | 'done' | 'run' | 'error' | 'fallback'; message: string }
+  | { kind: 'tool_event'; eventType: 'read' | 'edit' | 'done' | 'run' | 'error' | 'fallback' | 'search' | 'file' | 'image'; message: string }
   | { kind: 'diff_card'; filePath: string; content: string; diff: string }
   | { kind: 'command_card'; command: string; toolCall?: ToolCall }
   | { kind: 'tool_result'; content: string }
@@ -86,6 +86,14 @@ function hasProposal(text: string): boolean {
 
 function isConfirmation(text: string): boolean {
   return CONFIRM_PATTERNS.some(p => p.test(text.trim()));
+}
+
+function stripSearchTags(text: string): string {
+  return text
+    .replace(/<[\/]?بحث>/g, '')
+    .replace(/<[\/]?search>/gi, '')
+    .replace(/<[\/]?RESULT>/g, '')
+    .replace(/<[\/]?result>/gi, '');
 }
 
 function isSimpleQuestion(text: string): boolean {
@@ -213,7 +221,7 @@ export default function App() {
   const buildMessages = useCallback((items: ChatItem[]): { role: string; content: string }[] => {
     const msgs: { role: string; content: string }[] = [];
     for (const item of items) {
-      if (item.kind === 'user_msg') msgs.push({ role: 'user', content: item.content });
+      if (item.kind === 'user_msg' && !item.content.startsWith('/')) msgs.push({ role: 'user', content: item.content });
       else if (item.kind === 'ai_msg' && item.content) msgs.push({ role: 'assistant', content: item.content });
     }
     return msgs;
@@ -360,10 +368,10 @@ export default function App() {
           if (data.imageUrl) {
             setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: `![Generated: ${prompt}](${data.imageUrl})` }]);
           } else {
-            setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: data.error || 'Image generation not available' }]);
+            setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'image', message: data.error || 'Image generation is not available. Try again or use a different prompt.' }]);
           }
         } catch {
-          setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: 'Image generation request failed.' }]);
+          setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'image', message: 'Image generation request failed. Please try again.' }]);
         } finally {
           setLoading(false);
         }
@@ -382,6 +390,10 @@ export default function App() {
     }
 
     const userItem: ChatItem = { id: nextId(), kind: 'user_msg', content: finalInput, attachments };
+    if (attachments && attachments.length > 0) {
+      const fileNames = attachments.map(a => a.name).join(', ');
+      setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'file', message: `Attached: ${fileNames}` }]);
+    }
     setChatItems(prev => [...prev, userItem]);
     setLoading(true);
     setLoadingPhase('thinking');
@@ -501,7 +513,7 @@ export default function App() {
                     setChatItems(prev => [...prev, resultItem]);
                   } else if (event.type === 'search') {
                     setLoadingPhase('thinking');
-                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'done', message: `Searching web for: "${event.query}"...` }]);
+                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Searching web for "${event.query}"...` }]);
                   } else if (event.type === 'search_error') {
                     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: event.message || 'Web search failed' }]);
                   } else if (event.type === 'fallback' && debug) {
@@ -552,6 +564,10 @@ export default function App() {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'done', message: `Step ${event.step}/${event.total}: Auto-executing tools...` }]);
               } else if (event.type === 'tool_result' && event.status === 'done') {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_result', content: event.results || '' }]);
+              } else if (event.type === 'search') {
+                setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Searching web for "${event.query}"...` }]);
+              } else if (event.type === 'search_error') {
+                setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: event.message || 'Web search failed' }]);
               } else if (event.type === 'fallback' && debug) {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
               } else if (event.type === 'plan') {
@@ -943,7 +959,7 @@ export default function App() {
                         <MessageBubble
                           key={item.id}
                           kind="user"
-                          content={item.content}
+                          content={stripSearchTags(item.content)}
                           attachments={item.attachments}
                         />
                       );
@@ -955,9 +971,9 @@ export default function App() {
                         : null;
                       const isRevealing = item.id === revealingId;
                       const isStreaming = item.id === streamingId;
-                      const displayContent = isRevealing
+                      const displayContent = stripSearchTags(isRevealing
                         ? item.content.slice(0, revealPos)
-                        : item.content;
+                        : item.content);
                       return (
                         <MessageBubble
                           key={item.id}
@@ -1026,55 +1042,6 @@ export default function App() {
                   <div ref={chatEndRef} />
                 </div>
 
-                {loading && (() => {
-                  const lastUser = [...chatItems].reverse().find(i => i.kind === 'user_msg');
-                  const lastUserArabic = lastUser?.kind === 'user_msg' && isArabic(lastUser.content);
-                  const phaseText = loadingPhase ? PHASE_LABELS[loadingPhase] : (
-                    lastUserArabic ? 'جارٍ نسج الرد...' : 'Weaving response...'
-                  );
-                  const warnText = lastUserArabic
-                    ? elapsedSecs >= 20 ? 'قد يكون المزود بطيئًا أو محدود المعدل. جرّب OpenRouter أو Gemini أو HYSA AI.' : elapsedSecs >= 8 ? 'لا يزال قيد العمل... قد يكون المزود بطيئًا.' : ''
-                    : thinkingWarning;
-                  return (
-                    <div className={`thinking-bar${loadingPhase ? ` phase-${loadingPhase}` : ''}`}>
-                      <span className="tb-pixel-icon">&gt;</span>
-                      <span className="tb-text">{phaseText}</span>
-                      <span className="tb-timer">{elapsedSecs}s</span>
-                      {warnText && <span className={`tb-warn ${elapsedSecs >= 25 ? 'tb-slow' : ''}`}>{warnText}</span>}
-                      <button className="tb-cancel" onClick={cancelThinking}>Cancel</button>
-                    </div>
-                  );
-                })()}
-
-                {debug && lastRawResponse && (
-                  <div className="debug-panel">
-                    <div className="debug-panel-header">
-                      <span>Last API Response</span>
-                      <button className="debug-panel-close" onClick={() => setLastRawResponse(null)}>x</button>
-                    </div>
-                    <pre className="debug-panel-body">{lastRawResponse}</pre>
-                  </div>
-                )}
-                {debug && timingData && (
-                  <div className="debug-panel timing-panel">
-                    <div className="debug-panel-header">
-                      <span>Timing &amp; Routing</span>
-                      <button className="debug-panel-close" onClick={() => setTimingData(null)}>x</button>
-                    </div>
-                    <div className="timing-grid">
-                      {timingData.routing_mode !== undefined && <div className="timing-row"><span className="timing-label">Routing mode</span><span className="timing-value">{timingData.routing_mode}</span></div>}
-                      {timingData.capability !== undefined && <div className="timing-row"><span className="timing-label">Capability</span><span className="timing-value">{timingData.capability}</span></div>}
-                      {timingData.project_mode !== undefined && <div className="timing-row"><span className="timing-label">Project mode</span><span className="timing-value">{String(timingData.project_mode)}</span></div>}
-                      {timingData.files_selected !== undefined && <div className="timing-row"><span className="timing-label">Files selected</span><span className="timing-value">{timingData.files_selected}</span></div>}
-                      {timingData.tool_steps !== undefined && <div className="timing-row"><span className="timing-label">Tool steps</span><span className="timing-value">{timingData.tool_steps}</span></div>}
-                      {timingData.classification !== undefined && <div className="timing-row"><span className="timing-label">Classification</span><span className="timing-value">{timingData.classification}ms</span></div>}
-                      {timingData.project_scan !== undefined && <div className="timing-row"><span className="timing-label">Project scan</span><span className="timing-value">{timingData.project_scan}ms</span></div>}
-                      {timingData.context_select !== undefined && <div className="timing-row"><span className="timing-label">Context select</span><span className="timing-value">{timingData.context_select}ms</span></div>}
-                      {timingData.provider !== undefined && <div className="timing-row"><span className="timing-label">Provider</span><span className="timing-value">{timingData.provider}ms</span></div>}
-                      {timingData.total !== undefined && <div className="timing-row timing-total"><span className="timing-label">Total</span><span className="timing-value">{timingData.total}ms</span></div>}
-                    </div>
-                  </div>
-                )}
               </>
             )}
           </div>
@@ -1082,13 +1049,64 @@ export default function App() {
           {hasItems && (
             <div className="chat-bottom-area">
               {notice && <div className="composer-notice">{notice}</div>}
+
+              {loading && (() => {
+                const lastUser = [...chatItems].reverse().find(i => i.kind === 'user_msg');
+                const lastUserArabic = lastUser?.kind === 'user_msg' && isArabic(lastUser.content);
+                const phaseText = loadingPhase ? PHASE_LABELS[loadingPhase] : (
+                  lastUserArabic ? 'جارٍ نسج الرد...' : 'Weaving response...'
+                );
+                const warnText = lastUserArabic
+                  ? elapsedSecs >= 20 ? 'قد يكون المزود بطيئًا أو محدود المعدل. جرّب OpenRouter أو Gemini أو HYSA AI.' : elapsedSecs >= 8 ? 'لا يزال قيد العمل... قد يكون المزود بطيئًا.' : ''
+                  : thinkingWarning;
+                return (
+                  <div className={`thinking-bar${loadingPhase ? ` phase-${loadingPhase}` : ''}`}>
+                    <span className="tb-pixel-icon">&gt;</span>
+                    <span className="tb-text">{phaseText}</span>
+                    <span className="tb-timer">{elapsedSecs}s</span>
+                    {warnText && <span className={`tb-warn ${elapsedSecs >= 25 ? 'tb-slow' : ''}`}>{warnText}</span>}
+                    <button className="tb-cancel" onClick={cancelThinking}>Cancel</button>
+                  </div>
+                );
+              })()}
+
+              {debug && lastRawResponse && (
+                <div className="debug-panel">
+                  <div className="debug-panel-header">
+                    <span>Last API Response</span>
+                    <button className="debug-panel-close" onClick={() => setLastRawResponse(null)}>x</button>
+                  </div>
+                  <pre className="debug-panel-body">{lastRawResponse}</pre>
+                </div>
+              )}
+              {debug && timingData && (
+                <div className="debug-panel timing-panel">
+                  <div className="debug-panel-header">
+                    <span>Timing &amp; Routing</span>
+                    <button className="debug-panel-close" onClick={() => setTimingData(null)}>x</button>
+                  </div>
+                  <div className="timing-grid">
+                    {timingData.routing_mode !== undefined && <div className="timing-row"><span className="timing-label">Routing mode</span><span className="timing-value">{timingData.routing_mode}</span></div>}
+                    {timingData.capability !== undefined && <div className="timing-row"><span className="timing-label">Capability</span><span className="timing-value">{timingData.capability}</span></div>}
+                    {timingData.project_mode !== undefined && <div className="timing-row"><span className="timing-label">Project mode</span><span className="timing-value">{String(timingData.project_mode)}</span></div>}
+                    {timingData.files_selected !== undefined && <div className="timing-row"><span className="timing-label">Files selected</span><span className="timing-value">{timingData.files_selected}</span></div>}
+                    {timingData.tool_steps !== undefined && <div className="timing-row"><span className="timing-label">Tool steps</span><span className="timing-value">{timingData.tool_steps}</span></div>}
+                    {timingData.classification !== undefined && <div className="timing-row"><span className="timing-label">Classification</span><span className="timing-value">{timingData.classification}ms</span></div>}
+                    {timingData.project_scan !== undefined && <div className="timing-row"><span className="timing-label">Project scan</span><span className="timing-value">{timingData.project_scan}ms</span></div>}
+                    {timingData.context_select !== undefined && <div className="timing-row"><span className="timing-label">Context select</span><span className="timing-value">{timingData.context_select}ms</span></div>}
+                    {timingData.provider !== undefined && <div className="timing-row"><span className="timing-label">Provider</span><span className="timing-value">{timingData.provider}ms</span></div>}
+                    {timingData.total !== undefined && <div className="timing-row timing-total"><span className="timing-label">Total</span><span className="timing-value">{timingData.total}ms</span></div>}
+                  </div>
+                </div>
+              )}
+
               {status && !loading && (
                 <div className="provider-status">
                   <span className="ps-dot" />
                   <span>Using {status.provider} · {status.model}</span>
                 </div>
               )}
-              <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
+              <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} hideSuggestions={true} />
             </div>
           )}
         </div>
