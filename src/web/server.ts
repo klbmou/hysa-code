@@ -11,7 +11,7 @@ try {
   _dirname = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
 }
 
-import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, continueChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus } from './api.js';
+import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, continueChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus, handleImageGen } from './api.js';
 import type { Server } from 'node:http';
 
 // Keep server reference alive so GC doesn't close it
@@ -165,6 +165,17 @@ export async function startWebServer(port = 8787): Promise<void> {
   app.post('/api/yolo', (req, res) => {
     const { enabled } = req.body as { enabled: boolean };
     res.json(setYoloStatus(enabled));
+  });
+
+  app.post('/api/image/generate', async (req, res) => {
+    try {
+      const { prompt } = req.body as { prompt: string };
+      if (!prompt) return res.status(400).json({ error: 'Missing prompt' });
+      const result = await handleImageGen(prompt);
+      res.json(result);
+    } catch (err: unknown) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   app.get('/api/fallback', (_req, res) => {

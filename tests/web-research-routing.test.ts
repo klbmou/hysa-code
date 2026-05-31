@@ -51,6 +51,34 @@ describe('web research routing', () => {
     assert.equal(classifyTask(msg('روابط حول الموضوع')), 'search');
   });
 
+  it('Arabic "كم لديه من متابع؟" triggers search task', () => {
+    assert.equal(classifyTask(msg('كم لديه من متابع')), 'search');
+  });
+
+  it('Arabic "كم عدد مشتركي قناة X" triggers search task', () => {
+    assert.equal(classifyTask(msg('كم عدد مشتركي قناة الهلال على يوتيوب')), 'search');
+  });
+
+  it('Arabic "آخر أخبار X" triggers search task', () => {
+    assert.equal(classifyTask(msg('آخر أخبار البورصة')), 'search');
+  });
+
+  it('Arabic "ما آخر أخبار X" triggers search task', () => {
+    assert.equal(classifyTask(msg('ما آخر أخبار الأسواق')), 'search');
+  });
+
+  it('Arabic "ابحث عن آخر إحصائيات" triggers search task', () => {
+    assert.equal(classifyTask(msg('ابحث عن آخر إحصائيات كورونا')), 'search');
+  });
+
+  it('English "how many subscribers does X have" triggers search task', () => {
+    assert.equal(classifyTask(msg('how many subscribers does pewdiepie have')), 'search');
+  });
+
+  it('English "what is the current price of" triggers search task', () => {
+    assert.equal(classifyTask(msg('what is the current price of bitcoin')), 'search');
+  });
+
   // ── Existing patterns still work ─────────────────
   it('English "search the web for X" triggers search task', () => {
     assert.equal(classifyTask(msg('search the web for latest news')), 'search');

@@ -101,13 +101,19 @@ export function getNinerouterCandidateRoots(config: HysaConfig): string[] {
   if (config.openaiRouterBaseUrl && isLikelyLocalUrl(config.openaiRouterBaseUrl)) {
     extras.push(config.openaiRouterBaseUrl);
   }
-  return dedupe([
+  const roots: (string | undefined)[] = [
     process.env.NINEROUTER_URL,
     config.ninerouterRootUrl,
     config.ninerouterBaseUrl,
     ...extras,
-    DEFAULT_NINEROUTER_ROOT_URL,
-  ].filter((url): url is string => !!url && !!url.trim()).map(normalizeNinerouterRootUrl).flatMap(addIpv4Fallback));
+  ];
+  // Only include the default fallback root if no user-configured root is set
+  if (!config.ninerouterRootUrl && !config.ninerouterBaseUrl && !process.env.NINEROUTER_URL) {
+    roots.push(DEFAULT_NINEROUTER_ROOT_URL);
+  }
+  return dedupe(
+    roots.filter((url): url is string => !!url && !!url.trim()).map(normalizeNinerouterRootUrl).flatMap(addIpv4Fallback),
+  );
 }
 
 export async function discoverNinerouter(

@@ -1,7 +1,7 @@
-import { describe, it, before, after } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import * as assert from 'node:assert/strict';
 import type { HysaConfig } from '../src/config/keys.js';
-import { getVisionFallbackCandidates, getVisionFallbackErrorMessage, buildVisionMessages, hasImageAttachments, supportsVision, sanitizeMessagesForTextModel } from '../src/web/api.js';
+import { getVisionFallbackCandidates, getVisionFallbackErrorMessage, buildVisionMessages, hasImageAttachments, supportsVision, sanitizeMessagesForTextModel, clearNinerouterVisionCache } from '../src/web/api.js';
 import { hasVisionCapability } from '../src/ai/provider-capabilities.js';
 
 function mockConfig(overrides: Partial<HysaConfig> = {}): HysaConfig {
@@ -19,6 +19,18 @@ function mockConfig(overrides: Partial<HysaConfig> = {}): HysaConfig {
 }
 
 describe('vision fallback candidates', () => {
+  beforeEach(() => {
+    delete process.env.NINEROUTER_URL;
+    delete process.env.HYSA_9ROUTER_VISION_MODEL;
+    clearNinerouterVisionCache();
+  });
+
+  afterEach(() => {
+    delete process.env.NINEROUTER_URL;
+    delete process.env.HYSA_9ROUTER_VISION_MODEL;
+    clearNinerouterVisionCache();
+  });
+
   it('returns Gemini first when Gemini API key is set', async () => {
     const config = mockConfig({ apiKeys: { gemini: 'test-key', openrouter: 'sk-or-v1-test' } });
     const candidates = await getVisionFallbackCandidates(config);
@@ -269,6 +281,18 @@ describe('supportsVision', () => {
 });
 
 describe('config.visionModel support', () => {
+  beforeEach(() => {
+    delete process.env.NINEROUTER_URL;
+    delete process.env.HYSA_9ROUTER_VISION_MODEL;
+    clearNinerouterVisionCache();
+  });
+
+  afterEach(() => {
+    delete process.env.NINEROUTER_URL;
+    delete process.env.HYSA_9ROUTER_VISION_MODEL;
+    clearNinerouterVisionCache();
+  });
+
   it('uses config.visionModel as first candidate when set and valid', async () => {
     const config = mockConfig({
       currentProvider: 'openai_router',

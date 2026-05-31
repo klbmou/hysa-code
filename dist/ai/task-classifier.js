@@ -22,6 +22,9 @@ const SEARCH_PATTERNS = [
     /^(?:search|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?/i,
     /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
     /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
+    /^(?:how\s+many\s+(?:subscribers|followers|views|likes)\s+(?:does|has|is)\s+)/i,
+    /^who\s+(?:is|was|are)\s+(?!the\s+(?:best|worst|same|only|one|most)\b)/i,
+    /^(?:what\s+is\s+(?:the\s+)?(?:current|today'?s|this\s+(?:week|month|year)'?s)\s+)/i,
     /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+)/i,
     /^(?:ابحث\s+(?:لي\s+)?عن\s+)/i,
     /^(?:ابحث\s+)(?:عنه|عنها|عنهم|عنك)(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?/i,
@@ -34,6 +37,10 @@ const SEARCH_PATTERNS = [
     /^(?:آخر\s+أخبار\s+)/i,
     /^(?:من\s+أين\s+أتيت\s+)/i,
     /^(?:هل\s+هذه\s+المعلومة\s+محدثة)/i,
+    /^(?:كم\s+(?:عدد\s+)?(?:مشترك|مشتركين|متابع|متابعين|مشاهدة|مشاهدات)\s*)/i,
+    /^(?:كم\s+لديه\s+من\s+(?:متابع|مشترك|مشتركين|متابعين))/i,
+    /^(?:ابحث\s+عن\s+آخر\s+إحصائيات|آخر\s+إحصائيات\s+)/i,
+    /^(?:ما\s+(?:آخر|أحدث)\s+أخبار\s+)/i,
 ];
 function isWebSearchQuery(text) {
     return SEARCH_PATTERNS.some(p => p.test(text.trim()));

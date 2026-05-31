@@ -102,9 +102,13 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [showSuggestions, setShowSuggestions] = useState(true);
+  const [isRecording, setIsRecording] = useState(false);
+  const [micSupported, setMicSupported] = useState<boolean | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const sentCountRef = useRef(0);
+  const recognitionRef = useRef<any>(null);
 
   useEffect(() => {
     if (!loading && textareaRef.current) {
@@ -118,6 +122,57 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
       setShowSuggestions(false);
     }
   }, [sentCountRef.current]);
+
+  // Check speech recognition support
+  useEffect(() => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    setMicSupported(!!SpeechRecognition);
+  }, []);
+
+  const handleVoiceInput = useCallback(() => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    if (isRecording) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      }
+      setIsRecording(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = 'ar-SA';
+
+    recognition.onresult = (event: any) => {
+      let transcript = '';
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        transcript += event.results[i][0].transcript;
+      }
+      setValue(prev => prev + transcript);
+    };
+
+    recognition.onerror = () => {
+      setIsRecording(false);
+      recognitionRef.current = null;
+    };
+
+    recognition.onend = () => {
+      setIsRecording(false);
+      recognitionRef.current = null;
+    };
+
+    recognition.start();
+    recognitionRef.current = recognition;
+    setIsRecording(true);
+  }, [isRecording]);
+
+  const handleImageGen = useCallback(() => {
+    onSend('/imagine', []);
+  }, [onSend]);
 
   const addFiles = useCallback(async (fileList: FileList) => {
     setAttachError(null);
@@ -281,16 +336,43 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
             disabled={loading}
             rows={1}
           />
-          <button
-            className="composer-attach-btn"
-            onClick={() => fileInputRef.current?.click()}
-            title="Attach file"
-            disabled={loading}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-            </svg>
-          </button>
+          <div className="composer-action-bar">
+            <button
+              className="composer-attach-btn"
+              onClick={() => fileInputRef.current?.click()}
+              title="Attach file or image"
+              disabled={loading}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              </svg>
+            </button>
+            <button
+              className="composer-action-btn"
+              onClick={handleImageGen}
+              title="Generate image (experimental)"
+              disabled={loading}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <polyline points="21 15 16 10 5 21" />
+              </svg>
+            </button>
+            <button
+              className={`composer-action-btn${isRecording ? ' recording' : ''}`}
+              onClick={handleVoiceInput}
+              title={micSupported ? (isRecording ? 'Click to stop recording' : 'Voice input') : 'Voice input not supported in this browser'}
+              disabled={loading || !micSupported}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                <line x1="12" y1="19" x2="12" y2="23" />
+                <line x1="8" y1="23" x2="16" y2="23" />
+              </svg>
+            </button>
+          </div>
         </div>
         <div className="composer-bottom">
           <div className="composer-left">
@@ -305,8 +387,9 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
             className="composer-send-btn"
             onClick={handleSend}
             disabled={loading || (!value.trim() && attachments.length === 0)}
+            title="Send message"
           >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <line x1="22" y1="2" x2="11" y2="13" />
               <polygon points="22 2 15 22 11 13 2 9 22 2" />
             </svg>

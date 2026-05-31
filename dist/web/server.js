@@ -10,7 +10,7 @@ try {
 catch {
     _dirname = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
 }
-import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, continueChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus } from './api.js';
+import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, continueChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus, handleImageGen } from './api.js';
 // Keep server reference alive so GC doesn't close it
 let _serverRef = null;
 export function getServerRef() { return _serverRef; }
@@ -157,6 +157,18 @@ export async function startWebServer(port = 8787) {
     app.post('/api/yolo', (req, res) => {
         const { enabled } = req.body;
         res.json(setYoloStatus(enabled));
+    });
+    app.post('/api/image/generate', async (req, res) => {
+        try {
+            const { prompt } = req.body;
+            if (!prompt)
+                return res.status(400).json({ error: 'Missing prompt' });
+            const result = await handleImageGen(prompt);
+            res.json(result);
+        }
+        catch (err) {
+            res.status(500).json({ error: err.message });
+        }
     });
     app.get('/api/fallback', (_req, res) => {
         res.json(getFallbackStatus());

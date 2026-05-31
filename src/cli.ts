@@ -17,6 +17,7 @@ import { classifyTask } from './ai/task-classifier.js';
 import { generatePlan, shouldPlanFor } from './ai/planner.js';
 import { clonePlan, markStepRunning, markStepDone, markStepFailed, inferStepFromToolCall, buildFinalReport } from './ai/planner.js';
 import { shouldInjectProjectContext, getAvailableFallbackProviders, getSuggestedFallbackAction } from './ai/provider-policy.js';
+import { hydrateNinerouterConfig } from './ai/ninerouter.js';
 import { buildProjectTree, getProjectInfo, invalidateCache } from './context/builder.js';
 import type { ProjectInfo } from './context/builder.js';
 import { rankFiles } from './context/ranker.js';
@@ -966,8 +967,26 @@ async function printFallbackStatus(config: HysaConfig | null): Promise<void> {
   const fallbackEvents = getFallbackEvents().slice(-8);
   const ollamaModels = await getOllamaModelsForStatus(config);
   const localFallbackEnabled = config ? isLocalFallbackEnabled(config) : false;
+
+  // Hydrate 9Router so fallback detection is accurate
+  let ninerouterAvailable = false;
+  let sameEndpointAsOpenAiRouter = false;
+  if (config) {
+    const nr = await hydrateNinerouterConfig(config, { timeoutMs: 2000 });
+    ninerouterAvailable = nr?.available ?? false;
+    if (ninerouterAvailable && config.ninerouterBaseUrl && config.openaiRouterBaseUrl) {
+      sameEndpointAsOpenAiRouter =
+        config.ninerouterBaseUrl.replace(/\/+$/, '').toLowerCase() ===
+        config.openaiRouterBaseUrl.replace(/\/+$/, '').toLowerCase();
+    }
+  }
+
   const runtimeModels = config ? { ollama: ollamaModels } : undefined;
-  const fallbackProviders = config ? getAvailableFallbackProviders(config, runtimeModels) : [];
+  const fallbackProviders = config
+    ? getAvailableFallbackProviders(config, runtimeModels).filter(
+        fb => !(fb.provider === 'ninerouter' && sameEndpointAsOpenAiRouter)
+      )
+    : [];
 
   console.log(pc.bold(pc.magenta('\nFallback Status\n')));
   if (config) {
@@ -1014,7 +1033,11 @@ async function printFallbackStatus(config: HysaConfig | null): Promise<void> {
 
   console.log(`\n  Available fallback providers:`);
   if (fallbackProviders.length === 0) {
-    console.log(pc.dim('    None currently usable'));
+    if (sameEndpointAsOpenAiRouter && config?.currentProvider === 'openai_router') {
+      console.log(pc.dim('    9Router is available but shares the same endpoint as the active OpenAI Router provider, so no separate fallback is listed.'));
+    } else {
+      console.log(pc.dim('    None currently usable'));
+    }
   } else {
     for (const fb of fallbackProviders.slice(0, 6)) {
       const label = PROVIDER_DEFAULTS[fb.provider]?.label || fb.provider;

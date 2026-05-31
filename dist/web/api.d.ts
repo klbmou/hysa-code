@@ -153,4 +153,8 @@ export declare function getFallbackStatus(): {
         category: string | null;
     };
 };
+export declare function handleImageGen(prompt: string): Promise<{
+    imageUrl?: string;
+    error?: string;
+}>;
 //# sourceMappingURL=api.d.ts.map

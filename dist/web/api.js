@@ -174,11 +174,6 @@ async function ensureNinerouterVisionCache(config) {
         await discoverNinerouterVisionModels(config);
     }
 }
-// Warm the 9Router vision cache if 9Router is configured (runs once at module load)
-const initConfig = loadConfig();
-if (initConfig?.ninerouterBaseUrl || process.env.NINEROUTER_URL) {
-    ensureNinerouterVisionCache(initConfig).catch(() => { });
-}
 function hasImageAttachments(attachments) {
     if (!attachments || attachments.length === 0)
         return false;
@@ -253,18 +248,6 @@ async function getVisionFallbackCandidates(config) {
             }
         }
     }
-    const discovered9RouterVision = await discoverNinerouterVisionModels(config);
-    for (const discovered of discovered9RouterVision) {
-        if (candidates.length >= 3)
-            break;
-        if (candidates.some(c => c.provider === 'ninerouter' && c.model === discovered.model))
-            continue;
-        if (!canUseCandidate('ninerouter', discovered.model))
-            continue;
-        candidates.push({ provider: 'ninerouter', model: discovered.model, label: discovered.label });
-        console.log('[vision] added discovered 9Router vision model:', discovered.label);
-        console.log('[vision] selected vision fallback:', discovered.label);
-    }
     // Try preferred vision fallback order
     for (const fb of VISION_FALLBACK_ORDER) {
         if (candidates.length >= 3)
@@ -306,6 +289,20 @@ async function getVisionFallbackCandidates(config) {
             const label = `${PROVIDER_DEFAULTS[fb.provider]?.label || fb.provider} / ${fb.model}`;
             console.log('[vision] candidate added:', label);
             candidates.push({ provider: fb.provider, model: fb.model, label });
+        }
+    }
+    // If still need more candidates, add discovered 9Router vision models
+    if (candidates.length < 3) {
+        const discovered9RouterVision = await discoverNinerouterVisionModels(config);
+        for (const discovered of discovered9RouterVision) {
+            if (candidates.length >= 3)
+                break;
+            if (candidates.some(c => c.provider === 'ninerouter' && c.model === discovered.model))
+                continue;
+            if (!canUseCandidate('ninerouter', discovered.model))
+                continue;
+            candidates.push({ provider: 'ninerouter', model: discovered.model, label: discovered.label });
+            console.log('[vision] added discovered 9Router vision model:', discovered.label);
         }
     }
     // If still need more candidates, try any vision-capable provider from the registry
@@ -888,6 +885,55 @@ export async function handleChatStream(req, writeEvent) {
             writeEvent(`data: ${JSON.stringify({ type: 'token', text: response })}\n\n`);
             writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response, toolCalls: [] })}\n\n`);
             return;
+        }
+        // ── Web search detection (streaming path) ────────
+        const streamSearchLastMsg = messages[messages.length - 1];
+        const streamSearchContent = typeof streamSearchLastMsg?.content === 'string' ? streamSearchLastMsg.content : '';
+        const streamSearchPatterns = [
+            /^(?:search|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
+            /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
+            /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
+            /^(?:how\s+many\s+(?:subscribers|followers|views|likes)\s+(?:does|has|is)\s+)/i,
+            /^(?:what\s+is\s+(?:the\s+)?(?:current|today'?s|this\s+(?:week|month|year)'?s)\s+)/i,
+            /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
+            /^(?:ابحث\s+(?:لي\s+)?عن\s+)(.+)/i,
+            /^(?:آخر\s+أخبار\s+)(.+)/i,
+            /^(?:كم\s+(?:عدد\s+)?(?:مشترك|مشتركين|متابع|متابعين|مشاهدة|مشاهدات)\s+)/i,
+            /^(?:كم\s+لديه\s+من\s+(?:متابع|مشترك|مشتركين|متابعين))/i,
+            /^(?:ما\s+(?:آخر|أحدث)\s+أخبار\s+)/i,
+        ];
+        let streamSearchQuery = null;
+        for (const p of streamSearchPatterns) {
+            const m = streamSearchContent.match(p);
+            if (m) {
+                streamSearchQuery = m[1]?.trim() || streamSearchContent;
+                break;
+            }
+        }
+        if (streamSearchQuery) {
+            const wsDiag = getSearchDiagnostics();
+            if (!wsDiag.isReliable) {
+                const hasArabic = /[\u0600-\u06FF]/.test(streamSearchContent);
+                const configMsg = hasArabic
+                    ? 'البحث في الإنترنت غير مضبوط بشكل موثوق. فعّل TAVILY_API_KEY أو SERPER_API_KEY أو BRAVE_API_KEY.'
+                    : 'Web search is not reliably configured. To enable web search, set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.';
+                console.log(LOG, `[req:${reqId}] Stream search skipped (provider: ${wsDiag.provider}, no reliable API keys)`);
+                writeEvent(`data: ${JSON.stringify({ type: 'token', text: configMsg })}\n\n`);
+                writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: configMsg, toolCalls: [] })}\n\n`);
+                return;
+            }
+            try {
+                writeEvent(`data: ${JSON.stringify({ type: 'search', query: streamSearchQuery })}\n\n`);
+                const results = await searchWeb(streamSearchQuery, { maxResults: 5 });
+                const formatted = formatSearchResults(streamSearchQuery, results);
+                const searchMsg = { role: 'user', content: formatted };
+                messages.splice(messages.length - 1, 0, searchMsg);
+                console.log(LOG, `[req:${reqId}] Stream search: ${results.length} results for "${streamSearchQuery}"`);
+            }
+            catch (err) {
+                console.log(LOG, `[req:${reqId}] Stream search failed: ${err.message}`);
+                writeEvent(`data: ${JSON.stringify({ type: 'search_error', message: err.message })}\n\n`);
+            }
         }
         const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, simpleMode);
         let perQueryPrompt = buildSystemPrompt({
@@ -1510,6 +1556,8 @@ export async function handleChat(req) {
             /^(?:search|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
             /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
             /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
+            /^(?:how\s+many\s+(?:subscribers|followers|views|likes)\s+(?:does|has|is)\s+)/i,
+            /^(?:what\s+is\s+(?:the\s+)?(?:current|today'?s|this\s+(?:week|month|year)'?s)\s+)/i,
             /^(?:where\s+can\s+(?:I|we)\s+(?:watch|find|get)\s+)/i,
             /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
             /^(?:ابحث\s+(?:لي\s+)?عن\s+)(.+)/i,
@@ -1528,6 +1576,10 @@ export async function handleChat(req) {
             /^(?:هل\s+هذه\s+المعلومة\s+محدثة)/i,
             /^(?:هل\s+عندك\s+معلومات\s+(?:عن|حول)\s+)(.+)/i,
             /^(?:دور\s+(?:لي\s+)?(?:على\s+)?)(.+)/i,
+            /^(?:كم\s+(?:عدد\s+)?(?:مشترك|مشتركين|متابع|متابعين|مشاهدة|مشاهدات)\s+)/i,
+            /^(?:كم\s+لديه\s+من\s+(?:متابع|مشترك|مشتركين|متابعين))/i,
+            /^(?:ابحث\s+عن\s+آخر\s+إحصائيات|آخر\s+إحصائيات\s+)/i,
+            /^(?:ما\s+(?:آخر|أحدث)\s+أخبار\s+)/i,
         ];
         let searchQuery = null;
         for (const p of searchPatterns) {
@@ -1875,5 +1927,12 @@ export function getFallbackStatus() {
             category: lastAttemptedCategory,
         },
     };
+}
+// ── Image generation (placeholder / experimental) ──
+export async function handleImageGen(prompt) {
+    const config = loadConfig();
+    // Check if any provider supports image generation
+    // Currently only a placeholder - returns "not configured" message
+    return { error: 'Image generation is not configured yet. Set an image generation provider (OpenAI DALL-E, Stability AI, etc.) to use this feature.' };
 }
 //# sourceMappingURL=api.js.map

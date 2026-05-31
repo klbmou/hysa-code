@@ -336,6 +336,34 @@ export default function App() {
         setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'done', message: `Debug mode ${newVal ? 'ON' : 'OFF'}` }]);
         return;
       }
+      if (cmd.startsWith('imagine')) {
+        const prompt = cmd.slice(8).trim();
+        if (!prompt) {
+          setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: 'Please provide a prompt: /imagine <description>' }]);
+          return;
+        }
+        const userItem: ChatItem = { id: nextId(), kind: 'user_msg', content: `/imagine ${prompt}` };
+        setChatItems(prev => [...prev, userItem]);
+        setLoading(true);
+        try {
+          const res = await fetch('/api/image/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prompt }),
+          });
+          const data = await res.json();
+          if (data.imageUrl) {
+            setChatItems(prev => [...prev, { id: nextId(), kind: 'ai_msg', content: `![Generated: ${prompt}](${data.imageUrl})` }]);
+          } else {
+            setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: data.error || 'Image generation not available' }]);
+          }
+        } catch {
+          setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: 'Image generation request failed.' }]);
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
     }
 
     let finalInput = input;
@@ -466,6 +494,11 @@ export default function App() {
                     setLoadingPhase('finalizing');
                     const resultItem: ChatItem = { id: nextId(), kind: 'tool_result', content: event.results || '' };
                     setChatItems(prev => [...prev, resultItem]);
+                  } else if (event.type === 'search') {
+                    setLoadingPhase('thinking');
+                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'done', message: `Searching web for: "${event.query}"...` }]);
+                  } else if (event.type === 'search_error') {
+                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: event.message || 'Web search failed' }]);
                   } else if (event.type === 'fallback' && debug) {
                     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
                   } else if (event.type === 'plan') {
@@ -955,6 +988,12 @@ export default function App() {
                   {timingData.provider !== undefined && <div className="timing-row"><span className="timing-label">Provider</span><span className="timing-value">{timingData.provider}ms</span></div>}
                   {timingData.total !== undefined && <div className="timing-row timing-total"><span className="timing-label">Total</span><span className="timing-value">{timingData.total}ms</span></div>}
                 </div>
+              </div>
+            )}
+            {status && !loading && hasItems && (
+              <div className="provider-status">
+                <span className="ps-dot" />
+                <span>Using {status.provider} · {status.model}</span>
               </div>
             )}
             <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
