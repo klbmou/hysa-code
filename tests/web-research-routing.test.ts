@@ -67,6 +67,14 @@ describe('web research routing', () => {
     assert.equal(classifyTask(msg('ما آخر أخبار الأسواق')), 'search');
   });
 
+  it('Arabic "من هو أحمد أبو الرب" triggers search task', () => {
+    assert.equal(classifyTask(msg('من هو أحمد أبو الرب')), 'search');
+  });
+
+  it('Arabic "من هذه الشخصية" triggers search task', () => {
+    assert.equal(classifyTask(msg('من هذه الشخصية')), 'search');
+  });
+
   it('Arabic "ابحث عن آخر إحصائيات" triggers search task', () => {
     assert.equal(classifyTask(msg('ابحث عن آخر إحصائيات كورونا')), 'search');
   });
@@ -100,6 +108,15 @@ describe('web research routing', () => {
 
   it('code question does not trigger search', () => {
     assert.notEqual(classifyTask(msg('how to write a function in python')), 'search');
+  });
+
+  // ── Slash commands do not trigger search ─────────
+  it('"/imagine cat" does not trigger search', () => {
+    assert.notEqual(classifyTask(msg('/imagine cat')), 'search');
+  });
+
+  it('"/debug" does not trigger search', () => {
+    assert.notEqual(classifyTask(msg('/debug')), 'search');
   });
 
   // ── Entity follow-up for Arabic search ────────────

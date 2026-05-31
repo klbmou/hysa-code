@@ -255,7 +255,7 @@ export function shouldSearchEntity(
       if (looksLikeHandle(entity) || entity.startsWith('@')) {
         return { shouldSearch: true, query: entity };
       }
-      if (/^who\s+(?:is|are|was|were)\s+/i.test(trimmed)) {
+      if (/^who\s+(?:is|are|was|were)\s+/i.test(trimmed) || /^من\s+هو\s+/i.test(trimmed) || /^من\s+هذه\s+/i.test(trimmed)) {
         return { shouldSearch: true, query: entity };
       }
     }

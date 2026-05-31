@@ -511,11 +511,13 @@ export default function App() {
                     setLoadingPhase('finalizing');
                     const resultItem: ChatItem = { id: nextId(), kind: 'tool_result', content: event.results || '' };
                     setChatItems(prev => [...prev, resultItem]);
-                  } else if (event.type === 'search') {
+                  } else if (event.type === 'search_start' || event.type === 'search') {
                     setLoadingPhase('thinking');
                     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Searching web for "${event.query}"...` }]);
+                  } else if (event.type === 'search_done') {
+                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Search complete — ${event.resultCount || 0} result(s) found` }]);
                   } else if (event.type === 'search_error') {
-                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: event.message || 'Web search failed' }]);
+                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: event.message || 'Web search failed' }]);
                   } else if (event.type === 'fallback' && debug) {
                     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
                   } else if (event.type === 'plan') {
@@ -564,10 +566,12 @@ export default function App() {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'done', message: `Step ${event.step}/${event.total}: Auto-executing tools...` }]);
               } else if (event.type === 'tool_result' && event.status === 'done') {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_result', content: event.results || '' }]);
-              } else if (event.type === 'search') {
+              } else if (event.type === 'search_start' || event.type === 'search') {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Searching web for "${event.query}"...` }]);
+              } else if (event.type === 'search_done') {
+                setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Search complete — ${event.resultCount || 0} result(s) found` }]);
               } else if (event.type === 'search_error') {
-                setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: event.message || 'Web search failed' }]);
+                setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: event.message || 'Web search failed' }]);
               } else if (event.type === 'fallback' && debug) {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'fallback', message: event.message || '' }]);
               } else if (event.type === 'plan') {

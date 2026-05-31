@@ -901,6 +901,8 @@ export async function handleChatStream(req, writeEvent) {
             /^(?:كم\s+(?:عدد\s+)?(?:مشترك|مشتركين|متابع|متابعين|مشاهدة|مشاهدات)\s+)/i,
             /^(?:كم\s+لديه\s+من\s+(?:متابع|مشترك|مشتركين|متابعين))/i,
             /^(?:ما\s+(?:آخر|أحدث)\s+أخبار\s+)/i,
+            /^من\s+هو\s+(.+)/i,
+            /^من\s+هذه\s+(.+)/i,
         ];
         let streamSearchQuery = null;
         for (const p of streamSearchPatterns) {
@@ -923,12 +925,14 @@ export async function handleChatStream(req, writeEvent) {
                 return;
             }
             try {
-                writeEvent(`data: ${JSON.stringify({ type: 'search', query: streamSearchQuery })}\n\n`);
+                writeEvent(`data: ${JSON.stringify({ type: 'search_start', query: streamSearchQuery })}\n\n`);
+                console.log(LOG, `[req:${reqId}] Stream search: using provider ${getSearchDiagnostics().provider} for "${streamSearchQuery}"`);
                 const results = await searchWeb(streamSearchQuery, { maxResults: 5 });
                 const formatted = formatSearchResults(streamSearchQuery, results);
                 const searchMsg = { role: 'user', content: formatted };
                 messages.splice(messages.length - 1, 0, searchMsg);
                 console.log(LOG, `[req:${reqId}] Stream search: ${results.length} results for "${streamSearchQuery}"`);
+                writeEvent(`data: ${JSON.stringify({ type: 'search_done', query: streamSearchQuery, resultCount: results.length })}\n\n`);
             }
             catch (err) {
                 console.log(LOG, `[req:${reqId}] Stream search failed: ${err.message}`);
@@ -1580,6 +1584,8 @@ export async function handleChat(req) {
             /^(?:كم\s+لديه\s+من\s+(?:متابع|مشترك|مشتركين|متابعين))/i,
             /^(?:ابحث\s+عن\s+آخر\s+إحصائيات|آخر\s+إحصائيات\s+)/i,
             /^(?:ما\s+(?:آخر|أحدث)\s+أخبار\s+)/i,
+            /^من\s+هو\s+(.+)/i,
+            /^من\s+هذه\s+(.+)/i,
         ];
         let searchQuery = null;
         for (const p of searchPatterns) {
@@ -1933,10 +1939,29 @@ export async function handleImageGen(prompt) {
     try {
         const encodedPrompt = encodeURIComponent(prompt);
         const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nofeed=true`;
-        return { imageUrl };
+        console.log(`[ImageGen] Generating image for: "${prompt}" -> ${imageUrl}`);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 12000);
+        try {
+            const check = await fetch(imageUrl, { method: 'HEAD', signal: controller.signal });
+            clearTimeout(timeoutId);
+            console.log(`[ImageGen] Pollinations HEAD status ${check.status} for: "${prompt}"`);
+            if (!check.ok && check.status !== 404) {
+                return { error: `Image service returned status ${check.status}. Try again later.` };
+            }
+            return { imageUrl };
+        }
+        catch (err) {
+            clearTimeout(timeoutId);
+            const msg = err.message;
+            console.log(`[ImageGen] Pollinations fetch failed for: "${prompt}" — ${msg}`);
+            return { error: `Image generation service unreachable: ${msg}. Check your internet connection.` };
+        }
     }
-    catch {
-        return { error: 'Image generation failed. Please try again or change the prompt.' };
+    catch (err) {
+        const msg = err.message;
+        console.log(`[ImageGen] Unexpected error for: "${prompt}" — ${msg}`);
+        return { error: `Image generation failed: ${msg}` };
     }
 }
 //# sourceMappingURL=api.js.map

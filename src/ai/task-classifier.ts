@@ -59,6 +59,8 @@ const SEARCH_PATTERNS = [
   /^(?:كم\s+لديه\s+من\s+(?:متابع|مشترك|مشتركين|متابعين))/i,
   /^(?:ابحث\s+عن\s+آخر\s+إحصائيات|آخر\s+إحصائيات\s+)/i,
   /^(?:ما\s+(?:آخر|أحدث)\s+أخبار\s+)/i,
+  /^من\s+هو\s+/i,
+  /^من\s+هذه\s+/i,
 ];
 
 function isWebSearchQuery(text: string): boolean {
