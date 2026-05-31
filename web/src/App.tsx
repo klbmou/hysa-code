@@ -5,6 +5,7 @@ import RightPanel from './components/RightPanel.js';
 import Composer, { Attachment } from './components/Composer.js';
 import MessageBubble from './components/MessageBubble.js';
 import HysaIntro from './components/HysaIntro.js';
+import PixelMark from './components/PixelMark.js';
 import ToolEvent from './components/ToolEvent.js';
 import DiffCard from './components/DiffCard.js';
 import CommandCard from './components/CommandCard.js';
@@ -855,7 +856,7 @@ export default function App() {
                 <div className="hero-layout">
                   <div className="hero-greeting">
                     <div className="hero-logo-wrap">
-                      <PixelMark size={36} />
+                      {typeof PixelMark === 'function' ? <PixelMark size={36} /> : null}
                       <span className="hero-logo-text">HYSA</span>
                     </div>
                     <h1 className="hero-title">Ready when you are.</h1>
