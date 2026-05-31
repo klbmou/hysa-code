@@ -3,7 +3,6 @@ import TopBar from './components/TopBar.js';
 import FileTree from './components/FileTree.js';
 import RightPanel from './components/RightPanel.js';
 import Composer, { Attachment } from './components/Composer.js';
-import WelcomeScreen from './components/WelcomeScreen.js';
 import MessageBubble from './components/MessageBubble.js';
 import HysaIntro from './components/HysaIntro.js';
 import ToolEvent from './components/ToolEvent.js';
@@ -822,6 +821,14 @@ export default function App() {
 
   const hasItems = chatItems.length > 0;
 
+  const handleSearchWeb = useCallback(() => {
+    sendMessage('Search the web for ');
+  }, [sendMessage]);
+
+  const handleGenerateImage = useCallback(() => {
+    sendMessage('/imagine', []);
+  }, [sendMessage]);
+
   return (
     <div className="app">
       <TopBar
@@ -841,17 +848,76 @@ export default function App() {
         <FileTree files={files} fileCount={fileCount} selectedFile={selectedFile} onSelect={openFile} collapsed={!sidebarOpen} onClose={() => setSidebarOpen(false)} />
         <div className="chat-panel">
           <div className="messages-scroll">
-            <div className={`chat-column${!hasItems ? ' empty' : ''}`}>
-              {!hasItems ? (
-                showIntro ? (
-                  <HysaIntro onDone={() => setShowIntro(false)} />
-                ) : (
-                  <div className="center-welcome">
-                    <WelcomeScreen onHint={sendMessage} fileCount={fileCount} status={status} yolo={yolo} />
-                  </div>
-                )
+            {!hasItems ? (
+              showIntro ? (
+                <HysaIntro onDone={() => setShowIntro(false)} />
               ) : (
-                <>
+                <div className="hero-layout">
+                  <div className="hero-greeting">
+                    <div className="hero-logo-wrap">
+                      <PixelMark size={36} />
+                      <span className="hero-logo-text">HYSA</span>
+                    </div>
+                    <h1 className="hero-title">Ready when you are.</h1>
+                    <p className="hero-sub">Ask about code, search the web, generate images, or just chat.</p>
+                  </div>
+
+                  <div className="hero-composer-wrap">
+                    <div className="hero-composer-inner">
+                      <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
+                    </div>
+                  </div>
+
+                  <div className="hero-cards">
+                    <button className="hero-card-btn" onClick={() => sendMessage('Read the project files and explain the architecture and structure.')} title="Explain project">
+                      <span className="hero-card-icon">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                      </span>
+                      Explain
+                    </button>
+                    <button className="hero-card-btn" onClick={handleSearchWeb} title="Search the web">
+                      <span className="hero-card-icon">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                      </span>
+                      Search
+                    </button>
+                    <button className="hero-card-btn" onClick={handleGenerateImage} title="Generate an image">
+                      <span className="hero-card-icon">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                      </span>
+                      Generate
+                    </button>
+                    <button className="hero-card-btn" onClick={() => sendMessage('Find and fix bugs in the codebase.')} title="Find bugs">
+                      <span className="hero-card-icon">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                      </span>
+                      Find bugs
+                    </button>
+                    <button className="hero-card-btn" onClick={() => sendMessage('Review the UI components and suggest improvements.')} title="Improve UI">
+                      <span className="hero-card-icon">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                      </span>
+                      Improve UI
+                    </button>
+                    <button className="hero-card-btn" onClick={() => sendMessage('Generate comprehensive unit or integration tests.')} title="Generate tests">
+                      <span className="hero-card-icon">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                      </span>
+                      Tests
+                    </button>
+                  </div>
+
+                  {status && (
+                    <div className="hero-status">
+                      <span className="ps-dot" />
+                      <span>{status.provider} · {status.model}</span>
+                    </div>
+                  )}
+                </div>
+              )
+            ) : (
+              <>
+                <div className="chat-column">
                   {chatItems.map((item, idx) => {
                     if (item.kind === 'user_msg') {
                       return (
@@ -937,66 +1003,66 @@ export default function App() {
                     return null;
                   })}
                   <div ref={chatEndRef} />
-                </>
-              )}
-            </div>
+                </div>
 
-            {loading && (() => {
-              const lastUser = [...chatItems].reverse().find(i => i.kind === 'user_msg');
-              const lastUserArabic = lastUser?.kind === 'user_msg' && isArabic(lastUser.content);
-              const phaseText = loadingPhase ? PHASE_LABELS[loadingPhase] : (
-                lastUserArabic ? 'جارٍ نسج الرد...' : 'Weaving response...'
-              );
-              const warnText = lastUserArabic
-                ? elapsedSecs >= 20 ? 'قد يكون المزود بطيئًا أو محدود المعدل. جرّب OpenRouter أو Gemini أو HYSA AI.' : elapsedSecs >= 8 ? 'لا يزال قيد العمل... قد يكون المزود بطيئًا.' : ''
-                : thinkingWarning;
-              return (
-                <div className={`thinking-bar${loadingPhase ? ` phase-${loadingPhase}` : ''}`}>
-                  <span className="tb-pixel-icon">&gt;</span>
-                  <span className="tb-text">{phaseText}</span>
-                  <span className="tb-timer">{elapsedSecs}s</span>
-                  {warnText && <span className={`tb-warn ${elapsedSecs >= 25 ? 'tb-slow' : ''}`}>{warnText}</span>}
-                  <button className="tb-cancel" onClick={cancelThinking}>Cancel</button>
-                </div>
-              );
-            })()}
+                {loading && (() => {
+                  const lastUser = [...chatItems].reverse().find(i => i.kind === 'user_msg');
+                  const lastUserArabic = lastUser?.kind === 'user_msg' && isArabic(lastUser.content);
+                  const phaseText = loadingPhase ? PHASE_LABELS[loadingPhase] : (
+                    lastUserArabic ? 'جارٍ نسج الرد...' : 'Weaving response...'
+                  );
+                  const warnText = lastUserArabic
+                    ? elapsedSecs >= 20 ? 'قد يكون المزود بطيئًا أو محدود المعدل. جرّب OpenRouter أو Gemini أو HYSA AI.' : elapsedSecs >= 8 ? 'لا يزال قيد العمل... قد يكون المزود بطيئًا.' : ''
+                    : thinkingWarning;
+                  return (
+                    <div className={`thinking-bar${loadingPhase ? ` phase-${loadingPhase}` : ''}`}>
+                      <span className="tb-pixel-icon">&gt;</span>
+                      <span className="tb-text">{phaseText}</span>
+                      <span className="tb-timer">{elapsedSecs}s</span>
+                      {warnText && <span className={`tb-warn ${elapsedSecs >= 25 ? 'tb-slow' : ''}`}>{warnText}</span>}
+                      <button className="tb-cancel" onClick={cancelThinking}>Cancel</button>
+                    </div>
+                  );
+                })()}
 
-            {debug && lastRawResponse && (
-              <div className="debug-panel">
-                <div className="debug-panel-header">
-                  <span>Last API Response</span>
-                  <button className="debug-panel-close" onClick={() => setLastRawResponse(null)}>x</button>
-                </div>
-                <pre className="debug-panel-body">{lastRawResponse}</pre>
-              </div>
+                {debug && lastRawResponse && (
+                  <div className="debug-panel">
+                    <div className="debug-panel-header">
+                      <span>Last API Response</span>
+                      <button className="debug-panel-close" onClick={() => setLastRawResponse(null)}>x</button>
+                    </div>
+                    <pre className="debug-panel-body">{lastRawResponse}</pre>
+                  </div>
+                )}
+                {debug && timingData && (
+                  <div className="debug-panel timing-panel">
+                    <div className="debug-panel-header">
+                      <span>Timing &amp; Routing</span>
+                      <button className="debug-panel-close" onClick={() => setTimingData(null)}>x</button>
+                    </div>
+                    <div className="timing-grid">
+                      {timingData.routing_mode !== undefined && <div className="timing-row"><span className="timing-label">Routing mode</span><span className="timing-value">{timingData.routing_mode}</span></div>}
+                      {timingData.capability !== undefined && <div className="timing-row"><span className="timing-label">Capability</span><span className="timing-value">{timingData.capability}</span></div>}
+                      {timingData.project_mode !== undefined && <div className="timing-row"><span className="timing-label">Project mode</span><span className="timing-value">{String(timingData.project_mode)}</span></div>}
+                      {timingData.files_selected !== undefined && <div className="timing-row"><span className="timing-label">Files selected</span><span className="timing-value">{timingData.files_selected}</span></div>}
+                      {timingData.tool_steps !== undefined && <div className="timing-row"><span className="timing-label">Tool steps</span><span className="timing-value">{timingData.tool_steps}</span></div>}
+                      {timingData.classification !== undefined && <div className="timing-row"><span className="timing-label">Classification</span><span className="timing-value">{timingData.classification}ms</span></div>}
+                      {timingData.project_scan !== undefined && <div className="timing-row"><span className="timing-label">Project scan</span><span className="timing-value">{timingData.project_scan}ms</span></div>}
+                      {timingData.context_select !== undefined && <div className="timing-row"><span className="timing-label">Context select</span><span className="timing-value">{timingData.context_select}ms</span></div>}
+                      {timingData.provider !== undefined && <div className="timing-row"><span className="timing-label">Provider</span><span className="timing-value">{timingData.provider}ms</span></div>}
+                      {timingData.total !== undefined && <div className="timing-row timing-total"><span className="timing-label">Total</span><span className="timing-value">{timingData.total}ms</span></div>}
+                    </div>
+                  </div>
+                )}
+                {status && !loading && hasItems && (
+                  <div className="provider-status">
+                    <span className="ps-dot" />
+                    <span>Using {status.provider} · {status.model}</span>
+                  </div>
+                )}
+                <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
+              </>
             )}
-            {debug && timingData && (
-              <div className="debug-panel timing-panel">
-                <div className="debug-panel-header">
-                  <span>Timing &amp; Routing</span>
-                  <button className="debug-panel-close" onClick={() => setTimingData(null)}>x</button>
-                </div>
-                <div className="timing-grid">
-                  {timingData.routing_mode !== undefined && <div className="timing-row"><span className="timing-label">Routing mode</span><span className="timing-value">{timingData.routing_mode}</span></div>}
-                  {timingData.capability !== undefined && <div className="timing-row"><span className="timing-label">Capability</span><span className="timing-value">{timingData.capability}</span></div>}
-                  {timingData.project_mode !== undefined && <div className="timing-row"><span className="timing-label">Project mode</span><span className="timing-value">{String(timingData.project_mode)}</span></div>}
-                  {timingData.files_selected !== undefined && <div className="timing-row"><span className="timing-label">Files selected</span><span className="timing-value">{timingData.files_selected}</span></div>}
-                  {timingData.tool_steps !== undefined && <div className="timing-row"><span className="timing-label">Tool steps</span><span className="timing-value">{timingData.tool_steps}</span></div>}
-                  {timingData.classification !== undefined && <div className="timing-row"><span className="timing-label">Classification</span><span className="timing-value">{timingData.classification}ms</span></div>}
-                  {timingData.project_scan !== undefined && <div className="timing-row"><span className="timing-label">Project scan</span><span className="timing-value">{timingData.project_scan}ms</span></div>}
-                  {timingData.context_select !== undefined && <div className="timing-row"><span className="timing-label">Context select</span><span className="timing-value">{timingData.context_select}ms</span></div>}
-                  {timingData.provider !== undefined && <div className="timing-row"><span className="timing-label">Provider</span><span className="timing-value">{timingData.provider}ms</span></div>}
-                  {timingData.total !== undefined && <div className="timing-row timing-total"><span className="timing-label">Total</span><span className="timing-value">{timingData.total}ms</span></div>}
-                </div>
-              </div>
-            )}
-            {status && !loading && hasItems && (
-              <div className="provider-status">
-                <span className="ps-dot" />
-                <span>Using {status.provider} · {status.model}</span>
-              </div>
-            )}
-            <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
           </div>
         </div>
         {rightOpen && (
