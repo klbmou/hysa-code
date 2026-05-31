@@ -468,7 +468,7 @@ body::after {
   width: min(720px, calc(100% - 32px));
   max-width: 720px;
   margin: 0 auto;
-  padding: 16px 16px 100px;
+  padding: 16px 16px 24px;
 }
 
 .chat-column.empty {
@@ -488,6 +488,29 @@ body::after {
 
 .chat-spacer {
   flex: 1;
+}
+
+/* Composer area anchored at bottom of chat panel in chat mode */
+.chat-bottom-area {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 16px 12px;
+  gap: 4px;
+  position: relative;
+  z-index: 2;
+}
+
+.chat-bottom-area .composer {
+  width: min(720px, calc(100% - 32px));
+  max-width: 720px;
+}
+
+.chat-bottom-area .provider-status {
+  width: min(720px, calc(100% - 32px));
+  max-width: 720px;
+  margin: 0;
 }
 
 /* ── HYSA Intro (retro phone boot) ──────────── */
@@ -852,6 +875,21 @@ body::after {
 
 .hero-composer-inner .composer-bottom {
   padding: 4px 8px 0;
+}
+
+/* Inline notice in hero mode */
+.hero-notice {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 8px 16px;
+  background: rgba(160,112,240,0.07);
+  border: 1px solid rgba(160,112,240,0.10);
+  border-radius: 10px;
+  line-height: 1.4;
+  text-align: center;
+  width: 100%;
+  max-width: 480px;
+  backdrop-filter: blur(4px);
 }
 
 /* ── Hero action cards (below composer) ──────── */
@@ -2446,9 +2484,6 @@ pre, code {
 /* ── Provider Status Banner ──────────────── */
 
 .provider-status {
-  width: min(720px, calc(100% - 32px));
-  max-width: 720px;
-  margin: 2px auto;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -2495,6 +2530,18 @@ pre, code {
   color: var(--error);
   padding: 4px 2px 6px;
   line-height: 1.4;
+}
+
+.composer-notice {
+  font-size: 13px;
+  color: var(--text-muted);
+  padding: 8px 14px;
+  background: rgba(160,112,240,0.06);
+  border: 1px solid rgba(160,112,240,0.10);
+  border-radius: 8px;
+  line-height: 1.4;
+  text-align: center;
+  width: 100%;
 }
 
 .composer-vision-warn {

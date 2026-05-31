@@ -122,6 +122,7 @@ export default function App() {
   const [streamingId, setStreamingId] = useState<string | null>(null);
   const [revealingId, setRevealingId] = useState<string | null>(null);
   const [revealPos, setRevealPos] = useState(0);
+  const [notice, setNotice] = useState('');
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -298,6 +299,7 @@ export default function App() {
     setLoadingPhase('');
     setRevealingId(null);
     setRevealPos(0);
+    setNotice('');
   }, []);
 
   const cancelThinking = useCallback(() => {
@@ -310,6 +312,7 @@ export default function App() {
     console.debug(LOG, 'Clear chat');
     setChatItems([]);
     setLastRawResponse(null);
+    setNotice('');
   }, []);
 
   const addError = useCallback((msg: string) => {
@@ -339,9 +342,11 @@ export default function App() {
       if (cmd.startsWith('imagine')) {
         const prompt = cmd.slice(8).trim();
         if (!prompt) {
-          setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'error', message: 'Please provide a prompt: /imagine <description>' }]);
+          setNotice('Describe the image you want to generate.');
+          setPrefillValue('/imagine ');
           return;
         }
+        setNotice('');
         const userItem: ChatItem = { id: nextId(), kind: 'user_msg', content: `/imagine ${prompt}` };
         setChatItems(prev => [...prev, userItem]);
         setLoading(true);
@@ -822,13 +827,23 @@ export default function App() {
 
   const hasItems = chatItems.length > 0;
 
+  const [prefillValue, setPrefillValue] = useState('');
+
+  const handleCardPrefill = useCallback((text: string) => {
+    setPrefillValue(text);
+  }, []);
+
+  const handleClearPrefill = useCallback(() => {
+    setPrefillValue('');
+  }, []);
+
   const handleSearchWeb = useCallback(() => {
-    sendMessage('Search the web for ');
-  }, [sendMessage]);
+    setPrefillValue('Search the web for ');
+  }, []);
 
   const handleGenerateImage = useCallback(() => {
-    sendMessage('/imagine', []);
-  }, [sendMessage]);
+    setPrefillValue('/imagine ');
+  }, []);
 
   return (
     <div className="app">
@@ -863,14 +878,16 @@ export default function App() {
                     <p className="hero-sub">Ask about code, search the web, generate images, or just chat.</p>
                   </div>
 
+                  {notice && <div className="hero-notice">{notice}</div>}
+
                   <div className="hero-composer-wrap">
                     <div className="hero-composer-inner">
-                      <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
+                      <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} prefillValue={prefillValue} onClearPrefill={handleClearPrefill} />
                     </div>
                   </div>
 
                   <div className="hero-cards">
-                    <button className="hero-card-btn" onClick={() => sendMessage('Read the project files and explain the architecture and structure.')} title="Explain project">
+                    <button className="hero-card-btn" onClick={() => handleCardPrefill('Read the project files and explain the architecture and structure.')} title="Explain project">
                       <span className="hero-card-icon">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                       </span>
@@ -888,19 +905,19 @@ export default function App() {
                       </span>
                       Generate
                     </button>
-                    <button className="hero-card-btn" onClick={() => sendMessage('Find and fix bugs in the codebase.')} title="Find bugs">
+                    <button className="hero-card-btn" onClick={() => handleCardPrefill('Find and fix bugs in the codebase.')} title="Find bugs">
                       <span className="hero-card-icon">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
                       </span>
                       Find bugs
                     </button>
-                    <button className="hero-card-btn" onClick={() => sendMessage('Review the UI components and suggest improvements.')} title="Improve UI">
+                    <button className="hero-card-btn" onClick={() => handleCardPrefill('Review the UI components and suggest improvements.')} title="Improve UI">
                       <span className="hero-card-icon">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                       </span>
                       Improve UI
                     </button>
-                    <button className="hero-card-btn" onClick={() => sendMessage('Generate comprehensive unit or integration tests.')} title="Generate tests">
+                    <button className="hero-card-btn" onClick={() => handleCardPrefill('Generate comprehensive unit or integration tests.')} title="Generate tests">
                       <span className="hero-card-icon">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
                       </span>
@@ -919,6 +936,7 @@ export default function App() {
             ) : (
               <>
                 <div className="chat-column">
+                  {notice && <div className="composer-notice">{notice}</div>}
                   {chatItems.map((item, idx) => {
                     if (item.kind === 'user_msg') {
                       return (
@@ -967,11 +985,12 @@ export default function App() {
                           yolo={yolo}
                           onComplete={(ok) => {
                             if (ok && pendingMsgsRef.current) {
-                              continueAfterTool(
-                                { type: 'edit_file', params: { filePath: item.filePath, content: item.content } },
-                                'Edit applied successfully'
-                              );
+                              const msgs = pendingMsgsRef.current;
+                              pendingMsgsRef.current = null;
+                              sendMessage('[auto-continue]', undefined);
+                              { /* re-trigger */ }
                             }
+                            setLoading(false);
                           }}
                         />
                       );
@@ -981,13 +1000,14 @@ export default function App() {
                         <CommandCard
                           key={item.id}
                           command={item.command}
-                          onRun={runCommand}
-                          yolo={yolo}
-                          autoRun={yolo && item.command ? false : undefined}
-                          onComplete={item.toolCall ? (result) => {
-                            const output = result.output || result.error || '';
-                            if (output) continueAfterTool(item.toolCall!, output);
-                          } : undefined}
+                          onComplete={(ok) => {
+                            if (ok && pendingMsgsRef.current) {
+                              const msgs = pendingMsgsRef.current;
+                              pendingMsgsRef.current = null;
+                              sendMessage('[auto-continue]', undefined);
+                            }
+                            setLoading(false);
+                          }}
                         />
                       );
                     }
@@ -996,7 +1016,7 @@ export default function App() {
                     }
                     if (item.kind === 'tool_result') {
                       return (
-                        <div className="tool-result" key={item.id}>
+                        <div className="tool-result-card">
                           <pre className="tool-result-pre">{item.content}</pre>
                         </div>
                       );
@@ -1055,16 +1075,22 @@ export default function App() {
                     </div>
                   </div>
                 )}
-                {status && !loading && hasItems && (
-                  <div className="provider-status">
-                    <span className="ps-dot" />
-                    <span>Using {status.provider} · {status.model}</span>
-                  </div>
-                )}
-                <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
               </>
             )}
           </div>
+
+          {hasItems && (
+            <div className="chat-bottom-area">
+              {notice && <div className="composer-notice">{notice}</div>}
+              {status && !loading && (
+                <div className="provider-status">
+                  <span className="ps-dot" />
+                  <span>Using {status.provider} · {status.model}</span>
+                </div>
+              )}
+              <Composer onSend={sendMessage} loading={loading} status={status} onCancel={cancelThinking} />
+            </div>
+          )}
         </div>
         {rightOpen && (
           <RightPanel tab={rightTab} onTabChange={setRightTab} onClose={() => setRightOpen(false)} selectedFile={selectedFile} fileContent={fileContent} onFileChange={setFileContent} onSave={saveFile} saveMsg={saveMsg} diffContent={diffContent} diffPath={diffPath} terminalOutput={terminalOutput} terminalType={terminalType} />

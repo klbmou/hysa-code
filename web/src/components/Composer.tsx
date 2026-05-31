@@ -19,6 +19,8 @@ interface ComposerProps {
   loading: boolean;
   status: { provider: string; model: string; visionCapable?: boolean } | null;
   onCancel?: () => void;
+  prefillValue?: string;
+  onClearPrefill?: () => void;
 }
 
 const ACCEPT = '.txt,.md,.json,.js,.ts,.tsx,.jsx,.css,.html,.png,.jpg,.jpeg,.webp,.pdf,.docx';
@@ -97,7 +99,7 @@ function readImageFile(f: File): Promise<string> {
   });
 }
 
-export default function Composer({ onSend, loading, status, onCancel }: ComposerProps) {
+export default function Composer({ onSend, loading, status, onCancel, prefillValue, onClearPrefill }: ComposerProps) {
   const [value, setValue] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -116,9 +118,9 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
     }
   }, [loading]);
 
-  // Hide suggestions after 2 sends
+  // Hide suggestions after first send (hero cards already show actions)
   useEffect(() => {
-    if (sentCountRef.current >= 2) {
+    if (sentCountRef.current >= 1) {
       setShowSuggestions(false);
     }
   }, [sentCountRef.current]);
@@ -128,6 +130,19 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     setMicSupported(!!SpeechRecognition);
   }, []);
+
+  // Watch for prefill value from hero cards
+  useEffect(() => {
+    if (prefillValue && !loading) {
+      setValue(prefillValue);
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        const len = prefillValue.length;
+        textareaRef.current.setSelectionRange(len, len);
+      }
+      if (onClearPrefill) onClearPrefill();
+    }
+  }, [prefillValue, loading, onClearPrefill]);
 
   const handleVoiceInput = useCallback(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -171,8 +186,18 @@ export default function Composer({ onSend, loading, status, onCancel }: Composer
   }, [isRecording]);
 
   const handleImageGen = useCallback(() => {
-    onSend('/imagine', []);
-  }, [onSend]);
+    const current = value.trim();
+    if (current) {
+      setValue(`/imagine ${current}`);
+    } else {
+      setValue('/imagine ');
+    }
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+      const newLen = current ? `/imagine ${current}`.length : '/imagine '.length;
+      setTimeout(() => textareaRef.current?.setSelectionRange(newLen, newLen), 0);
+    }
+  }, [value]);
 
   const addFiles = useCallback(async (fileList: FileList) => {
     setAttachError(null);
