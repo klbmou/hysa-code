@@ -862,8 +862,11 @@ export async function handleChatStream(
 ): Promise<void> {
   const config = loadConfig();
   if (!config) {
-    writeEvent(`data: ${JSON.stringify({ type: 'token', text: 'No configuration found. Run: hysa chat' })}\n\n`);
-    writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: 'No configuration found. Run: hysa chat', toolCalls: [] })}\n\n`);
+    const msg = process.env.NODE_ENV === 'production'
+      ? 'AI is not configured for this deployment. Add provider environment variables to enable chat.'
+      : 'No configuration found. Run: hysa chat';
+    writeEvent(`data: ${JSON.stringify({ type: 'token', text: msg })}\n\n`);
+    writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: msg, toolCalls: [] })}\n\n`);
     return;
   }
 
@@ -1572,8 +1575,11 @@ export async function continueChat(messages: { role: string; content: string }[]
 export async function handleChat(req: ChatRequest): Promise<ChatResult> {
   const config = loadConfig();
   if (!config) {
+    const msg = process.env.NODE_ENV === 'production'
+      ? 'AI is not configured for this deployment. Add provider environment variables to enable chat.'
+      : 'No configuration found. Run: hysa chat';
     console.log(LOG, 'No config found');
-    return { message: '', toolCalls: [], error: 'No configuration found. Run: hysa chat' };
+    return { message: '', toolCalls: [], error: msg };
   }
 
   // Apply env-based default provider resolution (same as CLI)

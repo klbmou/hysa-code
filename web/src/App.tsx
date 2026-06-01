@@ -205,17 +205,17 @@ const I18N: Record<string, Record<string, string>> = {
     'dash.activity': 'Activity',
     'dash.empty': 'No recent activity yet',
     'dash.commands': 'Quick Commands',
-    'dash.cmd.chat': 'hysa chat â€” interactive AI',
-    'dash.cmd.web': 'hysa web â€” browser UI',
-    'dash.cmd.config': 'hysa config â€” settings',
-    'dash.cmd.doctor': 'hysa doctor â€” diagnose',
-    'dash.cmd.providers': 'hysa providers â€” list',
+    'dash.cmd.chat': 'hysa chat — interactive AI',
+    'dash.cmd.web': 'hysa web — browser UI',
+    'dash.cmd.config': 'hysa config — settings',
+    'dash.cmd.doctor': 'hysa doctor — diagnose',
+    'dash.cmd.providers': 'hysa providers — list',
     'dash.shortcuts': 'Keyboard Shortcuts',
-    'dash.sc.send': 'Enter â€” send message',
-    'dash.sc.newline': 'Shift+Enter â€” new line',
-    'dash.sc.sidebar': 'Ctrl+B â€” toggle sidebar',
-    'dash.sc.settings': 'Ctrl+, â€” open settings',
-    'dash.sc.upload': 'Ctrl+U â€” upload file',
+    'dash.sc.send': 'Enter — send message',
+    'dash.sc.newline': 'Shift+Enter — new line',
+    'dash.sc.sidebar': 'Ctrl+B — toggle sidebar',
+    'dash.sc.settings': 'Ctrl+, — open settings',
+    'dash.sc.upload': 'Ctrl+U — upload file',
     'dash.tip.imagine': 'Type /imagine to generate images',
     'dash.tip.search': 'Ask "Search the web for..."',
     'dash.tip.attach': 'Attach files, PDFs, or images',
@@ -276,17 +276,17 @@ const I18N: Record<string, Record<string, string>> = {
     'dash.activity': 'Ø§Ù„Ù†Ø´Ø§Ø·',
     'dash.empty': 'Ù„Ø§ ÙŠÙˆØ¬Ø¯ Ù†Ø´Ø§Ø· Ø­Ø¯ÙŠØ« Ø¨Ø¹Ø¯',
     'dash.commands': 'Ø£ÙˆØ§Ù…Ø± Ø³Ø±ÙŠØ¹Ø©',
-    'dash.cmd.chat': 'hysa chat â€” Ù…Ø­Ø§Ø¯Ø«Ø© ØªÙØ§Ø¹Ù„ÙŠØ©',
-    'dash.cmd.web': 'hysa web â€” ÙˆØ§Ø¬Ù‡Ø© Ø§Ù„Ù…ØªØµÙØ­',
-    'dash.cmd.config': 'hysa config â€” Ø§Ù„Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª',
-    'dash.cmd.doctor': 'hysa doctor â€” Ø§Ù„ØªØ´Ø®ÙŠØµ',
-    'dash.cmd.providers': 'hysa providers â€” Ø§Ù„Ù‚Ø§Ø¦Ù…Ø©',
+    'dash.cmd.chat': 'hysa chat — Ù…Ø­Ø§Ø¯Ø«Ø© ØªÙØ§Ø¹Ù„ÙŠØ©',
+    'dash.cmd.web': 'hysa web — ÙˆØ§Ø¬Ù‡Ø© Ø§Ù„Ù…ØªØµÙØ­',
+    'dash.cmd.config': 'hysa config — Ø§Ù„Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª',
+    'dash.cmd.doctor': 'hysa doctor — Ø§Ù„ØªØ´Ø®ÙŠØµ',
+    'dash.cmd.providers': 'hysa providers — Ø§Ù„Ù‚Ø§Ø¦Ù…Ø©',
     'dash.shortcuts': 'Ø§Ø®ØªØµØ§Ø±Ø§Øª Ù„ÙˆØ­Ø© Ø§Ù„Ù…ÙØ§ØªÙŠØ­',
-    'dash.sc.send': 'Enter â€” Ø¥Ø±Ø³Ø§Ù„',
-    'dash.sc.newline': 'Shift+Enter â€” Ø³Ø·Ø± Ø¬Ø¯ÙŠØ¯',
-    'dash.sc.sidebar': 'Ctrl+B â€” ÙØªØ­ Ø§Ù„Ø´Ø±ÙŠØ· Ø§Ù„Ø¬Ø§Ù†Ø¨ÙŠ',
-    'dash.sc.settings': 'Ctrl+, â€” Ø§Ù„Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª',
-    'dash.sc.upload': 'Ctrl+U â€” Ø±ÙØ¹ Ù…Ù„Ù',
+    'dash.sc.send': 'Enter — Ø¥Ø±Ø³Ø§Ù„',
+    'dash.sc.newline': 'Shift+Enter — Ø³Ø·Ø± Ø¬Ø¯ÙŠØ¯',
+    'dash.sc.sidebar': 'Ctrl+B — ÙØªØ­ Ø§Ù„Ø´Ø±ÙŠØ· Ø§Ù„Ø¬Ø§Ù†Ø¨ÙŠ',
+    'dash.sc.settings': 'Ctrl+, — Ø§Ù„Ø¥Ø¹Ø¯Ø§Ø¯Ø§Øª',
+    'dash.sc.upload': 'Ctrl+U — Ø±ÙØ¹ Ù…Ù„Ù',
     'dash.tip.imagine': '/imagine Ø§ÙƒØªØ¨ Ù„Ø¥Ù†Ø´Ø§Ø¡ Ø§Ù„ØµÙˆØ±',
     'dash.tip.search': 'Ø§Ø·Ù„Ø¨ "Ø§Ø¨Ø­Ø« ÙÙŠ Ø§Ù„ÙˆÙŠØ¨ Ø¹Ù†..."',
     'dash.tip.attach': 'Ø£Ø±ÙÙ‚ Ù…Ù„ÙØ§Øª Ø£Ùˆ PDF Ø£Ùˆ ØµÙˆØ±Ù‹Ø§',
@@ -988,7 +988,7 @@ export default function App() {
                     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Searching web for "${event.query}"...` }]);
                   } else if (event.type === 'search_done') {
                     if (event.sources) lastSearchSources = event.sources;
-                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Search complete â€” ${event.resultCount || 0} result(s) found` }]);
+                    setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Search complete — ${event.resultCount || 0} result(s) found` }]);
                   } else if (event.type === 'search_error') {
                     setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: event.message || 'Web search failed' }]);
                   } else if (event.type === 'fallback' && debug) {
@@ -1049,7 +1049,7 @@ export default function App() {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Searching web for "${event.query}"...` }]);
               } else if (event.type === 'search_done') {
                 if (event.sources) lastSearchSources = event.sources;
-                setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Search complete â€” ${event.resultCount || 0} result(s) found` }]);
+                setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: `Search complete — ${event.resultCount || 0} result(s) found` }]);
               } else if (event.type === 'search_error') {
                 setChatItems(prev => [...prev, { id: nextId(), kind: 'tool_event', eventType: 'search', message: event.message || 'Web search failed' }]);
               } else if (event.type === 'fallback' && debug) {
@@ -1209,7 +1209,7 @@ export default function App() {
         if (data.searchError) {
           newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'search', message: `Web search failed: ${data.searchError}` });
         } else if (data.searchResultCount !== undefined) {
-          newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'search', message: `Search complete â€” ${data.searchResultCount} result(s) found` });
+          newItems.push({ id: nextId(), kind: 'tool_event', eventType: 'search', message: `Search complete — ${data.searchResultCount} result(s) found` });
         }
       }
 
@@ -1676,101 +1676,102 @@ export default function App() {
               )
             ) : (
               <>
-                <div className="chat-column">
-                  {notice && <div className="composer-notice">{notice}</div>}
-                  {chatItems.map((item, idx) => {
-                    if (item.kind === 'user_msg') {
-                      return (
-                        <MessageBubble
-                          key={item.id}
-                          kind="user"
-                          content={stripSearchTags(item.content)}
-                          attachments={item.attachments}
-                        />
-                      );
-                    }
-                    if (item.kind === 'ai_msg') {
-                      const prevItem = idx > 0 ? chatItems[idx - 1] : null;
-                      const sourceFiles = prevItem?.kind === 'user_msg' && prevItem.attachments?.length
-                        ? prevItem.attachments.map(a => a.name).join(', ')
-                        : null;
-                      const isRevealing = item.id === revealingId;
-                      const isStreaming = item.id === streamingId;
-                      const displayContent = stripSearchTags(isRevealing
-                        ? item.content.slice(0, revealPos)
-                        : item.content);
-                      return (
-                        <MessageBubble
-                          key={item.id}
-                          kind="assistant"
-                          content={displayContent}
-                          onCopy={handleCopyMessage}
-                          sourceFiles={sourceFiles || undefined}
-                          streaming={isRevealing || isStreaming}
-                          className={isRevealing || isStreaming ? 'streaming-row' : undefined}
-                          sources={settings.showSources ? item.sources : undefined}
-                        />
-                      );
-                    }
-                    if (item.kind === 'tool_event') {
-                      return <ToolEvent key={item.id} type={item.eventType} message={item.message} />;
-                    }
-                    if (item.kind === 'diff_card') {
-                      return (
-                        <DiffCard
-                          key={item.id}
-                          filePath={item.filePath}
-                          diff={item.diff}
-                          content={item.content}
-                          onApply={applyEdit}
-                          onOpenFile={openFile}
-                          yolo={yolo}
-                          onComplete={(ok) => {
-                            if (ok && pendingMsgsRef.current) {
-                              const msgs = pendingMsgsRef.current;
-                              pendingMsgsRef.current = null;
-                              sendMessage('[auto-continue]', undefined);
-                              { /* re-trigger */ }
-                            }
-                            setLoading(false);
-                          }}
-                        />
-                      );
-                    }
-                    if (item.kind === 'command_card') {
-                      return (
-                        <CommandCard
-                          key={item.id}
-                          command={item.command}
-                          onComplete={(ok) => {
-                            if (ok && pendingMsgsRef.current) {
-                              const msgs = pendingMsgsRef.current;
-                              pendingMsgsRef.current = null;
-                              sendMessage('[auto-continue]', undefined);
-                            }
-                            setLoading(false);
-                          }}
-                        />
-                      );
-                    }
-                    if (item.kind === 'plan_card') {
-                      return <PlanCard key={item.id} plan={item.plan} currentStep={item.currentStep} />;
-                    }
-                    if (item.kind === 'tool_result') {
-                      return (
-                        <div className="tool-result-card">
-                          <pre className="tool-result-pre">{item.content}</pre>
-                        </div>
-                      );
-                    }
-                    if (item.kind === 'image_card') {
-                      return <ImageCard key={item.id} imageUrl={item.imageUrl} prompt={item.prompt} promptUsed={item.promptUsed} lang={settings.language} />;
-                    }
-                    return null;
-                  })}
-                  <div ref={chatEndRef} />
+                <div className="chat-surface">
+                  <div className="chat-column">
+                    {notice && <div className="composer-notice">{notice}</div>}
+                    {chatItems.map((item, idx) => {
+                      if (item.kind === 'user_msg') {
+                        return (
+                          <MessageBubble
+                            key={item.id}
+                            kind="user"
+                            content={stripSearchTags(item.content)}
+                            attachments={item.attachments}
+                          />
+                        );
+                      }
+                      if (item.kind === 'ai_msg') {
+                        const prevItem = idx > 0 ? chatItems[idx - 1] : null;
+                        const sourceFiles = prevItem?.kind === 'user_msg' && prevItem.attachments?.length
+                          ? prevItem.attachments.map(a => a.name).join(', ')
+                          : null;
+                        const isRevealing = item.id === revealingId;
+                        const isStreaming = item.id === streamingId;
+                        const displayContent = stripSearchTags(isRevealing
+                          ? item.content.slice(0, revealPos)
+                          : item.content);
+                        return (
+                          <MessageBubble
+                            key={item.id}
+                            kind="assistant"
+                            content={displayContent}
+                            onCopy={handleCopyMessage}
+                            sourceFiles={sourceFiles || undefined}
+                            streaming={isRevealing || isStreaming}
+                            className={isRevealing || isStreaming ? 'streaming-row' : undefined}
+                            sources={settings.showSources ? item.sources : undefined}
+                          />
+                        );
+                      }
+                      if (item.kind === 'tool_event') {
+                        return <ToolEvent key={item.id} type={item.eventType} message={item.message} />;
+                      }
+                      if (item.kind === 'diff_card') {
+                        return (
+                          <DiffCard
+                            key={item.id}
+                            filePath={item.filePath}
+                            diff={item.diff}
+                            content={item.content}
+                            onApply={applyEdit}
+                            onOpenFile={openFile}
+                            yolo={yolo}
+                            onComplete={(ok) => {
+                              if (ok && pendingMsgsRef.current) {
+                                const msgs = pendingMsgsRef.current;
+                                pendingMsgsRef.current = null;
+                                sendMessage('[auto-continue]', undefined);
+                                { /* re-trigger */ }
+                              }
+                              setLoading(false);
+                            }}
+                          />
+                        );
+                      }
+                      if (item.kind === 'command_card') {
+                        return (
+                          <CommandCard
+                            key={item.id}
+                            command={item.command}
+                            onComplete={(ok) => {
+                              if (ok && pendingMsgsRef.current) {
+                                const msgs = pendingMsgsRef.current;
+                                pendingMsgsRef.current = null;
+                                sendMessage('[auto-continue]', undefined);
+                              }
+                              setLoading(false);
+                            }}
+                          />
+                        );
+                      }
+                      if (item.kind === 'plan_card') {
+                        return <PlanCard key={item.id} plan={item.plan} currentStep={item.currentStep} />;
+                      }
+                      if (item.kind === 'tool_result') {
+                        return (
+                          <div className="tool-result-card">
+                            <pre className="tool-result-pre">{item.content}</pre>
+                          </div>
+                        );
+                      }
+                      if (item.kind === 'image_card') {
+                        return <ImageCard key={item.id} imageUrl={item.imageUrl} prompt={item.prompt} promptUsed={item.promptUsed} lang={settings.language} />;
+                      }
+                      return null;
+                    })}
+                    <div ref={chatEndRef} />
+                  </div>
                 </div>
-
               </>
             )}
           </div>
@@ -1949,7 +1950,7 @@ async function safeFetchJson(url: string, options?: RequestInit): Promise<{ ok: 
     return { ok: res.ok, data, status: res.status, contentType };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[WebClient] FETCH FAILED: ${url} â€” ${msg}`);
+    console.error(`[WebClient] FETCH FAILED: ${url} — ${msg}`);
     return { ok: false, error: msg };
   }
 }
