@@ -48,6 +48,7 @@
     "build:bundle": "node ./node_modules/esbuild/bin/esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/bundle.cjs --external:esbuild",
     "build:exe": "npm run build:web && npm run build:bundle && node ./node_modules/@yao-pkg/pkg/lib-es5/bin.js -c package.json dist/bundle.cjs --targets node22-win-x64 --output hysa.exe && node -e \"let d=require('fs').readFileSync('hysa.exe'),p=d.readUInt32LE(0x3C);d.writeUInt16LE(2,p+0x5C);require('fs').writeFileSync('hysa.exe',d);console.log('Patched to GUI subsystem')\" && node -e \"require('fs').copyFileSync('hysa.exe','web/dist/download.exe')\"",
     "start": "node dist/index.js",
+    "start:render": "node dist/web/render-start.js",
     "dev": "tsx src/index.ts",
     "dev:web": "cd web && npx vite",
     "check": "node ./node_modules/typescript/bin/tsc --noEmit",

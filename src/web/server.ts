@@ -13,6 +13,8 @@ try {
 
 import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, continueChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus, handleImageGen, handleImageProxy } from './api.js';
 import { searchWeb, formatSearchResults, getSearchDiagnostics } from '../tools/web-search.js';
+import { RateLimiter } from './rate-limiter.js';
+import { securityHeaders, getClientIP, createOriginGuard, createEndpointBlocker, rateLimitResponse } from './security.js';
 import type { Server } from 'node:http';
 
 // Keep server reference alive so GC doesn't close it
@@ -20,9 +22,38 @@ let _serverRef: Server | null = null;
 
 export function getServerRef() { return _serverRef; }
 
-export async function startWebServer(port = 8787): Promise<void> {
+// ── Rate limiters ────────────────────────────────────────────────
+const generalLimiter = new RateLimiter({ windowMs: 60_000, maxRequests: 60 });
+const chatLimiter = new RateLimiter({ windowMs: 600_000, maxRequests: 10 });
+const imageLimiter = new RateLimiter({ windowMs: 600_000, maxRequests: 10 });
+const proxyLimiter = new RateLimiter({ windowMs: 600_000, maxRequests: 30 });
+
+function rateLimitRoute(limiter: RateLimiter, label: string) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const ip = getClientIP(req);
+    const result = limiter.check(ip);
+    if (!result.allowed) {
+      console.log(`[RateLimit] ip=${ip} route=${label} retryAfter=${result.retryAfter}`);
+      return rateLimitResponse(res, result.retryAfter);
+    }
+    next();
+  };
+}
+
+export async function startWebServer(port = 8787, host?: string): Promise<void> {
   const app = express();
+
+  // Trust proxy for Render (correct client IP from X-Forwarded-For)
+  if (process.env.NODE_ENV === 'production') {
+    app.set('trust proxy', 1);
+  }
+
   app.use(express.json({ limit: '50mb' }));
+  app.use(securityHeaders);
+  app.use(createOriginGuard());
+
+  // General rate limiter for all /api/* routes (baseline)
+  app.use('/api', rateLimitRoute(generalLimiter, '/api/*'));
 
   app.get('/api/status', (_req, res) => {
     res.json(getStatus());
@@ -109,7 +140,7 @@ export async function startWebServer(port = 8787): Promise<void> {
     res.json({ diff });
   });
 
-  app.post('/api/chat', async (req, res) => {
+  app.post('/api/chat', rateLimitRoute(chatLimiter, '/api/chat'), async (req, res) => {
     try {
       const result = await handleChat(req.body);
       res.json(result);
@@ -119,7 +150,7 @@ export async function startWebServer(port = 8787): Promise<void> {
     }
   });
 
-  app.post('/api/chat/stream', async (req, res) => {
+  app.post('/api/chat/stream', rateLimitRoute(chatLimiter, '/api/chat/stream'), async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -133,7 +164,7 @@ export async function startWebServer(port = 8787): Promise<void> {
     res.end();
   });
 
-  app.post('/api/chat/continue', async (req, res) => {
+  app.post('/api/chat/continue', rateLimitRoute(chatLimiter, '/api/chat/continue'), async (req, res) => {
     try {
       const { messages, toolCalls, toolResults } = req.body as { messages: { role: string; content: string }[]; toolCalls: { type: string; params: Record<string, string> }[]; toolResults: string[] };
       if (!messages || !toolCalls || !toolResults) {
@@ -147,7 +178,7 @@ export async function startWebServer(port = 8787): Promise<void> {
     }
   });
 
-  app.post('/api/run', async (req, res) => {
+  app.post('/api/run', createEndpointBlocker({ envVar: 'HYSA_ENABLE_DANGEROUS_WEB_ACTIONS', label: 'dangerous' }), async (req, res) => {
     const { command } = req.body as { command: string };
     if (!command) return res.status(400).json({ error: 'Missing command' });
     try {
@@ -159,16 +190,16 @@ export async function startWebServer(port = 8787): Promise<void> {
     }
   });
 
-  app.get('/api/yolo', (_req, res) => {
+  app.get('/api/yolo', createEndpointBlocker({ envVar: 'HYSA_ENABLE_DANGEROUS_WEB_ACTIONS', label: 'dangerous' }), (_req, res) => {
     res.json(getYoloStatus());
   });
 
-  app.post('/api/yolo', (req, res) => {
+  app.post('/api/yolo', createEndpointBlocker({ envVar: 'HYSA_ENABLE_DANGEROUS_WEB_ACTIONS', label: 'dangerous' }), (req, res) => {
     const { enabled } = req.body as { enabled: boolean };
     res.json(setYoloStatus(enabled));
   });
 
-  app.post('/api/image/generate', async (req, res) => {
+  app.post('/api/image/generate', rateLimitRoute(imageLimiter, '/api/image/generate'), async (req, res) => {
     try {
       const { prompt } = req.body as { prompt: string };
       if (!prompt) return res.status(400).json({ error: 'Missing prompt' });
@@ -179,7 +210,7 @@ export async function startWebServer(port = 8787): Promise<void> {
     }
   });
 
-  app.get('/api/image/proxy', async (req, res) => {
+  app.get('/api/image/proxy', rateLimitRoute(proxyLimiter, '/api/image/proxy'), async (req, res) => {
     try {
       const prompt = (req.query.prompt as string || '').trim();
       if (!prompt) return res.status(400).json({ ok: false, error: 'Missing prompt' });
@@ -197,7 +228,7 @@ export async function startWebServer(port = 8787): Promise<void> {
     }
   });
 
-  app.get('/api/debug/image', async (req, res) => {
+  app.get('/api/debug/image', createEndpointBlocker({ envVar: 'HYSA_ENABLE_DEBUG_API', label: 'debug' }), async (req, res) => {
     try {
       const prompt = (req.query.prompt as string) || 'cat';
       const encodedPrompt = encodeURIComponent(prompt);
@@ -219,7 +250,7 @@ export async function startWebServer(port = 8787): Promise<void> {
     }
   });
 
-  app.get('/api/debug/search', async (req, res) => {
+  app.get('/api/debug/search', createEndpointBlocker({ envVar: 'HYSA_ENABLE_DEBUG_API', label: 'debug' }), async (req, res) => {
     try {
       const q = (req.query.q as string) || 'test';
       const diag = getSearchDiagnostics();
@@ -272,15 +303,26 @@ export async function startWebServer(port = 8787): Promise<void> {
   }
 
   return new Promise<void>((resolveStart, reject) => {
-    const server = app.listen(port, () => {
-      console.log(`\n  [HYSA Web] Frontend served on http://localhost:${port}`);
-      console.log(`  [HYSA Web] API server listening on port ${port}`);
-      console.log(`  [HYSA Web] API routes registered:`);
-      const apiRoutes = ['/api/status', '/api/config', '/api/project/tree', '/api/file', '/api/file/save', '/api/file/preview', '/api/chat', '/api/chat/stream', '/api/chat/continue', '/api/run', '/api/yolo', '/api/image/generate', '/api/image/proxy', '/api/debug/image', '/api/debug/search', '/api/fallback', '/api/download/exe'];
-      for (const r of apiRoutes) console.log(`    · ${r}`);
-      console.log(`  [HYSA Web] JSON 404 catch-all active for unmatched /api/*`);
-      resolveStart();
-    });
+    const listenHost = host || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : undefined);
+    const server = listenHost
+      ? app.listen(port, listenHost, () => {
+          console.log(`\n  [HYSA Web] Frontend served on http://${listenHost}:${port}`);
+          console.log(`  [HYSA Web] API server listening on port ${port}`);
+          console.log(`  [HYSA Web] API routes registered:`);
+          const apiRoutes = ['/api/status', '/api/config', '/api/project/tree', '/api/file', '/api/file/save', '/api/file/preview', '/api/chat', '/api/chat/stream', '/api/chat/continue', '/api/run', '/api/yolo', '/api/image/generate', '/api/image/proxy', '/api/debug/image', '/api/debug/search', '/api/fallback', '/api/download/exe'];
+          for (const r of apiRoutes) console.log(`    · ${r}`);
+          console.log(`  [HYSA Web] JSON 404 catch-all active for unmatched /api/*`);
+          resolveStart();
+        })
+      : app.listen(port, () => {
+          console.log(`\n  [HYSA Web] Frontend served on http://localhost:${port}`);
+          console.log(`  [HYSA Web] API server listening on port ${port}`);
+          console.log(`  [HYSA Web] API routes registered:`);
+          const apiRoutes = ['/api/status', '/api/config', '/api/project/tree', '/api/file', '/api/file/save', '/api/file/preview', '/api/chat', '/api/chat/stream', '/api/chat/continue', '/api/run', '/api/yolo', '/api/image/generate', '/api/image/proxy', '/api/debug/image', '/api/debug/search', '/api/fallback', '/api/download/exe'];
+          for (const r of apiRoutes) console.log(`    · ${r}`);
+          console.log(`  [HYSA Web] JSON 404 catch-all active for unmatched /api/*`);
+          resolveStart();
+        });
     _serverRef = server;
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
