@@ -258,20 +258,14 @@ export function formatSearchResults(query: string, results: SearchResult[]): str
 
   if (isArabic) {
     out += '\nتعليمات للإجابة:\n';
-    out += '- يجب أن تتضمن الإجابة النهائية دائماً قسم "مصادر" في النهاية.\n';
-    out += '- ادرج 3-5 من أفضل المصادر في قسم المصادر.\n';
-    out += '- لكل مصدر: اذكر العنوان، اسم النطاق أو الرابط، وملخص من سطر واحد.\n';
-    out += '- لا تضع روابط طويلة داخل فقرات النص.\n';
-    out += '- إذا قلت "بحثت" في الإجابة، تأكد من عرض مصدر واحد على الأقل.\n';
-    out += '- لا تدرج روابط يوتيوب أو منصات فيديو ما لم يطلبها المستخدم صراحةً.\n';
+    out += '- أجب عن السؤال باستخدام نتائج البحث أعلاه.\n';
+    out += '- لا تضف قسم "مصادر" أو "روابط" في الإجابة النهائية — المصادر ستظهر تلقائياً بشكل منفصل.\n';
+    out += '- يمكنك الإشارة للمصادر ضمن النص فقط (مثلاً: "حسب ويكيبيديا").\n';
   } else {
     out += '\nAnswer requirements:\n';
-    out += '- The final answer MUST include a "Sources" section at the end.\n';
-    out += '- List 3-5 of the best sources in the Sources section.\n';
-    out += '- For each source, show: title, domain or URL, and a 1-line summary.\n';
-    out += '- Do NOT dump raw long URLs inside the paragraph text.\n';
-    out += '- If you say "I searched" in the answer, you MUST show at least one source.\n';
-    out += '- Do NOT include links to YouTube or video platforms unless the user explicitly requests video content.\n';
+    out += '- Answer the question using the search results above.\n';
+    out += '- Do NOT add a "Sources" section at the end of your answer — sources are displayed separately.\n';
+    out += '- You may reference sources inline (e.g. "According to Wikipedia").\n';
   }
   return out.trim();
 }

@@ -57,6 +57,15 @@ interface ChatResult {
     provider?: string;
     model?: string;
     timing?: Record<string, number>;
+    searchQuery?: string;
+    searchResultCount?: number;
+    searchError?: string;
+    searchSources?: {
+        title: string;
+        url: string;
+        snippet?: string;
+        rank: number;
+    }[];
     visionDebug?: {
         taskKind: string;
         requiredCapability: string;
@@ -156,5 +165,13 @@ export declare function getFallbackStatus(): {
 export declare function handleImageGen(prompt: string): Promise<{
     imageUrl?: string;
     error?: string;
+}>;
+export declare function handleImageProxy(prompt: string): Promise<{
+    ok: boolean;
+    buffer?: Buffer;
+    contentType?: string;
+    upstreamUrl?: string;
+    error?: string;
+    status?: number;
 }>;
 //# sourceMappingURL=api.d.ts.map

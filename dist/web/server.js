@@ -10,7 +10,8 @@ try {
 catch {
     _dirname = typeof __dirname !== 'undefined' ? __dirname : process.cwd();
 }
-import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, continueChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus, handleImageGen } from './api.js';
+import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, continueChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus, handleImageGen, handleImageProxy } from './api.js';
+import { searchWeb, getSearchDiagnostics } from '../tools/web-search.js';
 // Keep server reference alive so GC doesn't close it
 let _serverRef = null;
 export function getServerRef() { return _serverRef; }
@@ -170,8 +171,71 @@ export async function startWebServer(port = 8787) {
             res.status(500).json({ error: err.message });
         }
     });
+    app.get('/api/image/proxy', async (req, res) => {
+        try {
+            const prompt = (req.query.prompt || '').trim();
+            if (!prompt)
+                return res.status(400).json({ ok: false, error: 'Missing prompt' });
+            const result = await handleImageProxy(prompt);
+            if (result.ok && result.buffer) {
+                res.setHeader('Content-Type', result.contentType || 'image/jpeg');
+                res.setHeader('Content-Length', result.buffer.length);
+                res.setHeader('Cache-Control', 'public, max-age=3600');
+                res.end(result.buffer);
+            }
+            else {
+                res.status(502).json({ ok: false, error: result.error || 'Image proxy failed', upstreamUrl: result.upstreamUrl, contentType: result.contentType, status: result.status });
+            }
+        }
+        catch (err) {
+            res.status(500).json({ ok: false, error: err.message });
+        }
+    });
+    app.get('/api/debug/image', async (req, res) => {
+        try {
+            const prompt = req.query.prompt || 'cat';
+            const encodedPrompt = encodeURIComponent(prompt);
+            const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nofeed=true`;
+            let headStatus = null;
+            let headError = null;
+            try {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 12000);
+                const check = await fetch(imageUrl, { method: 'HEAD', signal: controller.signal });
+                clearTimeout(timeoutId);
+                headStatus = check.status;
+            }
+            catch (err) {
+                headError = err.message;
+            }
+            res.json({ ok: true, prompt, encodedPrompt, imageUrl, headStatus, headError });
+        }
+        catch (err) {
+            res.status(500).json({ ok: false, error: err.message });
+        }
+    });
+    app.get('/api/debug/search', async (req, res) => {
+        try {
+            const q = req.query.q || 'test';
+            const diag = getSearchDiagnostics();
+            const results = await searchWeb(q, { maxResults: 5 });
+            res.json({ ok: true, query: q, provider: diag.provider, hasTavilyKey: diag.hasTavilyKey, isReliable: diag.isReliable, resultCount: results.length, results: results.map(r => ({ title: r.title, url: r.url, snippet: r.snippet?.slice(0, 200) })) });
+        }
+        catch (err) {
+            res.status(500).json({ ok: false, error: err.message });
+        }
+    });
     app.get('/api/fallback', (_req, res) => {
         res.json(getFallbackStatus());
+    });
+    // Catch-all for unmatched /api/* routes — return JSON, never HTML
+    app.use('/api', (req, res) => {
+        res.status(404).json({
+            ok: false,
+            error: 'API route not found',
+            method: req.method,
+            path: req.originalUrl,
+        });
     });
     // Serve static frontend
     // __dirname depends on context:
@@ -203,7 +267,13 @@ export async function startWebServer(port = 8787) {
     }
     return new Promise((resolveStart, reject) => {
         const server = app.listen(port, () => {
-            console.log(`\n  🌐 HYSA Web running at http://localhost:${port}\n`);
+            console.log(`\n  [HYSA Web] Frontend served on http://localhost:${port}`);
+            console.log(`  [HYSA Web] API server listening on port ${port}`);
+            console.log(`  [HYSA Web] API routes registered:`);
+            const apiRoutes = ['/api/status', '/api/config', '/api/project/tree', '/api/file', '/api/file/save', '/api/file/preview', '/api/chat', '/api/chat/stream', '/api/chat/continue', '/api/run', '/api/yolo', '/api/image/generate', '/api/image/proxy', '/api/debug/image', '/api/debug/search', '/api/fallback', '/api/download/exe'];
+            for (const r of apiRoutes)
+                console.log(`    · ${r}`);
+            console.log(`  [HYSA Web] JSON 404 catch-all active for unmatched /api/*`);
             resolveStart();
         });
         _serverRef = server;

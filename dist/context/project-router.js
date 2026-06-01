@@ -1,4 +1,30 @@
 const PROJECT_MODE_KEYWORDS = /\b(?:project|code|codebase|repo|repository|file|files|folder|directory|module|component|function|class|bug|bugs|fix|fixed|fixing|debug|debugging|error|errors|issue|issues|improvement|improvements|refactor|refactoring|structure|architecture|implement|implementation|test|tests|testing|build|compil|deploy|config|configur|route|routes|api|endpoint|hook|state|effect|promise|async|await|callback|import|export|npm|yarn|package|interface|type|types|schema|config|setting|settings|dependency|dependencies)\b/i;
+const ARABIC_PROJECT_KEYWORDS = [
+    /مشروع/u,
+    /ملف|ملفات/u,
+    /الكود/u,
+    /كود/u,
+    /مجلد/u,
+    /مكونات?/u,
+    /كومبوننت/u,
+    /دوال?|دالة/u,
+    /وظيفة|وظائف/u,
+    /كلاس/u,
+    /ثغرة|ثغرات|خلل/u,
+    /خطأ|أخطاء/u,
+    /بنية/u,
+    /واجهة/u,
+    /اختبارات?/u,
+    /أصلح|إصلاح/u,
+    /راجع|مراجعة/u,
+    /حلل|تحليل/u,
+    /افحص|فحص/u,
+    /اختصر|تلخيص/u,
+    /اقرأ|قراءة/u,
+    /التطبيق/u,
+    /أمر|الأوامر/u,
+    /سكريبت|سكربت/u,
+];
 const EXPLICIT_WEB_INTENT = /^(?:search|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i;
 const GENERAL_KNOWLEDGE_TRIGGERS = [
     /^who\s+(?:is|are|was|were)\s+(?!(?:this|the|my|our)\s+(?:project|code|repo|file|app|function|class|component))/i,
@@ -15,14 +41,22 @@ const CODING_TASK_KINDS = [
     'code_edit', 'debugging', 'code_review', 'long_context',
     'project_scan', 'coding_qa', 'long_reasoning', 'planning',
 ];
+function hasArabicProjectKeywords(text) {
+    return ARABIC_PROJECT_KEYWORDS.some(p => p.test(text));
+}
 export function decideProjectMode(message, workspaceLoaded, taskKind) {
     const trimmed = message.trim();
     if (!trimmed || !workspaceLoaded) {
-        return { projectMode: false, reason: workspaceLoaded ? 'Empty message' : 'No workspace loaded' };
+        const reason = workspaceLoaded ? 'Empty message' : 'No workspace loaded';
+        console.log(`[ProjectMode] input="${trimmed}" workspaceLoaded=${workspaceLoaded} projectMode=false reason=${reason}`);
+        return { projectMode: false, reason };
     }
     const lower = trimmed.toLowerCase();
+    const hasArabic = hasArabicProjectKeywords(trimmed);
+    const hasEnglish = PROJECT_MODE_KEYWORDS.test(trimmed);
+    console.log(`[ProjectMode] input="${trimmed}" taskKind=${taskKind} workspaceLoaded=${workspaceLoaded} hasEnglishKeywords=${hasEnglish} hasArabicKeywords=${hasArabic}`);
     // Simple chat with no project keywords → not project mode
-    if (taskKind === 'simple_chat' && !PROJECT_MODE_KEYWORDS.test(trimmed)) {
+    if (taskKind === 'simple_chat' && !PROJECT_MODE_KEYWORDS.test(trimmed) && !hasArabicProjectKeywords(trimmed)) {
         return { projectMode: false, reason: 'Simple chat with no project keywords' };
     }
     // Explicit web search command → not project mode
@@ -40,14 +74,14 @@ export function decideProjectMode(message, workspaceLoaded, taskKind) {
         return { projectMode: true, reason: `Coding task kind: ${taskKind}` };
     }
     // Project keywords detected → project mode
-    if (PROJECT_MODE_KEYWORDS.test(trimmed)) {
+    if (PROJECT_MODE_KEYWORDS.test(trimmed) || hasArabicProjectKeywords(trimmed)) {
         return { projectMode: true, reason: 'Project keywords matched' };
     }
     // "find X" where X looks like a bug/issue/error/code thing → project mode
     const findProjectMatch = trimmed.match(/^find\s+(?:a\s+|an\s+|the\s+|me\s+)?(.+)/i);
     if (findProjectMatch) {
         const target = findProjectMatch[1];
-        if (PROJECT_MODE_KEYWORDS.test(target) || /bug|issue|error|problem|improvement|file|function|class/i.test(target)) {
+        if (PROJECT_MODE_KEYWORDS.test(target) || hasArabicProjectKeywords(target) || /bug|issue|error|problem|improvement|file|function|class/i.test(target)) {
             return { projectMode: true, reason: `Find-query with project target: "${target}"` };
         }
     }

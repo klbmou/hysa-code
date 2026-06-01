@@ -80,6 +80,11 @@ function buildFullSystemPrompt(projectInfo, agentMode, userName) {
             parts.push(`Config files: ${projectInfo.configFiles.join(', ')}`);
         }
         parts.push(`Total files: ${projectInfo.fileCount}`);
+        parts.push(``);
+        parts.push(`IMPORTANT: Workspace files are already available in the file tree on the left sidebar.`);
+        parts.push(`When the user refers to "this project", "the project", "the files", etc., they mean the currently open workspace.`);
+        parts.push(`Do NOT ask the user to upload, paste, or attach files. Use the read_file tool to read workspace files directly.`);
+        parts.push(`If the user asks about a specific file or area, read it using read_file. If they ask a broad question, use the project tree and entry points above to suggest relevant files to inspect.`);
     }
     parts.push(`\n## Capabilities`);
     parts.push(`HYSA has the following tools and capabilities:`);

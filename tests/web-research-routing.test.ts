@@ -71,8 +71,20 @@ describe('web research routing', () => {
     assert.equal(classifyTask(msg('من هو أحمد أبو الرب')), 'search');
   });
 
+  it('Arabic "من هو احمد ابو الرب" without hamza triggers search task', () => {
+    assert.equal(classifyTask(msg('من هو احمد ابو الرب')), 'search');
+  });
+
   it('Arabic "من هذه الشخصية" triggers search task', () => {
     assert.equal(classifyTask(msg('من هذه الشخصية')), 'search');
+  });
+
+  it('Arabic "كم عدد مشتركي أحمد أبو الرب" triggers search task', () => {
+    assert.equal(classifyTask(msg('كم عدد مشتركي أحمد أبو الرب على يوتيوب')), 'search');
+  });
+
+  it('Arabic "آخر أخبار أحمد أبو الرب" triggers search task', () => {
+    assert.equal(classifyTask(msg('آخر أخبار أحمد أبو الرب')), 'search');
   });
 
   it('Arabic "ابحث عن آخر إحصائيات" triggers search task', () => {
@@ -160,11 +172,9 @@ describe('web research routing', () => {
     assert.ok(result.includes('Sources:'), 'should include Sources:');
     assert.ok(result.includes('example.com'), 'should include domain');
     // Must tell LLM to include Sources section
-    assert.ok(result.includes('MUST include a "Sources" section'), 'should require Sources section at end');
-    assert.ok(result.includes('List 3-5'), 'should limit to 3-5 sources');
-    assert.ok(result.includes('title, domain or URL, and a 1-line summary'), 'each source needs title+url+summary');
-    assert.ok(result.includes('Do NOT dump raw'), 'should avoid raw URL dumps');
-    assert.ok(result.includes('Do NOT include links to YouTube'), 'should exclude videos');
+    assert.ok(result.includes('Do NOT add a "Sources" section'), 'should tell LLM not to add Sources section');
+    assert.ok(result.includes('displayed separately'), 'sources are displayed separately');
+    assert.ok(result.includes('You may reference sources inline'), 'inline references ok');
   });
 
   it('formatSearchResults gives each source a snippet line', async () => {
@@ -198,10 +208,9 @@ describe('web research routing', () => {
     ]);
     assert.ok(result.includes('المصادر:'), 'should use Arabic مصادر header');
     assert.ok(result.includes('تعليمات للإجابة:'), 'should include Arabic instructions');
-    assert.ok(result.includes('مصادر" في النهاية'), 'should tell LLM to include مصادر section');
-    assert.ok(result.includes('ادرج 3-5'), 'should limit to 3-5 in Arabic');
-    assert.ok(result.includes('لا تضع روابط طويلة'), 'should avoid raw URLs in Arabic');
-    assert.ok(result.includes('لا تدرج روابط يوتيوب'), 'should exclude videos in Arabic');
+    assert.ok(result.includes('لا تضف قسم "مصادر"'), 'should tell LLM not to add مصادر section');
+    assert.ok(result.includes('المصادر ستظهر تلقائياً'), 'sources displayed separately');
+    assert.ok(result.includes('يمكنك الإشارة للمصادر ضمن النص'), 'inline references ok');
   });
 
   it('formatSearchResults does not dump raw URLs in output', async () => {

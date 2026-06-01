@@ -1,93 +1,33 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-// ── Static data ──────────────────────────────────
-
-const WHY = [
-  { icon: '</>', title: 'Open-source', desc: 'MIT licensed. Free to use, modify, and share.' },
-  { icon: '>_', title: 'Terminal + browser', desc: 'Works wherever you code — CLI or Web UI.' },
-  { icon: '⬡', title: 'Provider-flexible', desc: 'Bring your own key, use local models, or free APIs.' },
-  { icon: '◈', title: 'Local & free options', desc: 'Ollama, OpenCode Zen, Gemini, Groq, DeepSeek, and more.' },
-  { icon: '✓', title: 'Safer edits with approval', desc: 'Diff every change, approve before writing, backups automatic.' },
-  { icon: '{ }', title: 'Built for real projects', desc: 'Reads your codebase, understands context, edits files directly.' },
-];
-
-const DEV_NOTES = [
-  { id: 1, icon: '</>', text: 'I can review a diff before anything touches my files.', color: '#a855f7' },
-  { id: 2, icon: '⬡', text: 'I can use OpenRouter, Gemini, Ollama, or my own HYSA AI provider.', color: '#3b82f6' },
-  { id: 3, icon: '>_', text: 'It works in the terminal when I want speed, and the browser when I want visuals.', color: '#22c55e' },
-  { id: 4, icon: '⚡', text: 'YOLO mode is there when I trust the project — off by default.', color: '#f59e0b' },
-  { id: 5, icon: '◈', text: 'Doctor commands help debug provider problems in seconds.', color: '#ec4899' },
-];
-
-const WORKFLOW = [
-  { icon: '📂', title: 'Open project', desc: 'Point HYSA Code at any local directory or open the Web UI.' },
-  { icon: '💬', title: 'Ask HYSA', desc: 'Describe what you want to build, fix, or change in plain English.' },
-  { icon: '📖', title: 'Read files', desc: 'HYSA reads relevant files to understand your codebase context.' },
-  { icon: '📋', title: 'Review diff', desc: 'HYSA shows exactly what changed — additions green, removals red.' },
-  { icon: '✅', title: 'Apply safely', desc: 'Approve the edit. HYSA writes the file and backs up the original.' },
-  { icon: '⚡', title: 'Run commands', desc: 'Let HYSA run tests, linters, or builds — classified by risk level.' },
-];
-
-const PROVIDERS = [
-  'OpenRouter', 'Gemini', 'Groq', 'DeepSeek', 'OpenCode Zen',
-  'Ollama', 'HYSA AI', 'Anthropic', 'OpenAI',
-];
-
-const PROVIDER_GLOW: Record<string, string> = {
-  'OpenRouter': '#a855f7',
-  'Gemini': '#4285f4',
-  'Groq': '#f97316',
-  'DeepSeek': '#22c55e',
-  'OpenCode Zen': '#06b6d4',
-  'Ollama': '#6366f1',
-  'HYSA AI': '#ec4899',
-  'Anthropic': '#f59e0b',
-  'OpenAI': '#10b981',
-};
-
-const SAFETY = [
-  { icon: '🛡️', title: 'Diff before write', desc: 'See every change before it hits disk.' },
-  { icon: '✓', title: 'Approval before edit', desc: 'You decide what gets written.' },
-  { icon: '◈', title: 'Backups before write', desc: 'Original files backed up with .bak.' },
-  { icon: '⛔', title: 'Dangerous files blocked', desc: '.env, lockfiles, build artifacts protected.' },
-  { icon: '🔐', title: 'Commands need confirmation', desc: 'Dangerous commands always ask first.' },
-  { icon: '⚡', title: 'YOLO mode optional', desc: 'Skip confirmations when you trust the AI.' },
-];
-
 const COMMANDS = [
-  { cmd: 'hysa chat', desc: 'Start interactive chat with AI' },
+  { cmd: 'hysa chat', desc: 'Start interactive AI session' },
   { cmd: 'hysa web', desc: 'Launch the Web UI' },
-  { cmd: 'hysa config', desc: 'View or update configuration' },
-  { cmd: 'hysa providers', desc: 'List all available providers' },
+  { cmd: 'hysa config', desc: 'View or update config' },
+  { cmd: 'hysa providers', desc: 'List available providers' },
   { cmd: 'hysa doctor', desc: 'Run diagnostics' },
-  { cmd: 'hysa models <provider>', desc: 'List models for a provider' },
+  { cmd: 'hysa models <provider>', desc: 'List provider models' },
   { cmd: 'hysa experimental on', desc: 'Enable experimental free providers' },
-  { cmd: 'hysa yolo on', desc: 'Enable YOLO auto-apply mode' },
+  { cmd: 'hysa yolo on', desc: 'Enable auto-apply mode' },
 ];
 
-const ROADMAP = [
-  'npm release',
-  'Stronger fallback engine',
-  'Better local HYSA AI provider',
-  'VS Code extension',
-  'GitHub PR automation',
+const WORKFLOW_STEPS = [
+  { icon: '💬', title: 'Chat with your codebase', desc: 'Ask HYSA to build, fix, or change anything. The AI reads your files to understand the full project context.' },
+  { icon: '📖', title: 'Review proposed changes', desc: 'See exactly what will change — additions in green, removals in red — before anything touches your files.' },
+  { icon: '✅', title: 'Approve or reject', desc: 'Approve the edit and HYSA writes the file. Reject and nothing changes. Backups are automatic.' },
+  { icon: '⚡', title: 'Run commands safely', desc: 'Let HYSA run tests, linters, and builds. Dangerous commands always ask for confirmation first.' },
 ];
 
-const PROVIDER_ORBIT = [
-  'OpenRouter', 'Gemini', 'Groq', 'DeepSeek',
-  'OpenCode Zen', 'Ollama', 'HYSA AI', 'Anthropic', 'OpenAI',
+const FEATURES = [
+  { icon: '💬', title: 'Web chat interface', desc: 'Full-featured chat with streaming responses, code diffs, image generation, and source browsing.' },
+  { icon: '🔍', title: 'Source chips & search', desc: 'Ask "what is X in the codebase?" and get file-backed answers with clickable source references.' },
+  { icon: '🖼️', title: 'Image generation proxy', desc: 'Generate and display images inline via the AI provider — with fallback URLs and retry support.' },
+  { icon: '📁', title: 'File browser', desc: 'Browse, upload, and manage project files directly from the browser UI with drag-and-drop support.' },
+  { icon: '🔌', title: 'Provider routing', desc: 'Bring your own key for OpenRouter, Gemini, Groq, DeepSeek, Ollama, Anthropic, OpenAI, and more.' },
+  { icon: '🌐', title: 'Arabic & English', desc: 'Full bilingual support — chat in Arabic or English with proper RTL layout and Arabic search.' },
+  { icon: '⚙️', title: 'Settings panel', desc: 'Configure AI providers, theme, font size, and experimental features from an intuitive settings UI.' },
+  { icon: '📱', title: 'Mobile-friendly', desc: 'Responsive design that works on phones and tablets without sacrificing functionality or readability.' },
 ];
-
-const STAR_PARTICLES = Array.from({ length: 30 }, (_, i) => ({
-  id: i,
-  left: `${Math.random() * 100}%`,
-  top: `${Math.random() * 100}%`,
-  size: Math.random() * 2 + 1,
-  delay: Math.random() * 5,
-  color: ['rgba(168,85,247,0.6)', 'rgba(236,72,153,0.4)', 'rgba(59,130,246,0.5)'][Math.floor(Math.random() * 3)],
-}));
-
-// ── Components ───────────────────────────────────
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -98,7 +38,7 @@ function CopyButton({ text }: { text: string }) {
         setTimeout(() => setCopied(false), 2000);
       }).catch(() => {});
     }}>
-      {copied ? '✓ Copied!' : 'Copy'}
+      {copied ? '✓ Copied' : 'Copy'}
     </button>
   );
 }
@@ -110,7 +50,6 @@ function InstallTerminal() {
     'git clone https://github.com/klbmou/hysa-code',
     'cd hysa-code',
     'npm install && npm run build && npm run build:web',
-    'npm pack',
     'npm install -g ./hysa-code-0.2.0.tgz',
   ];
 
@@ -145,18 +84,19 @@ function InstallTerminal() {
           ))
         )}
       </div>
-      {tab === 'release' && (
-        <div className="lp-terminal-footer">
-          <span className="lp-terminal-rec">Recommended</span>
-          <span>Stable release · no build required</span>
-        </div>
-      )}
-      {tab === 'dev' && (
-        <div className="lp-terminal-footer">
-          <span className="lp-terminal-rec dev">Clone & build</span>
-          <span>Requires Node.js 18+</span>
-        </div>
-      )}
+      <div className="lp-terminal-footer">
+        {tab === 'release' ? (
+          <>
+            <span className="lp-terminal-rec">Recommended</span>
+            <span>Stable release · no build required</span>
+          </>
+        ) : (
+          <>
+            <span className="lp-terminal-rec dev">Clone & build</span>
+            <span>Requires Node.js 18+</span>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -175,11 +115,8 @@ function Section({ title, desc, alt, children, id }: {
   );
 }
 
-// ── Landing Page ─────────────────────────────────
-
 export default function LandingPage() {
   const rootRef = useRef<HTMLDivElement>(null);
-  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
 
   useEffect(() => {
     const el = rootRef.current;
@@ -202,291 +139,150 @@ export default function LandingPage() {
     return () => obs.disconnect();
   }, []);
 
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
-    const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (prefersReduced) return;
-    const handleMouse = (e: MouseEvent) => {
-      setMousePos({ x: e.clientX, y: e.clientY });
-      el.style.setProperty('--mouse-x', `${e.clientX}px`);
-      el.style.setProperty('--mouse-y', `${e.clientY}px`);
-    };
-    window.addEventListener('mousemove', handleMouse, { passive: true });
-    return () => window.removeEventListener('mousemove', handleMouse);
-  }, []);
-
   const handleLaunchChat = () => {
     window.location.hash = '#/chat';
   };
 
-  const installCmd = 'npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.2.0/hysa-code-0.2.0.tgz';
-
   return (
     <div className="lp-root" ref={rootRef}>
-      <div className="lp-ambient-glow" />
-      <div className="lp-cursor-glow" style={{ left: mousePos.x, top: mousePos.y }} />
-
-      {/* Star particles */}
-      {STAR_PARTICLES.map(p => (
-        <span
-          key={p.id}
-          className="lp-star-particle"
-          style={{
-            left: p.left,
-            top: p.top,
-            width: `${p.size}px`,
-            height: `${p.size}px`,
-            background: p.color,
-            animationDelay: `${p.delay}s`,
-          }}
-        />
-      ))}
-
       {/* ── Nav ── */}
       <nav className="lp-nav">
         <div className="lp-nav-inner">
           <span className="lp-logo">HYSA Code</span>
-          <div className="lp-nav-links">
-            <button className="lp-nav-text-btn" onClick={() => { window.location.hash = '#/files'; }}>Files</button>
-            <a href="https://github.com/klbmou/hysa-code" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <div className="lp-nav-center">
+            <span className="lp-nav-link" onClick={() => document.getElementById('features')?.scrollIntoView({ behavior: 'smooth' })}>Features</span>
+            <span className="lp-nav-link" onClick={handleLaunchChat}>Web App</span>
+            <span className="lp-nav-link" onClick={() => document.getElementById('cli')?.scrollIntoView({ behavior: 'smooth' })}>CLI</span>
+            <a href="https://github.com/klbmou/hysa-code" target="_blank" rel="noopener noreferrer" className="lp-nav-link">GitHub</a>
+          </div>
+          <div className="lp-nav-actions">
             <button className="lp-btn lp-btn-primary lp-btn-sm" onClick={handleLaunchChat}>Launch Chat</button>
+            <a href="https://github.com/klbmou/hysa-code" target="_blank" rel="noopener noreferrer" className="lp-btn lp-btn-secondary lp-btn-sm">
+              View GitHub
+            </a>
           </div>
         </div>
       </nav>
 
       {/* ── Hero ── */}
       <section className="lp-hero">
-        <div className="lp-hero-bg-glow" />
         <div className="lp-hero-content">
-          <div className="hysa-mascot">
-            <div className="mascot-glow" />
-            <div className="mascot-neural-ring" />
-            <div className="mascot-circuit-dot top-left" />
-            <div className="mascot-circuit-dot top-right" />
-            <div className="mascot-circuit-dot bottom-left" />
-            <div className="mascot-circuit-dot bottom-right" />
-            <div className="mascot-body">
-              <div className="mascot-eyes">
-                <span className="mascot-eye" />
-                <span className="mascot-eye" />
-              </div>
-              <span className="mascot-icon">&gt;_</span>
-            </div>
-          </div>
-
-          <div className="lp-news-pill">
-            <span className="lp-news-dot" />
-            HYSA Code v0.2 Web MVP is live
-          </div>
-
-          <div className="lp-hero-badge">
-            <span>Open-source</span>
-            <span className="lp-badge-sep">·</span>
-            <span>CLI + Web</span>
-            <span className="lp-badge-sep">·</span>
-            <span>Local providers</span>
+          <div className="lp-hero-badges">
+            <span className="lp-hero-badge">
+              <span className="lp-badge-dot" />
+              Open source
+            </span>
+            <span className="lp-hero-badge">
+              <span className="lp-badge-dot green" />
+              CLI + Web UI
+            </span>
+            <span className="lp-hero-badge">
+              <span className="lp-badge-dot blue" />
+              v0.2 MVP
+            </span>
           </div>
 
           <h1 className="lp-hero-title">
-            HYSA <span className="lp-hero-title-accent">Code</span>
+            <span className="lp-hero-title-line">HYSA <span className="lp-hero-accent">Code</span></span>
+            <span className="lp-hero-subtitle">The AI coding assistant that edits your project files</span>
           </h1>
 
-          <p className="lp-hero-headline">
-            The AI coding assistant that actually edits your project.
-          </p>
-          <p className="lp-hero-sub">
-            Chat with your codebase from the terminal or the browser. Reads files,
-            proposes changes, shows diffs, asks before writing, runs commands safely.
+          <p className="lp-hero-desc">
+            Chat with your codebase from the terminal or browser. HYSA reads files,
+            proposes changes, shows diffs, asks before writing, and runs commands — all with your approval.
           </p>
 
-          <div className="lp-hero-buttons">
-            <button className="lp-btn lp-btn-primary lp-btn-glow" onClick={handleLaunchChat}>
-              <span className="lp-btn-icon">▶</span>
+          <div className="lp-hero-actions">
+            <button className="lp-btn lp-btn-primary lp-btn-lg" onClick={handleLaunchChat}>
               Launch Chat
             </button>
-            <a href="https://github.com/klbmou/hysa-code" target="_blank" rel="noopener noreferrer" className="lp-btn lp-btn-secondary">
-              <span className="lp-btn-icon">⌘</span>
-              GitHub
+            <a href="https://github.com/klbmou/hysa-code" target="_blank" rel="noopener noreferrer" className="lp-btn lp-btn-secondary lp-btn-lg">
+              View on GitHub
             </a>
           </div>
         </div>
       </section>
 
-      {/* ── Live status ── */}
-      <div className="lp-live-status">
-        <div className="lp-status-pill">
-          <span className="lp-status-dot green" />
-          CLI ready
-        </div>
-        <div className="lp-status-pill">
-          <span className="lp-status-dot purple" />
-          Web UI live
-        </div>
-        <div className="lp-status-pill">
-          <span className="lp-status-dot blue" />
-          Local providers
-        </div>
-      </div>
-
-      {/* ── Install ── */}
-      <Section title="One command to start" desc="Install globally via npm — no build tools required." alt>
-        <InstallTerminal />
-        <p className="lp-install-hint">
-          After install: <code className="lp-inline-code-sm">hysa chat</code> or <code className="lp-inline-code-sm">hysa web</code>
-        </p>
-        <div className="lp-download-exe" style={{ textAlign: 'center', marginTop: '1.5rem' }}>
-          <a href="/api/download/exe" className="lp-btn lp-btn-secondary lp-btn-glow" download>
-            <span className="lp-btn-icon">⬇</span>
-            Download hysa.exe (Windows)
-          </a>
-          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem' }}>
-            Standalone 59MB executable — no Node.js required
-          </p>
-        </div>
-      </Section>
-
-      {/* ── Why ── */}
-      <Section title="Why HYSA Code?" desc="Built for developers who want AI assistance without giving up control.">
-        <div className="lp-cards-grid">
-          {WHY.map(w => (
-            <div key={w.title} className="lp-card">
-              <span className="lp-card-icon lp-card-icon-css">{w.icon}</span>
-              <h3 className="lp-card-title">{w.title}</h3>
-              <p className="lp-card-desc">{w.desc}</p>
+      {/* ── Product Preview ── */}
+      <Section title="See it in action" desc="HYSA reads your code, shows diffs, and applies changes with your approval." alt id="features">
+        <div className="lp-preview">
+          <div className="lp-preview-chat">
+            <div className="lp-preview-header">
+              <span className="lp-preview-dot red" />
+              <span className="lp-preview-dot yellow" />
+              <span className="lp-preview-dot green" />
+              <span className="lp-preview-title">Chat — hysa-code</span>
             </div>
-          ))}
-        </div>
-      </Section>
-
-      {/* ── Developer notes ── */}
-      <Section title="What developers will love" desc="Honest notes from the team behind HYSA Code." alt>
-        <div className="lp-dev-notes-grid">
-          {DEV_NOTES.map(n => (
-            <div key={n.id} className="lp-dev-note" style={{ '--note-accent': n.color } as React.CSSProperties}>
-              <div className="lp-dev-note-header">
-                <div className="lp-dev-note-avatar" style={{ background: n.color }}>{n.icon}</div>
-                <span className="lp-dev-note-tag">Developer note</span>
+            <div className="lp-preview-body">
+              <div className="lp-preview-msg user">
+                Add dark mode support to the settings panel
               </div>
-              <p className="lp-dev-note-text">"{n.text}"</p>
-            </div>
-          ))}
-        </div>
-      </Section>
-
-      {/* ── Workflow ── */}
-      <Section title="How it works" desc="Simple workflow. Full control at every step.">
-        <div className="lp-workflow">
-          <div className="lp-workflow-track" />
-          {WORKFLOW.map((s, i) => (
-            <div key={i} className="lp-workflow-step">
-              <div className="lp-workflow-dot"><span>{s.icon}</span></div>
-              <div className="lp-workflow-card">
-                <h3 className="lp-workflow-card-title">{s.title}</h3>
-                <p className="lp-workflow-card-desc">{s.desc}</p>
+              <div className="lp-preview-msg ai">
+                <div className="lp-preview-tool">
+                  <span className="lp-preview-tool-icon">📖</span>
+                  read_file: src/components/Settings.tsx
+                </div>
+                <div className="lp-preview-tool">
+                  <span className="lp-preview-tool-icon">📖</span>
+                  read_file: src/styles.css
+                </div>
+                <div className="lp-preview-text">
+                  I found the settings component. Here is the change to add a dark mode toggle:
+                </div>
+                <div className="lp-preview-diff">
+                  <div className="lp-preview-diff-line add">+ const [theme, setTheme] = useState('dark')</div>
+                  <div className="lp-preview-diff-line add">+ const toggleTheme = () =&gt; setTheme(t =&gt; t === 'dark' ? 'light' : 'dark')</div>
+                  <div className="lp-preview-diff-line add">+ document.documentElement.dataset.theme = theme</div>
+                </div>
+                <div className="lp-preview-actions">
+                  <span className="lp-preview-btn primary">Apply edit</span>
+                  <span className="lp-preview-btn">View diff</span>
+                  <span className="lp-preview-btn">Discard</span>
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-      </Section>
-
-      {/* ── Product preview ── */}
-      <Section title="CLI + Web UI" desc="Two ways to work. One AI assistant." alt>
-        <div className="lp-product-mockups">
-          <div className="lp-terminal-mockup">
-            <div className="lp-mockup-header">
-              <span className="lp-mockup-dot green" />
-              <span className="lp-mockup-dot yellow" />
-              <span className="lp-mockup-dot red" />
-              <span className="lp-mockup-label">Terminal</span>
-            </div>
-            <div className="lp-mockup-body">
-              <div className="lp-term-line"><span className="lp-term-prmpt">$</span> hysa chat</div>
-              <div className="lp-term-line lp-term-ai">┃ Hello! I can help with your code.</div>
-              <div className="lp-term-line"><span className="lp-term-prmpt">$</span> Add dark mode to App.tsx</div>
-              <div className="lp-term-line lp-term-ai">┃ Let me read App.tsx first...</div>
-              <div className="lp-term-line lp-term-event">📖 Read src/App.tsx</div>
-              <div className="lp-term-line lp-term-event">✅ Done. Here is the diff:</div>
-              <div className="lp-term-line lp-term-diff">+ const [dark, setDark] = useState(false)</div>
-              <div className="lp-term-line lp-term-pending">Apply this edit? (Y/n) <span className="lp-term-cursor" /></div>
-            </div>
-            <div className="lp-floating-tags">
-              <span className="lp-tag">read_file</span>
-              <span className="lp-tag">edit_file</span>
-              <span className="lp-tag lp-tag-diff">diff approval</span>
-              <span className="lp-tag lp-tag-safe">backup created</span>
-            </div>
-          </div>
-          <div className="lp-web-mockup">
-            <div className="lp-mockup-header">
-              <span className="lp-mockup-dot green" />
-              <span className="lp-mockup-dot yellow" />
-              <span className="lp-mockup-dot red" />
-              <span className="lp-mockup-label">Web UI</span>
-            </div>
-            <div className="lp-mockup-body">
-              <div className="lp-web-bar">HYSA Code — dark mode toggle</div>
-              <div className="lp-web-chat-area">
-                <div className="lp-web-msg user">Add dark mode toggle to App.tsx</div>
-                <div className="lp-web-msg ai">
-                  <div className="lp-web-ev">📖 Read src/App.tsx</div>
-                  <div className="lp-web-ev">✅ Done. Adding dark mode:</div>
-                  <div className="lp-web-diff">
-                    <div className="lp-web-diff-line add">+ const [dark, setDark] = useState(false)</div>
-                    <div className="lp-web-diff-line add">+ const toggleDark = () =&gt; setDark(!dark)</div>
-                  </div>
-                  <div className="lp-web-btns">
-                    <span className="lp-web-btn primary">Apply</span>
-                    <span className="lp-web-btn">Discard</span>
-                  </div>
+              <div className="lp-preview-msg ai search">
+                <div className="lp-preview-chips">
+                  <span className="lp-preview-chip web">web_search</span>
+                  <span className="lp-preview-chip file">read_file</span>
+                  <span className="lp-preview-chip image">image_gen</span>
+                </div>
+                <div className="lp-preview-text">
+                  I searched the codebase and found relevant files for your request.
                 </div>
               </div>
             </div>
-            <div className="lp-floating-tags lp-floating-tags-right">
-              <span className="lp-tag lp-tag-safe">safe edit</span>
-              <span className="lp-tag">execute_command</span>
-            </div>
-          </div>
-        </div>
-        <div className="lp-mockup-footer">
-          <code className="lp-inline-code-sm">hysa chat</code>
-          <span className="lp-mockup-or">or</span>
-          <code className="lp-inline-code-sm">hysa web</code>
-        </div>
-      </Section>
-
-      {/* ── Provider cloud ── */}
-      <Section title="Provider ecosystem" desc="Bring your own key, use local models, or connect HYSA AI.">
-        <div className="lp-provider-cloud">
-          <div className="lp-provider-center">
-            <span className="lp-provider-center-icon">&gt;_</span>
-            <span>HYSA Code</span>
-          </div>
-          <div className="lp-provider-items">
-            {PROVIDER_ORBIT.map(p => (
-              <div key={p} className="lp-provider-item" style={{ '--provider-glow': PROVIDER_GLOW[p] || '#a855f7' } as React.CSSProperties}>
-                <span>{p}</span>
-              </div>
-            ))}
           </div>
         </div>
       </Section>
 
-      {/* ── Safety ── */}
-      <Section title="Safety by default" desc="Nothing happens without your approval." alt>
-        <div className="lp-safety-grid">
-          {SAFETY.map(s => (
-            <div key={s.title} className="lp-safety-card">
-              <div className="lp-safety-card-shield">{s.icon}</div>
-              <h3 className="lp-card-title">{s.title}</h3>
-              <p className="lp-card-desc">{s.desc}</p>
+      {/* ── Developer Workflow ── */}
+      <Section title="Built for real project work" desc="A workflow that puts you in control at every step.">
+        <div className="lp-workflow-grid">
+          {WORKFLOW_STEPS.map((w, i) => (
+            <div key={i} className="lp-workflow-card">
+              <span className="lp-workflow-icon">{w.icon}</span>
+              <h3 className="lp-workflow-title">{w.title}</h3>
+              <p className="lp-workflow-desc">{w.desc}</p>
             </div>
           ))}
         </div>
       </Section>
 
-      {/* ── Commands ── */}
-      <Section title="Commands" desc="Everything you need from the terminal.">
+      {/* ── Features ── */}
+      <Section title="Everything you need" desc="A complete toolset for AI-assisted development." alt>
+        <div className="lp-features-grid">
+          {FEATURES.map((f, i) => (
+            <div key={i} className="lp-feature-card">
+              <span className="lp-feature-icon">{f.icon}</span>
+              <h3 className="lp-feature-title">{f.title}</h3>
+              <p className="lp-feature-desc">{f.desc}</p>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* ── CLI ── */}
+      <Section title="CLI commands" desc="Work from the terminal when you prefer speed over visuals." id="cli">
         <div className="lp-commands">
           {COMMANDS.map(c => (
             <div key={c.cmd} className="lp-command-row">
@@ -495,35 +291,61 @@ export default function LandingPage() {
             </div>
           ))}
         </div>
-      </Section>
-
-      {/* ── Roadmap ── */}
-      <Section title="Roadmap" desc="What is coming next." alt>
-        <div className="lp-roadmap">
-          {ROADMAP.map((item, i) => (
-            <div key={item} className="lp-roadmap-item">
-              <span className="lp-roadmap-num">{String(i + 1).padStart(2, '0')}</span>
-              <span className="lp-roadmap-text">{item}</span>
-            </div>
-          ))}
+        <div className="lp-cli-note">
+          After install: <code className="lp-inline-code-sm">hysa chat</code> or <code className="lp-inline-code-sm">hysa web</code>
         </div>
       </Section>
 
-      {/* ── Final CTA ── */}
+      {/* ── Install ── */}
+      <Section title="Get started in one command" desc="Install globally via npm — no build tools required." alt>
+        <InstallTerminal />
+        <div className="lp-download-exe">
+          <a href="/api/download/exe" className="lp-btn lp-btn-secondary" download>
+            ⬇ Download hysa.exe (Windows) — 59MB standalone
+          </a>
+        </div>
+      </Section>
+
+      {/* ── Open Source ── */}
+      <section className="lp-section lp-open-source">
+        <div className="lp-section-inner">
+          <div className="lp-os-card">
+            <h2 className="lp-os-title">Alpha quality. Free. Open source.</h2>
+            <p className="lp-os-desc">
+              HYSA Code is in active development. Things may break, APIs may change, and some
+              features are still being built. But it is MIT licensed, free to use, and
+              {' '}<a href="https://github.com/klbmou/hysa-code" target="_blank" rel="noopener noreferrer">available on GitHub</a>.
+              Contributions, bug reports, and feedback are always welcome.
+            </p>
+            <div className="lp-os-stats">
+              <div className="lp-os-stat">
+                <span className="lp-os-stat-num">MIT</span>
+                <span className="lp-os-stat-label">License</span>
+              </div>
+              <div className="lp-os-stat">
+                <span className="lp-os-stat-num">v0.2</span>
+                <span className="lp-os-stat-label">Current version</span>
+              </div>
+              <div className="lp-os-stat">
+                <span className="lp-os-stat-num">9+</span>
+                <span className="lp-os-stat-label">AI providers</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Footer CTA ── */}
       <footer className="lp-footer">
-        <div className="lp-footer-glow" />
         <div className="lp-footer-inner">
           <h2 className="lp-footer-title">Start building with HYSA Code</h2>
           <div className="lp-footer-actions">
-            <button className="lp-btn lp-btn-primary lp-btn-glow" onClick={handleLaunchChat}>
-              <span className="lp-btn-icon">▶</span> Launch Chat
+            <button className="lp-btn lp-btn-primary lp-btn-lg" onClick={handleLaunchChat}>
+              Launch Chat
             </button>
-            <a href="https://github.com/klbmou/hysa-code" target="_blank" rel="noopener noreferrer" className="lp-btn lp-btn-secondary">
-              <span className="lp-btn-icon">⌘</span> GitHub
+            <a href="https://github.com/klbmou/hysa-code" target="_blank" rel="noopener noreferrer" className="lp-btn lp-btn-secondary lp-btn-lg">
+              View on GitHub
             </a>
-            <button className="lp-btn lp-btn-secondary" onClick={() => { navigator.clipboard.writeText(installCmd).catch(() => {}); }}>
-              Copy Install Command
-            </button>
           </div>
           <p className="lp-footer-copy">HYSA Code — open-source AI coding assistant · MIT licensed</p>
         </div>

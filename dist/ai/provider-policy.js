@@ -8,6 +8,9 @@
 import { EXPERIMENTAL_FREE_PROVIDERS, LOCAL_FREE_PROVIDERS, PROVIDER_DEFAULTS, PROVIDER_MODELS, isLocalFallbackEnabled, providerHasOptionalApiKey, } from '../config/keys.js';
 import { getHealthRecord, getModelsInCooldown, getProviderCooldownRemaining, isOnCooldown, isProviderOnCooldown, isUnhealthy, } from './model-health.js';
 const CODE_OR_PROJECT_REQUEST = /\b(code|file|files|repo|project|debug|bug|error|stack|trace|fix|edit|change|modify|implement|refactor|review|search|find|grep|read|run|test|build|compile|function|class|type|interface|component|route|api)\b/i;
+function hasArabicProjectKeywords(text) {
+    return /(?:مشروع|ملف|ملفات|الكود|كود|مجلد|مكون|مكونات|كومبوننت|دالة|دوال|وظيفة|وظائف|كلاس|ثغرة|ثغرات|خلل|خطأ|أخطاء|بنية|واجهة|اختبار|اختبارات|أصلح|إصلاح|راجع|مراجعة|حلل|تحليل|افحص|فحص|اختصر|تلخيص|اقرأ|قراءة|التطبيق|أمر|الأوامر|سكريبت|سكربت)/u.test(text);
+}
 const LOCAL_FALLBACK_DISABLED_REASON = 'local fallback disabled; set HYSA_ENABLE_LOCAL_FALLBACK=true to allow local fallback';
 const ALL_PROVIDERS_UNAVAILABLE_MESSAGE = 'All currently configured providers are temporarily unavailable or rate-limited.';
 export function getProviderTier(provider) {
@@ -210,7 +213,7 @@ export function shouldInjectProjectContext(message, taskKind) {
     if (!trimmed)
         return false;
     const words = trimmed.split(/\s+/).filter(Boolean);
-    const hasProjectIntent = CODE_OR_PROJECT_REQUEST.test(trimmed);
+    const hasProjectIntent = CODE_OR_PROJECT_REQUEST.test(trimmed) || hasArabicProjectKeywords(trimmed);
     if (words.length < 5 && !hasProjectIntent)
         return false;
     if (taskKind === 'simple_chat')

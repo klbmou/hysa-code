@@ -44,6 +44,35 @@ const SEARCH_PATTERNS = [
     /^من\s+هو\s+/i,
     /^من\s+هذه\s+/i,
 ];
+const ARABIC_PROJECT_PATTERNS = [
+    /مشروع/u,
+    /ملفات?/u,
+    /الكود/u,
+    /مجلد/u,
+    /مكونات?/u,
+    /كومبوننت/u,
+    /دوال?|دالة/u,
+    /كلاس/u,
+    /ثغرة|ثغرات|خلل/u,
+    /خطأ|أخطاء/u,
+    /بنية/u,
+    /واجهة/u,
+    /اختبارات?/u,
+    /أصلح|إصلاح/u,
+    /راجع|مراجعة/u,
+    /حلل|تحليل/u,
+    /افحص|فحص/u,
+    /اختصر|تلخيص/u,
+    /اقرأ|قراءة/u,
+    /التطبيق/u,
+    /أمر|الأوامر/u,
+    /سكريبت|سكربت/u,
+    /وظيفة|وظائف/u,
+    /كود/u,
+];
+function isArabicProjectQuery(text) {
+    return ARABIC_PROJECT_PATTERNS.some(p => p.test(text));
+}
 function isWebSearchQuery(text) {
     return SEARCH_PATTERNS.some(p => p.test(text.trim()));
 }
@@ -77,10 +106,12 @@ export function classifyTask(messages, attachments) {
         return 'simple_chat';
     if (isWebSearchQuery(text))
         return 'search';
+    if (isArabicProjectQuery(text))
+        return 'project_scan';
     const lower = text.toLowerCase();
     const words = text.split(/\s+/).filter(Boolean);
     const searchOrProjectKeywords = /\b(?:code|file|files|repo|project|debug|bug|error|stack|trace|fix|edit|change|modify|implement|refactor|review|search|find|grep|read|run|test|build|compile|function|class|type|interface|component|route|api)\b/i;
-    if (words.length < 5 && !searchOrProjectKeywords.test(text))
+    if (words.length < 5 && !searchOrProjectKeywords.test(text) && !isArabicProjectQuery(text))
         return 'simple_chat';
     const debuggingKeywords = /\b(?:debug|bug|error|stack trace|exception|crash|failing|fails|failure|broken|not working|timed out|timeout|rate limit|429)\b/i;
     const reviewKeywords = /\b(?:review|audit|inspect|check)\b.*\b(?:code|diff|pr|pull request|changes?|implementation)\b/i;

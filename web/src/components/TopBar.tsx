@@ -13,9 +13,10 @@ interface TopBarProps {
   onFilesPage: () => void;
   onLanding: () => void;
   hasItems: boolean;
+  onOpenSettings: () => void;
 }
 
-export default function TopBar({ status, sidebarOpen, onToggleSidebar, yolo, onToggleYolo, debug, onToggleDebug, onClearChat, onFilesPage, onLanding, hasItems }: TopBarProps) {
+export default function TopBar({ status, sidebarOpen, onToggleSidebar, yolo, onToggleYolo, debug, onToggleDebug, onClearChat, onFilesPage, onLanding, hasItems, onOpenSettings }: TopBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -74,6 +75,9 @@ export default function TopBar({ status, sidebarOpen, onToggleSidebar, yolo, onT
           <div className="topbar-menu">
             <button className="topbar-menu-item" onClick={() => { setMenuOpen(false); onClearChat(); }} disabled={!hasItems}>
               Clear chat
+            </button>
+            <button className="topbar-menu-item" onClick={() => { setMenuOpen(false); onOpenSettings(); }}>
+              Settings
             </button>
             <button className="topbar-menu-item" onClick={() => { setMenuOpen(false); onToggleDebug(); }}>
               {debug ? 'Debug: ON' : 'Debug: OFF'}

@@ -25,6 +25,74 @@ import { selectContext, formatSelectedContext } from '../brain/context-selector.
 import { classifyCommand } from '../utils/commands.js';
 const LOG = '[HYSA Chat]';
 let apiRequestCounter = 0;
+// ── Shared search patterns (used by both streaming and non-streaming paths) ──
+const SEARCH_PATTERNS = [
+    /^hysa\s+(?:search|websearch)\s+"(.+?)"$/i,
+    /^hysa\s+(?:search|websearch)\s+'(.+?)'$/i,
+    /^hysa\s+(?:search|websearch)\s+(.+)$/i,
+    /^(?:search|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
+    /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
+    /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
+    /^(?:how\s+many\s+(?:subscribers|followers|views|likes)\s+(?:does|has|is)\s+)/i,
+    /^(?:what\s+is\s+(?:the\s+)?(?:current|today'?s|this\s+(?:week|month|year)'?s)\s+)/i,
+    /^(?:where\s+can\s+(?:I|we)\s+(?:watch|find|get)\s+)/i,
+    /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
+    /^(?:ابحث\s+(?:لي\s+)?عن\s+)(.+)/i,
+    /^(?:ابحث\s+(?:عنه|عنها|عنهم|عنك))(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
+    /^(?:دور\s+(?:عليها|عليه|عليهم|عليك))(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
+    /^(?:شوف|فتش)\s+(?:عليها|عليه|عليهم|عليك)(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
+    /^(?:دور|فتش)\s+(?:في\s+)?(?:غوغل|جوجل)\s+(?:عن\s+)?(.+)/i,
+    /^(?:شوف|فتش)\s+(?:في\s+)?(?:النت|الانترنت|الإنترنت)\s+(?:عن\s+)?(.+)/i,
+    /^(?:هات\s+مصادر|أعطني\s+روابط|اعطني\s+روابط|هات\s+روابط)(?:\s+(?:عن|حول)\s+(.+))?/i,
+    /^(?:اعطني|أعطني)\s+(?:مصادر|معلومة)\s+(?:عن|حول)\s+(.+)/i,
+    /^(?:مصادر\s+|روابط\s+)(?:عن|حول)\s+(.+)/i,
+    /^(?:آخر\s+أخبار\s+)(.+)/i,
+    /^(?:هل\s+هذا\s+صحيح\s+(?:الآن|حاليا|حالياً)?)/i,
+    /^(?:ما\s+هو\s+(?:آخر|أحدث)\s+)/i,
+    /^(?:من\s+أين\s+أتيت\s+)/i,
+    /^(?:هل\s+هذه\s+المعلومة\s+محدثة)/i,
+    /^(?:هل\s+عندك\s+معلومات\s+(?:عن|حول)\s+)(.+)/i,
+    /^(?:دور\s+(?:لي\s+)?(?:على\s+)?)(.+)/i,
+    /^(?:كم\s+(?:عدد\s+)?(?:مشترك|مشتركين|متابع|متابعين|مشاهدة|مشاهدات)\s+)/i,
+    /^(?:كم\s+لديه\s+من\s+(?:متابع|مشترك|مشتركين|متابعين))/i,
+    /^(?:ابحث\s+عن\s+آخر\s+إحصائيات|آخر\s+إحصائيات\s+)/i,
+    /^(?:ما\s+(?:آخر|أحدث)\s+أخبار\s+)/i,
+    /^من\s+هو\s+(.+)/i,
+    /^من\s+هذه\s+(.+)/i,
+    /^(?:كم\s+عدد\s+مشتركين?\s+.+|كم\s+متابعين?\s+.+|كم\s+مشترك\s+.+)/i,
+    /^.+\s+(?:على|في)\s+(?:اليوتيوب|يوتيوب|انستغرام|تيك\s*توك|تويتر|فيسبوك)/i,
+    /^(?:و?كم\s+عند(?:ه|ها|هم)\s+.+|و?كم\s+لديه\s+.+|و?كم\s+يتابع\s+.+)/i,
+    /^(?:what\s+(?:is\s+the\s+)?(?:subscriber|follower|viewer)\s+count\s+(?:of|for)\s+.+|how\s+many\s+(?:subscribers?|followers?)\s+(?:does|has)\s+.+)/i,
+];
+// ── Stats follow-up detection for contextual search ──
+const STATS_FOLLOWUP_RE = /^(?:و?كم|كم\s+(?:عدد|عنده|لديه|يتابع|متابع)?|على\s+(?:اليوتيوب|يوتيوب|انستغرام|تيك\s*توك|تويتر|فيسبوك|انستا)|في\s+(?:اليوتيوب|يوتيوب|انستغرام|تيك\s*توك|تويتر|فيسبوك)|متابعيه|مشتركينه|حسابه|قناته|اليوتيوب|يوتيوب|انستغرام|تيك\s*توك|followers?|subscribers?|youtube|instagram|tiktok)/i;
+function detectStatsFollowUp(message, previousMessage) {
+    const trimmed = message.trim();
+    if (!trimmed)
+        return null;
+    const words = trimmed.split(/\s+/).filter(Boolean);
+    if (words.length > 8)
+        return null; // too long to be a follow-up
+    if (trimmed.startsWith('/'))
+        return null;
+    if (!STATS_FOLLOWUP_RE.test(trimmed))
+        return null;
+    if (!previousMessage)
+        return null;
+    const prev = previousMessage.trim();
+    if (prev.length > 100 || prev.startsWith('/'))
+        return null;
+    const ignoreWords = /^(?:hi|hello|hey|thanks|ok|yes|no|مرحبا|شكرا|نعم|لا)$/i;
+    if (ignoreWords.test(prev))
+        return null;
+    // Extract platform/stat context from current message
+    const platformMatch = trimmed.match(/(?:على|في)\s+(?:اليوتيوب|يوتيوب|انستغرام|تيك\s*توك|تويتر|فيسبوك|انستا)/i);
+    const platform = platformMatch ? platformMatch[0] : '';
+    const statType = /^(?:و?كم|كم\s+|followers?|subscribers?)/i.test(trimmed) ? 'عدد المشتركين' : '';
+    const query = `${prev} ${platform} ${statType}`.trim();
+    console.log(`[WebSearch] statsFollowUp: message="${trimmed}" prev="${prev}" resolvedQuery="${query}"`);
+    return query;
+}
 // ── Language detection ──────────────────────────────────
 const ARABIC_PATTERN = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
 function isArabic(text) {
@@ -77,6 +145,21 @@ const PROJECT_INTENT_PATTERNS = [
     /what\s+(?:does|is)\s+(?:this|the)\s+(?:project|code|repo|app)\s+(?:do|about)/i,
     /(?:analyze|check|look\s+at)\s+(?:my|the|this)\s+(?:code|project|repo)/i,
     /tell\s+me\s+(?:about|what)\s+(?:this\s+)?(?:project|codebase|repo)\s+(?:does|is|contains)/i,
+    // Arabic project intent patterns
+    /مشروع/u,
+    /ملفات?/u,
+    /افحص|فحص/u,
+    /راجع|مراجعة/u,
+    /حلل|تحليل/u,
+    /اقرأ|قراءة/u,
+    /الكود|كود/u,
+    /اختصر|تلخيص/u,
+    /التطبيق/u,
+    /بنية/u,
+    /واجهة/u,
+    /اختبارات?/u,
+    /أصلح|إصلاح/u,
+    /الأوامر|أمر/u,
 ];
 const PROJECT_SKIP_PATTERNS = [
     /^(?:hi|hello|hey|yo|sup|salam|مرحبا|اهلا|شكرا|thanks?)\b/i,
@@ -870,6 +953,13 @@ export async function handleChatStream(req, writeEvent) {
         const simpleMode = !projectDecision.projectMode && (isSimpleQuestion(streamLastContent) || taskKind === 'simple_chat');
         timer.stop('classification');
         console.log(LOG, `[req:${reqId}] task=${taskKind} projectMode=${projectDecision.projectMode} reason=${projectDecision.reason} simple=${simpleMode}`);
+        console.log(`[ProjectMode] taskKind=${taskKind} projectMode=${projectDecision.projectMode} isProjectQuery=${isProjectQuery} useProjectCtx=${useProjectCtx} filesAvailable=${projectInfo.fileCount}`);
+        if (isProjectQuery) {
+            console.log(`[ProjectMode] matchedWorkspaceIntent=true`);
+        }
+        if (projectInfo.fileCount > 0) {
+            console.log(`[ProjectMode] filesAvailable=${projectInfo.fileCount} treeLength=${projectInfo.tree.length}`);
+        }
         // ── Agentic plan for complex tasks ─────────────
         const plan = generatePlan(streamLastContent, taskKind);
         if (plan) {
@@ -889,54 +979,76 @@ export async function handleChatStream(req, writeEvent) {
         // ── Web search detection (streaming path) ────────
         const streamSearchLastMsg = messages[messages.length - 1];
         const streamSearchContent = typeof streamSearchLastMsg?.content === 'string' ? streamSearchLastMsg.content : '';
-        const streamSearchPatterns = [
-            /^(?:search|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
-            /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
-            /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
-            /^(?:how\s+many\s+(?:subscribers|followers|views|likes)\s+(?:does|has|is)\s+)/i,
-            /^(?:what\s+is\s+(?:the\s+)?(?:current|today'?s|this\s+(?:week|month|year)'?s)\s+)/i,
-            /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
-            /^(?:ابحث\s+(?:لي\s+)?عن\s+)(.+)/i,
-            /^(?:آخر\s+أخبار\s+)(.+)/i,
-            /^(?:كم\s+(?:عدد\s+)?(?:مشترك|مشتركين|متابع|متابعين|مشاهدة|مشاهدات)\s+)/i,
-            /^(?:كم\s+لديه\s+من\s+(?:متابع|مشترك|مشتركين|متابعين))/i,
-            /^(?:ما\s+(?:آخر|أحدث)\s+أخبار\s+)/i,
-            /^من\s+هو\s+(.+)/i,
-            /^من\s+هذه\s+(.+)/i,
-        ];
+        console.log(`[WebChat] incoming="${streamSearchContent}"`);
         let streamSearchQuery = null;
-        for (const p of streamSearchPatterns) {
+        for (const p of SEARCH_PATTERNS) {
             const m = streamSearchContent.match(p);
             if (m) {
                 streamSearchQuery = m[1]?.trim() || streamSearchContent;
+                console.log(`[WebSearch] PATTERN MATCHED for: "${streamSearchContent}" -> query="${streamSearchQuery}"`);
                 break;
             }
         }
         if (streamSearchQuery) {
             const wsDiag = getSearchDiagnostics();
+            console.log(`[WebSearch] intent=true query="${streamSearchQuery}"`);
+            console.log(`[WebSearch] provider="${wsDiag.provider}" hasTavilyKey=${wsDiag.hasTavilyKey} hasSerperKey=${wsDiag.hasSerperKey} isReliable=${wsDiag.isReliable}`);
             if (!wsDiag.isReliable) {
                 const hasArabic = /[\u0600-\u06FF]/.test(streamSearchContent);
                 const configMsg = hasArabic
                     ? 'البحث في الإنترنت غير مضبوط بشكل موثوق. فعّل TAVILY_API_KEY أو SERPER_API_KEY أو BRAVE_API_KEY.'
                     : 'Web search is not reliably configured. To enable web search, set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.';
-                console.log(LOG, `[req:${reqId}] Stream search skipped (provider: ${wsDiag.provider}, no reliable API keys)`);
+                console.log(`[WebSearch] SKIPPED: provider=${wsDiag.provider} no reliable API keys`);
+                writeEvent(`data: ${JSON.stringify({ type: 'search_start', query: streamSearchQuery })}\n\n`);
+                writeEvent(`data: ${JSON.stringify({ type: 'search_error', message: 'Web search is not reliably configured.' })}\n\n`);
                 writeEvent(`data: ${JSON.stringify({ type: 'token', text: configMsg })}\n\n`);
                 writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: configMsg, toolCalls: [] })}\n\n`);
                 return;
             }
             try {
                 writeEvent(`data: ${JSON.stringify({ type: 'search_start', query: streamSearchQuery })}\n\n`);
-                console.log(LOG, `[req:${reqId}] Stream search: using provider ${getSearchDiagnostics().provider} for "${streamSearchQuery}"`);
+                console.log(`[WebSearch] calling Tavily (searchWeb) for: "${streamSearchQuery}"`);
                 const results = await searchWeb(streamSearchQuery, { maxResults: 5 });
+                console.log(`[WebSearch] Tavily called=true resultCount=${results.length} for: "${streamSearchQuery}"`);
                 const formatted = formatSearchResults(streamSearchQuery, results);
-                const searchMsg = { role: 'user', content: formatted };
+                const searchInjection = `Use the following web search results to answer the user's question. Base your answer on these results. If the results contain relevant information, summarize what was found. Do not say you could not find information if the results provide useful details.\n\n${formatted}`;
+                const searchMsg = { role: 'user', content: searchInjection };
                 messages.splice(messages.length - 1, 0, searchMsg);
-                console.log(LOG, `[req:${reqId}] Stream search: ${results.length} results for "${streamSearchQuery}"`);
-                writeEvent(`data: ${JSON.stringify({ type: 'search_done', query: streamSearchQuery, resultCount: results.length })}\n\n`);
+                console.log(`[WebSearch] injected results into model context=true`);
+                console.log(`[WebSearch] injectedResultsCount=${results.length}`);
+                if (results.length > 0)
+                    console.log(`[WebSearch] firstResultTitle="${results[0].title}"`);
+                console.log(`[WebSearch] modelPromptIncludesSearchResults=true`);
+                const streamSources = results.map((r, i) => ({
+                    title: r.title,
+                    url: r.url,
+                    snippet: r.content || '',
+                    rank: i + 1,
+                }));
+                writeEvent(`data: ${JSON.stringify({ type: 'search_done', query: streamSearchQuery, resultCount: results.length, sources: streamSources })}\n\n`);
             }
             catch (err) {
-                console.log(LOG, `[req:${reqId}] Stream search failed: ${err.message}`);
-                writeEvent(`data: ${JSON.stringify({ type: 'search_error', message: err.message })}\n\n`);
+                const errMsg = err.message;
+                console.log(`[WebSearch] FAILED: "${streamSearchQuery}" — ${errMsg}`);
+                writeEvent(`data: ${JSON.stringify({ type: 'search_error', message: errMsg })}\n\n`);
+            }
+        }
+        else {
+            // Stats follow-up detection
+            let prevMsg;
+            for (let i = messages.length - 2; i >= 0; i--) {
+                if (messages[i].role === 'user' && typeof messages[i].content === 'string') {
+                    prevMsg = messages[i].content;
+                    break;
+                }
+            }
+            const followUpQuery = detectStatsFollowUp(streamSearchContent, prevMsg);
+            if (followUpQuery) {
+                streamSearchQuery = followUpQuery;
+                console.log(`[WebSearch] STATS_FOLLOWUP matched for: "${streamSearchContent}" -> resolved="${streamSearchQuery}"`);
+            }
+            else {
+                console.log(`[WebSearch] intent=chat (no search pattern matched for: "${streamSearchContent}")`);
             }
         }
         const resolvedMode = resolvePromptMode(config.promptMode || 'auto', config.currentProvider, simpleMode);
@@ -1508,7 +1620,14 @@ export async function handleChat(req) {
         const useProjectCtx = projectDecision.projectMode || shouldInjectProjectContext(lastContent, taskKind) || isProjectQuery;
         const isSimpleQ = !projectDecision.projectMode && (isSimpleQuestion(lastContent) || taskKind === 'simple_chat');
         timer.stop('classification');
-        console.log(LOG, `[req:${reqId}] task=${taskKind} projectMode=${projectDecision.projectMode} reason=${projectDecision.reason} simple=${isSimpleQ} projectQuery=${isProjectQuery}`);
+        console.log(LOG, `[req:${reqId}] task=${taskKind} projectMode=${projectDecision.projectMode} reason=${projectDecision.reason} simple=${isSimpleQ} projectQuery=${isProjectQuery} useProjectCtx=${useProjectCtx}`);
+        console.log(`[ProjectMode] taskKind=${taskKind} projectMode=${projectDecision.projectMode} isProjectQuery=${isProjectQuery} useProjectCtx=${useProjectCtx} filesAvailable=${projectInfo.fileCount}`);
+        if (isProjectQuery) {
+            console.log(`[ProjectMode] matchedWorkspaceIntent=true`);
+        }
+        if (projectInfo.fileCount > 0) {
+            console.log(`[ProjectMode] filesAvailable=${projectInfo.fileCount} treeLength=${projectInfo.tree.length}`);
+        }
         // ── Agentic plan for complex tasks ─────────────
         const plan = generatePlan(lastContent, taskKind);
         // ── Capability question detection ────────────────
@@ -1553,61 +1672,56 @@ export async function handleChat(req) {
         const searchLastMsg = messages[messages.length - 1];
         const searchLastContent = typeof searchLastMsg?.content === 'string' ? searchLastMsg.content : '';
         const isExplicitSearchCmd = /^hysa\s+(?:search|websearch)\s+/i.test(searchLastContent);
-        const searchPatterns = [
-            /^hysa\s+(?:search|websearch)\s+"(.+?)"$/i,
-            /^hysa\s+(?:search|websearch)\s+'(.+?)'$/i,
-            /^hysa\s+(?:search|websearch)\s+(.+)$/i,
-            /^(?:search|look\s*up|google|bing|search\s*the\s*web)\s+(?:for\s+)?(.+)/i,
-            /^(?:what\s+is\s+the\s+(?:current|latest|recent)\s+)/i,
-            /^(?:latest\s+(?:news|updates?|info)\s+(?:about|on)\s+)/i,
-            /^(?:how\s+many\s+(?:subscribers|followers|views|likes)\s+(?:does|has|is)\s+)/i,
-            /^(?:what\s+is\s+(?:the\s+)?(?:current|today'?s|this\s+(?:week|month|year)'?s)\s+)/i,
-            /^(?:where\s+can\s+(?:I|we)\s+(?:watch|find|get)\s+)/i,
-            /^(?:ابحث\s+في\s+(?:الانترنت|الإنترنت|النت)\s+(?:عن\s+)?)(.+)/i,
-            /^(?:ابحث\s+(?:لي\s+)?عن\s+)(.+)/i,
-            /^(?:ابحث\s+(?:عنه|عنها|عنهم|عنك))(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
-            /^(?:دور\s+(?:عليها|عليه|عليهم|عليك))(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
-            /^(?:شوف|فتش)\s+(?:عليها|عليه|عليهم|عليك)(?:\s+في\s+(?:الانترنت|الإنترنت|النت))?(?:\s+(.+))?/i,
-            /^(?:دور|فتش)\s+(?:في\s+)?(?:غوغل|جوجل)\s+(?:عن\s+)?(.+)/i,
-            /^(?:شوف|فتش)\s+(?:في\s+)?(?:النت|الانترنت|الإنترنت)\s+(?:عن\s+)?(.+)/i,
-            /^(?:هات\s+مصادر|أعطني\s+روابط|اعطني\s+روابط|هات\s+روابط)(?:\s+(?:عن|حول)\s+(.+))?/i,
-            /^(?:اعطني|أعطني)\s+(?:مصادر|معلومة)\s+(?:عن|حول)\s+(.+)/i,
-            /^(?:مصادر\s+|روابط\s+)(?:عن|حول)\s+(.+)/i,
-            /^(?:آخر\s+أخبار\s+)(.+)/i,
-            /^(?:هل\s+هذا\s+صحيح\s+(?:الآن|حاليا|حالياً)?)/i,
-            /^(?:ما\s+هو\s+(?:آخر|أحدث)\s+)/i,
-            /^(?:من\s+أين\s+أتيت\s+)/i,
-            /^(?:هل\s+هذه\s+المعلومة\s+محدثة)/i,
-            /^(?:هل\s+عندك\s+معلومات\s+(?:عن|حول)\s+)(.+)/i,
-            /^(?:دور\s+(?:لي\s+)?(?:على\s+)?)(.+)/i,
-            /^(?:كم\s+(?:عدد\s+)?(?:مشترك|مشتركين|متابع|متابعين|مشاهدة|مشاهدات)\s+)/i,
-            /^(?:كم\s+لديه\s+من\s+(?:متابع|مشترك|مشتركين|متابعين))/i,
-            /^(?:ابحث\s+عن\s+آخر\s+إحصائيات|آخر\s+إحصائيات\s+)/i,
-            /^(?:ما\s+(?:آخر|أحدث)\s+أخبار\s+)/i,
-            /^من\s+هو\s+(.+)/i,
-            /^من\s+هذه\s+(.+)/i,
-        ];
         let searchQuery = null;
-        for (const p of searchPatterns) {
+        for (const p of SEARCH_PATTERNS) {
             const m = searchLastContent.match(p);
             if (m) {
                 searchQuery = m[1]?.trim() || searchLastContent;
                 break;
             }
         }
+        // Stats follow-up detection for non-streaming path
+        if (!searchQuery) {
+            let prevMsg;
+            for (let i = messages.length - 2; i >= 0; i--) {
+                if (messages[i].role === 'user' && typeof messages[i].content === 'string') {
+                    prevMsg = messages[i].content;
+                    break;
+                }
+            }
+            const followUpQuery = detectStatsFollowUp(searchLastContent, prevMsg);
+            if (followUpQuery) {
+                searchQuery = followUpQuery;
+                console.log(`[WebSearch] STATS_FOLLOWUP matched for: "${searchLastContent}" -> resolved="${searchQuery}"`);
+            }
+        }
+        let searchResultCount = 0;
+        let searchError = null;
+        let searchSources;
         if (searchQuery) {
             const wsDiag = getSearchDiagnostics();
+            console.log(`[WebSearch] intent=true query="${searchQuery}"`);
+            console.log(`[WebSearch] provider="${wsDiag.provider}" hasTavilyKey=${wsDiag.hasTavilyKey} hasSerperKey=${wsDiag.hasSerperKey} isReliable=${wsDiag.isReliable}`);
             if (!wsDiag.isReliable) {
                 const hasArabic = /[\u0600-\u06FF]/.test(searchLastContent);
                 const configMsg = hasArabic
                     ? 'البحث في الإنترنت غير مضبوط بشكل موثوق. فعّل TAVILY_API_KEY أو SERPER_API_KEY أو BRAVE_SEARCH_API_KEY.'
                     : 'Web search is not reliably configured. To enable web search, set TAVILY_API_KEY, SERPER_API_KEY, or BRAVE_SEARCH_API_KEY.';
-                console.log(LOG, `[req:${reqId}] Web search skipped (provider: ${wsDiag.provider}, no reliable API keys)`);
-                return { message: configMsg, toolCalls: [] };
+                console.log(`[WebSearch] SKIPPED: provider=${wsDiag.provider} no reliable API keys`);
+                return { message: configMsg, toolCalls: [], searchQuery, searchResultCount: 0, searchError: 'Not configured' };
             }
             else {
                 try {
+                    console.log(`[WebSearch] calling Tavily (searchWeb) for: "${searchQuery}"`);
                     const results = await searchWeb(searchQuery, { maxResults: 5 });
+                    searchResultCount = results.length;
+                    searchSources = results.map((r, i) => ({
+                        title: r.title,
+                        url: r.url,
+                        snippet: r.content || '',
+                        rank: i + 1,
+                    }));
+                    console.log(`[WebSearch] Tavily called=true resultCount=${searchResultCount} for: "${searchQuery}"`);
                     const formatted = formatSearchResults(searchQuery, results);
                     if (isExplicitSearchCmd) {
                         searchLastMsg.content = `[Web search results for "${searchQuery}"]\n\n${formatted}`;
@@ -1616,10 +1730,11 @@ export async function handleChat(req) {
                         const searchMsg = { role: 'user', content: formatted };
                         messages.splice(messages.length - 1, 0, searchMsg);
                     }
-                    console.log(LOG, `[req:${reqId}] Web search: ${results.length} results for "${searchQuery}"`);
+                    console.log(`[WebSearch] injected results into model context=true`);
                 }
                 catch (err) {
-                    console.log(LOG, `[req:${reqId}] Web search failed: ${err.message}`);
+                    searchError = err.message;
+                    console.log(`[WebSearch] FAILED: "${searchQuery}" — ${searchError}`);
                 }
             }
         }
@@ -1648,10 +1763,24 @@ export async function handleChat(req) {
                 else {
                     try {
                         const results = await searchWeb(searchQuery, { maxResults: 5 });
+                        searchResultCount = results.length;
+                        if (!searchSources) {
+                            searchSources = results.map((r, i) => ({
+                                title: r.title,
+                                url: r.url,
+                                snippet: r.content || '',
+                                rank: i + 1,
+                            }));
+                        }
                         const formatted = formatSearchResults(searchQuery, results);
-                        const searchMsg = { role: 'user', content: formatted };
+                        const searchInjection = `Use the following web search results to answer the user's question. Base your answer on these results. If the results contain relevant information, summarize what was found. Do not say you could not find information if the results provide useful details.\n\n${formatted}`;
+                        const searchMsg = { role: 'user', content: searchInjection };
                         messages.splice(messages.length - 1, 0, searchMsg);
                         console.log(LOG, `[req:${reqId}] Entity search: ${results.length} results for "${searchQuery}"`);
+                        console.log(`[WebSearch] injectedResultsCount=${results.length}`);
+                        if (results.length > 0)
+                            console.log(`[WebSearch] firstResultTitle="${results[0].title}"`);
+                        console.log(`[WebSearch] modelPromptIncludesSearchResults=true`);
                     }
                     catch (err) {
                         console.log(LOG, `[req:${reqId}] Entity search failed: ${err.message}`);
@@ -1818,6 +1947,10 @@ export async function handleChat(req) {
             provider: actualProvider ? (PROVIDER_DEFAULTS[actualProvider]?.label || actualProvider) : (PROVIDER_DEFAULTS[prov]?.label || prov),
             model: actualModel || config.currentModel,
             timing: timingReport,
+            searchQuery: (searchQuery || undefined),
+            searchResultCount: searchResultCount || undefined,
+            searchError: searchError || undefined,
+            searchSources: searchSources || undefined,
         };
     }
     catch (err) {
@@ -1936,32 +2069,101 @@ export function getFallbackStatus() {
 }
 // ── Image generation via Pollinations free API ──
 export async function handleImageGen(prompt) {
+    const encodedPrompt = encodeURIComponent(prompt);
+    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nofeed=true`;
+    console.log(`[WebImage] prompt="${prompt}" encoded="${encodedPrompt}" url="${imageUrl}"`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
     try {
-        const encodedPrompt = encodeURIComponent(prompt);
-        const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nofeed=true`;
-        console.log(`[ImageGen] Generating image for: "${prompt}" -> ${imageUrl}`);
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 12000);
-        try {
-            const check = await fetch(imageUrl, { method: 'HEAD', signal: controller.signal });
-            clearTimeout(timeoutId);
-            console.log(`[ImageGen] Pollinations HEAD status ${check.status} for: "${prompt}"`);
-            if (!check.ok && check.status !== 404) {
-                return { error: `Image service returned status ${check.status}. Try again later.` };
-            }
-            return { imageUrl };
-        }
-        catch (err) {
-            clearTimeout(timeoutId);
-            const msg = err.message;
-            console.log(`[ImageGen] Pollinations fetch failed for: "${prompt}" — ${msg}`);
-            return { error: `Image generation service unreachable: ${msg}. Check your internet connection.` };
+        const check = await fetch(imageUrl, { method: 'HEAD', signal: controller.signal });
+        clearTimeout(timeoutId);
+        console.log(`[WebImage] HEAD status=${check.status} ok=${check.ok} for: "${prompt}"`);
+        if (!check.ok) {
+            console.log(`[WebImage] HEAD non-ok (${check.status}) but returning URL anyway — browser may load it directly`);
         }
     }
     catch (err) {
+        clearTimeout(timeoutId);
         const msg = err.message;
-        console.log(`[ImageGen] Unexpected error for: "${prompt}" — ${msg}`);
-        return { error: `Image generation failed: ${msg}` };
+        console.log(`[WebImage] HEAD fetch failed: ${msg} — returning direct URL anyway for browser to try`);
+    }
+    return { imageUrl };
+}
+// ── Image proxy — fetches image bytes server-side ──
+const PROXY_HEADERS = {
+    'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+    'User-Agent': 'Mozilla/5.0 HYSA-Web-ImageProxy/1.0',
+    'Cache-Control': 'no-cache',
+};
+function buildUpstreamUrls(encoded) {
+    return [
+        `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&nofeed=true`,
+        `https://image.pollinations.ai/prompt/${encoded}`,
+        `https://pollinations.ai/p/${encoded}`,
+    ];
+}
+async function tryFetchUpstream(url, signal, attempt) {
+    try {
+        const response = await fetch(url, { signal, headers: PROXY_HEADERS });
+        const contentType = response.headers.get('content-type') || '';
+        const status = response.status;
+        console.log(`[ImageProxy] attempt=${attempt} url="${url}" status=${status} contentType="${contentType}"`);
+        if (!response.ok) {
+            console.log(`[ImageProxy] attempt=${attempt} FAILED status=${status} contentType="${contentType}"`);
+            return { ok: false, error: `Upstream returned ${status}`, upstreamUrl: url, status, contentType };
+        }
+        if (!contentType.startsWith('image/')) {
+            console.log(`[ImageProxy] attempt=${attempt} BAD_CONTENT_TYPE status=${status} contentType="${contentType}"`);
+            return { ok: false, error: `Non-image content-type: ${contentType}`, upstreamUrl: url, status, contentType };
+        }
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        const bytes = buffer.length;
+        console.log(`[ImageProxy] attempt=${attempt} status=${status} contentType="${contentType}" bytes=${bytes}`);
+        if (bytes === 0) {
+            console.log(`[ImageProxy] attempt=${attempt} UPSTREAM_EMPTY_BODY status=${status} contentType="${contentType}"`);
+            return { ok: false, error: 'EMPTY_IMAGE_BODY', upstreamUrl: url, status, contentType };
+        }
+        if (bytes < 1000) {
+            console.log(`[ImageProxy] attempt=${attempt} TOO_SMALL bytes=${bytes} contentType="${contentType}"`);
+            return { ok: false, error: `Image body too small: ${bytes} bytes`, upstreamUrl: url, status, contentType };
+        }
+        return { ok: true, buffer, contentType, upstreamUrl: url };
+    }
+    catch (err) {
+        const msg = err.message;
+        console.log(`[ImageProxy] attempt=${attempt} FETCH_FAILED error="${msg}"`);
+        return { ok: false, error: msg, upstreamUrl: url };
+    }
+}
+export async function handleImageProxy(prompt) {
+    const encodedPrompt = encodeURIComponent(prompt);
+    const urls = buildUpstreamUrls(encodedPrompt);
+    console.log(`[ImageProxy] prompt="${prompt}" attempts=${urls.length}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    try {
+        for (let i = 0; i < urls.length; i++) {
+            if (controller.signal.aborted)
+                break;
+            const result = await tryFetchUpstream(urls[i], controller.signal, i + 1);
+            if (controller.signal.aborted)
+                break;
+            if (result.ok && result.buffer) {
+                clearTimeout(timeoutId);
+                console.log(`[ImageProxy] OK contentType="${result.contentType}" bytes=${result.buffer.length}`);
+                return { ok: true, buffer: result.buffer, contentType: result.contentType, upstreamUrl: result.upstreamUrl };
+            }
+        }
+        clearTimeout(timeoutId);
+        console.log(`[ImageProxy] ALL_ATTEMPTS_FAILED`);
+        return { ok: false, error: 'All upstream URLs failed or returned empty bodies', upstreamUrl: urls[0] };
+    }
+    catch (err) {
+        clearTimeout(timeoutId);
+        const msg = err.message;
+        console.log(`[ImageProxy] FATAL: ${msg}`);
+        return { ok: false, error: msg };
     }
 }
 //# sourceMappingURL=api.js.map

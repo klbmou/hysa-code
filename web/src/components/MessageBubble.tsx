@@ -1,10 +1,17 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import type { Attachment } from './Composer.js';
 
 interface SourceLink {
   domain: string;
   title: string;
   url?: string;
+}
+
+export interface Source {
+  title: string;
+  url: string;
+  snippet?: string;
+  rank: number;
 }
 
 function extractSourceLinks(text: string): SourceLink[] {
@@ -30,6 +37,7 @@ interface MessageBubbleProps {
   sourceFiles?: string;
   streaming?: boolean;
   className?: string;
+  sources?: Source[];
 }
 
 function hasRtlChars(text: string): boolean {
@@ -245,6 +253,59 @@ function CheckIcon() {
   );
 }
 
+function SourcesPopover({ sources, onClose }: { sources: Source[]; onClose: () => void }) {
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    const handleClick = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) onClose();
+    };
+    document.addEventListener('keydown', handleKey);
+    document.addEventListener('mousedown', handleClick);
+    return () => {
+      document.removeEventListener('keydown', handleKey);
+      document.removeEventListener('mousedown', handleClick);
+    };
+  }, [onClose]);
+
+  return (
+    <>
+      <div className="sources-overlay" onClick={onClose} />
+      <div className="sources-popover" ref={popoverRef}>
+        <div className="sources-popover-header">Sources</div>
+        {sources.map(s => (
+          <div key={s.rank} className="source-row">
+            <div className="source-row-num">{s.rank}</div>
+            <div className="source-row-body">
+              <div className="source-row-title">{s.title}</div>
+              <div className="source-row-domain">{getDomain(s.url)}</div>
+              {s.snippet && <div className="source-row-snippet">{s.snippet}</div>}
+              <a className="source-row-link" href={s.url} target="_blank" rel="noopener noreferrer">Open link ↗</a>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function getDomain(url: string): string {
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return url; }
+}
+
+function SourceChips({ sources, onOpen }: { sources: Source[]; onOpen: () => void }) {
+  return (
+    <div className="source-chips">
+      {sources.map(s => (
+        <span key={s.rank} className="source-chip" onClick={onOpen} title={`${s.title} — ${getDomain(s.url)}`}>
+          [{s.rank}]
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function CodeBlock({ language, code }: { language: string; code: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -313,9 +374,11 @@ function AttachmentCard({ attachment }: { attachment: Attachment }) {
   );
 }
 
-export default function MessageBubble({ kind, content, attachments, onCopy, sourceFiles, streaming, className }: MessageBubbleProps) {
+export default function MessageBubble({ kind, content, attachments, onCopy, sourceFiles, streaming, className, sources }: MessageBubbleProps) {
   const rtl = hasRtlChars(content);
   const sourceLinks = content ? extractSourceLinks(content) : [];
+  const [showSources, setShowSources] = useState(false);
+  const hasStructuredSources = sources && sources.length > 0;
 
   if (kind === 'assistant') {
     return (
@@ -333,7 +396,13 @@ export default function MessageBubble({ kind, content, attachments, onCopy, sour
                 {renderMarkdown(content || '')}
               </div>
             </div>
-            {sourceLinks.length > 0 && !streaming && (
+            {hasStructuredSources && !streaming && (
+              <>
+                <SourceChips sources={sources!} onOpen={() => setShowSources(true)} />
+                {showSources && <SourcesPopover sources={sources!} onClose={() => setShowSources(false)} />}
+              </>
+            )}
+            {!hasStructuredSources && sourceLinks.length > 0 && !streaming && (
               <div className="msg-sources">
                 {sourceLinks.map((link, i) => (
                   <span key={i} className="msg-source-chip">
