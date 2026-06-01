@@ -2,11 +2,13 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import http from 'node:http';
+import { securityHeaders } from '../src/web/security.js';
 
 // ── Helper: start an Express server with the same routing as server.ts ──
 function buildTestApp() {
   const app = express();
   app.use(express.json({ limit: '50mb' }));
+  app.use(securityHeaders);
 
   // Mock API handlers
   app.get('/api/status', (_req, res) => {
