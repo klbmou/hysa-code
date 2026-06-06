@@ -2472,17 +2472,7 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
             steps++;
             let response;
             try {
-                const timeoutPromise = new Promise((_, reject) => {
-                    const timer = setTimeout(() => reject(new Error(`Request timed out after 30s`)), 30000);
-                    requestAbortController.signal.addEventListener('abort', () => {
-                        clearTimeout(timer);
-                        reject(new DOMException('Aborted', 'AbortError'));
-                    }, { once: true });
-                });
-                response = await Promise.race([
-                    client.sendMessage(allMessages, systemPrompt),
-                    timeoutPromise,
-                ]);
+                response = await client.sendMessage(allMessages, systemPrompt);
                 stepError = null;
             }
             catch (error) {

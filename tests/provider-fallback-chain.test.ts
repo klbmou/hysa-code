@@ -150,6 +150,7 @@ describe('provider fallback chain', () => {
     delete process.env.HYSA_9ROUTER_CHAT_MODEL;
     delete process.env.HYSA_MODEL_MAX_ATTEMPTS;
     delete process.env.HYSA_9ROUTER_MAX_MODEL_ATTEMPTS;
+    delete process.env.HYSA_CHAT_TIMEOUT_MS;
     clearNinerouterDiscoveryCache();
     resetHealth();
   });
@@ -434,4 +435,103 @@ describe('provider fallback chain', () => {
     assert.equal(order.includes('local_openai'), false);
     assert.equal(order.includes('hysa_ai'), false);
   });
+
+  it('first provider timeout triggers automatic 9Router fallback without premature error', async () => {
+    // Create a server that hangs on POST (simulating timeout) for openai_router
+    const timeoutRouter = await startTimeoutRouter();
+    // Create a healthy 9Router server for fallback
+    const nr = await startMockNinerouter();
+    process.env.NINEROUTER_URL = nr.rootUrl;
+    process.env.HYSA_9ROUTER_CHAT_MODEL = 'oc/deepseek-v4-flash-free';
+    process.env.HYSA_CHAT_TIMEOUT_MS = '500';
+    process.env.HYSA_MODEL_MAX_ATTEMPTS = '8';
+
+    try {
+      const config = mockConfig({
+        currentProvider: 'openai_router',
+        currentModel: 'oc/deepseek-v4-flash-free',
+        apiKeys: {},
+        openaiRouterBaseUrl: timeoutRouter.apiBaseUrl,
+        ninerouterBaseUrl: undefined,
+        debug: true,
+      });
+      const router = createSmartRouter(config);
+
+      const result = await router.sendMessage([{ role: 'user', content: 'hello' }], 'system');
+
+      // Must succeed via 9Router fallback
+      assert.equal(result.message, 'ninerouter ok');
+      assert.equal(result.provider, '9Router');
+      assert.equal(result.model, 'oc/deepseek-v4-flash-free');
+
+      // Verify fallback events recorded the timeout and switch
+      const events = getFallbackEvents();
+      const eventReasons = events.map(e => e.reason);
+      assert.ok(eventReasons.some(r => r.includes('timeout')), 'should record timeout event');
+      assert.ok(eventReasons.some(r => r.includes('Fallback: 9Router')), 'should record fallback to 9Router');
+
+      // Verify no error was thrown (the await above would throw if all providers failed)
+      assert.ok(result.message.length > 0, 'result should have non-empty message');
+    } finally {
+      await close(timeoutRouter.server);
+      await close(nr.server);
+    }
+  });
+
+  it('all providers timeout — final error shown only after every fallback fails', async () => {
+    // Both openai_router and 9Router servers hang on POST (both timeout)
+    const router1 = await startTimeoutRouter();
+    const nrHanging = await startTimeoutRouter();
+    process.env.NINEROUTER_URL = nrHanging.rootUrl;
+    process.env.HYSA_9ROUTER_CHAT_MODEL = 'oc/deepseek-v4-flash-free';
+    process.env.HYSA_CHAT_TIMEOUT_MS = '500';
+    process.env.HYSA_MODEL_MAX_ATTEMPTS = '8';
+
+    try {
+      const config = mockConfig({
+        currentProvider: 'openai_router',
+        currentModel: 'oc/deepseek-v4-flash-free',
+        apiKeys: {},
+        openaiRouterBaseUrl: router1.apiBaseUrl,
+        ninerouterBaseUrl: undefined,
+        debug: true,
+      });
+      const router = createSmartRouter(config);
+
+      await assert.rejects(
+        () => router.sendMessage([{ role: 'user', content: 'hello' }], 'system'),
+        /All currently configured providers are temporarily unavailable or rate-limited/,
+      );
+
+      // Verify all attempts were exhausted
+      const events = getFallbackEvents();
+      const timeoutEvents = events.filter(e => e.reason.includes('timeout'));
+      assert.ok(timeoutEvents.length >= 1, 'should have at least one timeout event');
+
+      // Should NOT have a success or fallback-success event
+      const successEvents = events.filter(e => e.reason.includes('ok') || e.reason.includes('succeeded'));
+      assert.equal(successEvents.length, 0, 'no success events when all providers fail');
+    } finally {
+      await close(router1.server);
+      await close(nrHanging.server);
+    }
+  });
 });
+
+async function startTimeoutRouter(): Promise<{ server: Server; apiBaseUrl: string }> {
+  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    const path = new URL(req.url || '/', 'http://localhost').pathname;
+    if (req.method === 'GET' && path === '/v1/models') {
+      return writeJson(res, 200, { data: [{ id: 'oc/deepseek-v4-flash-free' }] });
+    }
+    if (req.method === 'POST' && path === '/v1/chat/completions') {
+      // Never respond — simulate timeout
+      return;
+    }
+    return writeJson(res, 404, { error: 'not found' });
+  });
+  await listen(server, 0);
+  const address = server.address();
+  const actualPort = typeof address === 'object' && address ? address.port : 0;
+  return { server, apiBaseUrl: `http://127.0.0.1:${actualPort}/v1` };
+}

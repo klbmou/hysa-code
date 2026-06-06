@@ -2638,17 +2638,7 @@ async function chatLoop(initialConfig: HysaConfig, initialYolo = false, debugTim
 
       let response: AIResponse;
       try {
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          const timer = setTimeout(() => reject(new Error(`Request timed out after 30s`)), 30000);
-          requestAbortController.signal.addEventListener('abort', () => {
-            clearTimeout(timer);
-            reject(new DOMException('Aborted', 'AbortError'));
-          }, { once: true });
-        });
-        response = await Promise.race([
-          client.sendMessage(allMessages, systemPrompt),
-          timeoutPromise,
-        ]);
+        response = await client.sendMessage(allMessages, systemPrompt);
         stepError = null;
       } catch (error: unknown) {
         const err = error as { message?: string };
