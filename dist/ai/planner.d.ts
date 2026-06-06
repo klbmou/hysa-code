@@ -29,6 +29,6 @@ export declare function markStepRunning(plan: ExecutionPlan, stepIndex: number):
 export declare function markStepDone(plan: ExecutionPlan, stepIndex: number): ExecutionPlan;
 export declare function markStepFailed(plan: ExecutionPlan, stepIndex: number): ExecutionPlan;
 export declare function inferStepFromToolCall(toolName: string, args: Record<string, string>, plan: ExecutionPlan): number;
-export declare function buildFinalReport(plan: ExecutionPlan, filesTouched: string[], commandsRun: number): PlanReport;
+export declare function buildFinalReport(plan: ExecutionPlan, filesTouched: string[], commandsRun: number, responseSucceeded?: boolean): PlanReport;
 export declare function generatePlan(text: string, taskKind: TaskKind): ExecutionPlan | null;
 //# sourceMappingURL=planner.d.ts.map

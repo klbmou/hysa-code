@@ -1375,7 +1375,7 @@ export async function handleChatStream(
       }
     }
 
-    const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun) : undefined;
+    const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun, true) : undefined;
     writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls, timing: timingReport, plan: currentPlan, planReport, provider: response.provider, model: response.model, fallbackEvents: response.fallbackEvents })}\n\n`);
   } catch (err: unknown) {
     const e = err as Error;
@@ -2106,7 +2106,7 @@ export async function handleChat(req: ChatRequest): Promise<ChatResult> {
       console.log(LOG, `[req:${reqId}] Tool loop stopped after ${steps} steps, ${response.toolCalls.length} remaining tools`);
     }
 
-    const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun) : undefined;
+    const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun, true) : undefined;
 
     const fbEvents = getFallbackEvents();
     const fallbackEvents = fbEvents.map(e => e.reason);

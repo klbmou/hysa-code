@@ -1245,7 +1245,7 @@ export async function handleChatStream(req, writeEvent) {
                 }
             }
         }
-        const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun) : undefined;
+        const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun, true) : undefined;
         writeEvent(`data: ${JSON.stringify({ type: 'done', fullText: response.message, toolCalls: response.toolCalls, timing: timingReport, plan: currentPlan, planReport, provider: response.provider, model: response.model, fallbackEvents: response.fallbackEvents })}\n\n`);
     }
     catch (err) {
@@ -1936,7 +1936,7 @@ export async function handleChat(req) {
         if (response.toolCalls.length > 0 && steps > 0) {
             console.log(LOG, `[req:${reqId}] Tool loop stopped after ${steps} steps, ${response.toolCalls.length} remaining tools`);
         }
-        const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun) : undefined;
+        const planReport = currentPlan ? buildFinalReport(currentPlan, [...new Set(filesTouched)], commandsRun, true) : undefined;
         const fbEvents = getFallbackEvents();
         const fallbackEvents = fbEvents.map(e => e.reason);
         const actualProvider = getLastSuccessfulProvider();

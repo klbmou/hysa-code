@@ -2652,6 +2652,10 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
                         if (fixResult.fixed) {
                             console.log(pc.green(`  ✓ Auto-fixed: ${fixResult.errorType} — ${fixResult.filesTouched.join(', ')}`));
                             toolResults[toolResults.length - 1] = fixResult.newResult;
+                            // Restore step status to done since auto-fix recovered the failure
+                            if (currentPlan && planStepIdx >= 0) {
+                                currentPlan = markStepDone(currentPlan, planStepIdx);
+                            }
                             // Save to persistent memory
                             writeAutoFixMemory(fixResult, trimmed).catch(() => { });
                             // If there was a rerun, print its output
@@ -2744,7 +2748,7 @@ async function chatLoop(initialConfig, initialYolo = false, debugTiming = false)
         }
         // ── Plan final report ──
         if (currentPlan) {
-            const report = buildFinalReport(currentPlan, [...new Set(planFilesTouched)], planCommandsRun);
+            const report = buildFinalReport(currentPlan, [...new Set(planFilesTouched)], planCommandsRun, !!lastResponse);
             const statusIcon = report.finalStatus === 'completed' ? '✓' : report.finalStatus === 'failed' ? '✗' : '◌';
             const statusColor = report.finalStatus === 'completed' ? pc.green : report.finalStatus === 'failed' ? pc.red : pc.yellow;
             console.log('');

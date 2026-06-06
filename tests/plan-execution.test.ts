@@ -109,6 +109,41 @@ describe('plan execution state', () => {
     assert.equal(report.finalStatus, 'partial');
   });
 
+  it('buildFinalReport shows partial instead of failed when response succeeded and some steps completed', () => {
+    let p = plan!;
+    p.steps.forEach((_, i) => { p = markStepDone(p, i); });
+    p = markStepFailed(p, 1);
+    const report = buildFinalReport(p, [], 0, true);
+    assert.equal(report.finalStatus, 'partial', 'recovered failure should be partial, not failed');
+    assert.equal(report.failedSteps, 1);
+    assert.equal(report.completedSteps, p.steps.length - 1);
+  });
+
+  it('buildFinalReport shows failed when response succeeded but no steps completed', () => {
+    let p = plan!;
+    p.steps.forEach((_, i) => { p = markStepFailed(p, i); });
+    const report = buildFinalReport(p, [], 0, true);
+    assert.equal(report.finalStatus, 'failed', 'all steps failed even with response');
+    assert.equal(report.failedSteps, p.steps.length);
+    assert.equal(report.completedSteps, 0);
+  });
+
+  it('buildFinalReport with recovered failures shows failed when responseSucceeded is false (legacy behavior)', () => {
+    let p = plan!;
+    p.steps.forEach((_, i) => { p = markStepDone(p, i); });
+    p = markStepFailed(p, 1);
+    const report = buildFinalReport(p, [], 0, false);
+    assert.equal(report.finalStatus, 'failed', 'without responseSucceeded flag, failed steps remain failed');
+  });
+
+  it('buildFinalReport with recovered failures shows failed when responseSucceeded is omitted (backward compat)', () => {
+    let p = plan!;
+    p.steps.forEach((_, i) => { p = markStepDone(p, i); });
+    p = markStepFailed(p, 1);
+    const report = buildFinalReport(p, [], 0);
+    assert.equal(report.finalStatus, 'failed', 'default behavior without flag must remain failed');
+  });
+
   it('generatePlan returns null for non-complex tasks', () => {
     assert.equal(generatePlan('hi there', 'simple_chat'), null);
   });

@@ -166,7 +166,7 @@ export function inferStepFromToolCall(toolName: string, args: Record<string, str
   return plan.steps.findIndex(s => s.status === 'pending');
 }
 
-export function buildFinalReport(plan: ExecutionPlan, filesTouched: string[], commandsRun: number): PlanReport {
+export function buildFinalReport(plan: ExecutionPlan, filesTouched: string[], commandsRun: number, responseSucceeded?: boolean): PlanReport {
   const steps = plan.steps;
   const completed = steps.filter(s => s.status === 'done').length;
   const failed = steps.filter(s => s.status === 'failed').length;
@@ -176,7 +176,13 @@ export function buildFinalReport(plan: ExecutionPlan, filesTouched: string[], co
   if (completed === steps.length) {
     finalStatus = 'completed';
   } else if (failed > 0) {
-    finalStatus = 'failed';
+    // If a successful final response was produced despite step failures,
+    // treat recovered/fixed failures as non-fatal.
+    if (responseSucceeded && completed > 0) {
+      finalStatus = 'partial';
+    } else {
+      finalStatus = 'failed';
+    }
   } else {
     finalStatus = 'partial';
   }
