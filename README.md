@@ -1,14 +1,13 @@
-# HYSA Code v0.6.0
+# HYSA Code v1.0.0 — The AI-Powered SaaS Platform
 
 <div dir="rtl">
 
-## HYSA كود v0.5.1 - مساعد برمجة بالذكاء الاصطناعي
+## HYSA كود v1.0.0 — منصة برمجية عالمية بالذكاء الاصطناعي
 
-أداة سطر أوامر مفتوحة المصدر لمساعدة المطورين في كتابة وتحرير الأكواد البرمجية باستخدام الذكاء الاصطناعي.
-تدعم 12 مزود مع وضع مجاني سحابي ومحلي.
+HYSA Code v1.0.0 منصة استضافة ذاتية، تعمل دائمًا، لمنصة برمجة بالذكاء الاصطناعي مصممة للأداء والموثوقية والأمان.
 
 ```bash
-npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.5.1/hysa-code-0.5.1.tgz
+npm install -g hysa-code
 hysa
 ```
 
@@ -16,40 +15,27 @@ hysa
 
 ---
 
-**HYSA Code** is an open-source AI coding assistant that runs in your terminal.
-It supports 12 AI providers across 4 tiers — **Free API Key** (sign-up required), **Local Free** (offline, no key), **Premium API** (paid), and **Experimental Free** (no-key, no guarantees).
+**HYSA Code v1.0.0** is a self-hosted, always-on AI coding platform engineered for performance, reliability, and security.
 
 ```bash
-npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.5.1/hysa-code-0.5.1.tgz
+npm install -g hysa-code
 hysa
 ```
 
-> **v0.5.1 hotfix — Image understanding UX:**
-> - **Fixed vision fallback** — OpenRouter vision models are now tried first when current provider is OpenRouter (was only trying Gemini). Same-provider candidates are no longer incorrectly skipped.
-> - **Limited fallback attempts** — max 3 vision models tried per request (was up to 12), with shorter 10s timeouts.
-> - **Friendly error messages** — no more huge technical error dumps. When all vision models fail, users see a short message in their own language (Arabic or English) with no raw provider names.
-> - **Language matching** — Arabic users asking "اشرح" now get Arabic image descriptions and Arabic error messages across all features (images, PDFs, text files, vision fallback).
-> - **Cleaner chat layout** — centered 820px column, polished message bubbles, image cards displayed properly under user text, compact top bar, reduced visual noise.
-> - **Debug mode hides fallback noise** — fallback timeline events are collapsed by default and only visible in debug mode.
->
-> **v0.5.0 improvements:**
-> - **Chat attachments** — attach text files, images, PDFs, and DOCX files in `#/chat`. Drag-and-drop or click to attach. Text files up to 500KB, images up to 5MB, PDF/DOCX up to 10MB.
-> - **PDF text extraction** — selectable-text PDFs are extracted in-browser using pdf.js. Extracted text is sent as context to the AI for analysis. Scanned/image-based PDFs are detected but OCR is not yet supported.
-> - **Image understanding** — attach images for AI analysis. Requires a vision-capable provider (Gemini, OpenRouter with vision models, OpenAI GPT-4o, Anthropic Claude). Non-vision providers automatically fall back to a vision-capable provider. If no vision provider is available, a clear hint is shown instead of a generic error.
-> - **Vision provider fallback** — when your current provider cannot process images, HYSA automatically tries Gemini, OpenRouter vision models, OpenAI, and Anthropic. If all fail, a clear hint is shown.
-> - **Files workspace** — new `#/files` tab provides a standalone file browser and code editor for quick file access without starting a chat.
-> - **Cleaner chat layout** — compact message headers, improved attachment cards with colored file-type badges, streamlined composer with quick-action buttons (Summarize, Explain, Describe image, etc.).
-> - **Hardened secret logging** — no API key characters are ever printed in logs or diagnostics. Doctor shows only `[configured]` or `[not set]`. Gemini errors print truncated messages, not full stack traces.
->
-> Previous v0.4.0 improvements:
-> - **Safe streaming** — simple chat responses stream tokens live with no tool interference. CTRL+C aborts mid-stream cleanly.
-> - **Cleaner CLI interface** — removed broken ASCII box header, simplified tool events (READ/EDIT/RUN), added "You:" section separation, no duplicate "HYSA:" output after streaming.
-> - **Cleaner fallback display** — grouped repeated fallback lines, clear "Rate limited. Trying next..." and "OK Switched to..." messages.
-> - **Faster fallback retries** — non-primary fallback models get 0 retries (no more 12s timeouts per model). OpenRouter model fallback limited to 3 attempts.
-> - **Improved file discovery** — auto-resolves common file paths (`index.html`, `public/index.html`, `src/App.tsx`). Extension fallbacks (`App.tsx` → `App.jsx`). Web monorepo support (`web/index.html`, `web/src/App.tsx`).
-> - **Generated output protection** — `dist/`, `web/dist/`, `build/`, `out/`, `.next/`, `coverage/` are excluded from edit discovery. Edits to generated files blocked unless YOLO mode is enabled.
-> - **App title tasks** — "change the app title" correctly finds `web/index.html` or the right source file, asks for the new title locally without a second provider call, then applies the edit.
-> - **Streaming for all providers** — OpenAI and Anthropic now support streaming via SDK. All 9 providers with proxy support have `sendMessageStream`.
+### Core Features
+
+- **🌐 Global SaaS Deployment (Always-On)** — One-click deploy via `npm run deploy:global`. PM2 daemonization with auto-restart, memory threshold watcher (400MB RSS alert, 512MB max), live health endpoint for load balancers, and live log viewer UI.
+- **🧠 Failure Memory System (Self-Correcting AI)** — Automatic memory of runtime failures, provider fallbacks, and user corrections. The system learns from every interaction and adapts to your workflow.
+- **🖥️ Professional UI** — Obsidian-grade dark terminal interface with live session indicator (neon cyan pulse), compact single-line status bar, SVG brand favicon, and professional offline error page.
+- **🛡️ Enterprise-Ready Security & Authentication** — Public access key middleware with private-IP auto-bypass. External requests require API key auth. "Remember Me" localStorage persistence. Secrets redacted from all logs and diagnostics.
+
+> **v1.0.0 highlights:**
+> - **🌐 Global SaaS Deployment** — one-click `npm run deploy:global` starts a PM2-managed production daemon with auto-restart, memory threshold alerts (400MB RSS), and public URL support.
+> - **🛡️ Public Access Key Authentication** — key guard middleware with private-IP auto-bypass. External requests must provide key via `x-api-key` header or `api_key` query param.
+> - **📊 Live Log Viewer & Health Monitoring** — real-time log polling at `/api/logs` with dark terminal UI, color-coded levels. Unauthenticated `/api/health` endpoint.
+> - **🧠 Failure Memory System** — automatic 400MB RSS memory threshold watcher with PM2 broadcast on threshold exceeded.
+> - **🖥️ Professional UI Polish** — SVG brand favicon, error.html offline fallback, neon cyan pulse live session indicator, compact single-line terminal status bar.
+> - **✅ Deterministic E2E Testing** — `HYSA_E2E_TEST_PROVIDER=true` enables predictable responses for CI/CD pipelines with zero external API calls.
 
 ## Quick Start
 

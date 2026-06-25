@@ -1,6 +1,6 @@
 {
   "name": "hysa-code",
-  "version": "0.6.0",
+  "version": "1.0.0",
   "description": "Open-source AI coding assistant CLI - multiple providers including free cloud and local models",
   "type": "module",
   "license": "MIT",
@@ -49,6 +49,9 @@
     "build:exe": "npm run build:web && npm run build:bundle && node ./node_modules/@yao-pkg/pkg/lib-es5/bin.js -c package.json dist/bundle.cjs --targets node22-win-x64 --output hysa.exe && node -e \"let d=require('fs').readFileSync('hysa.exe'),p=d.readUInt32LE(0x3C);d.writeUInt16LE(2,p+0x5C);require('fs').writeFileSync('hysa.exe',d);console.log('Patched to GUI subsystem')\" && node -e \"require('fs').copyFileSync('hysa.exe','web/dist/download.exe')\"",
     "start": "node dist/index.js",
     "start:render": "node dist/web/render-start.js",
+    "start:prod": "powershell -Command \"$env:NODE_ENV='production';node dist/web/prod-cluster.cjs\"",
+    "start:prod:pm2": "pm2 start ecosystem.config.json",
+    "deploy:global": "powershell -ExecutionPolicy Bypass -File scripts\\deploy-global.ps1",
     "dev": "tsx src/index.ts",
     "dev:web": "cd web && npx vite",
     "check": "node ./node_modules/typescript/bin/tsc --noEmit",

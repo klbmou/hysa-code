@@ -1,4 +1,29 @@
 import type { Request, Response, NextFunction } from 'express';
+import { isIP } from 'node:net';
+
+export function createPublicAccessGuard(): (req: Request, res: Response, next: NextFunction) => void {
+  return (req, res, next) => {
+    const apiKey = process.env.HYSA_PUBLIC_API_KEY;
+    if (!apiKey) return next();
+    const clientIp = getClientIP(req);
+    if (isPrivateIp(clientIp)) return next();
+    const provided = (req.headers['x-api-key'] as string) || (req.query.api_key as string) || '';
+    if (provided === apiKey) return next();
+    res.status(401).json({ error: 'PUBLIC_ACCESS_KEY_REQUIRED', message: 'Set HYSA_PUBLIC_API_KEY or access from a private network.' });
+  };
+}
+
+function isPrivateIp(ip: string): boolean {
+  if (ip === '127.0.0.1' || ip === '::1' || ip === 'localhost' || ip === '::ffff:127.0.0.1') return true;
+  const v4 = ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+  if (isIP(v4) === 4) {
+    const p = v4.split('.').map(Number);
+    if (p[0] === 10 || p[0] === 127) return true;
+    if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return true;
+    if (p[0] === 192 && p[1] === 168) return true;
+  }
+  return false;
+}
 
 export function securityHeaders(_req: Request, res: Response, next: NextFunction): void {
   res.setHeader('X-Content-Type-Options', 'nosniff');

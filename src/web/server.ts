@@ -14,7 +14,7 @@ try {
 import { getStatus, getConfig, updateConfig, getProjectTree, getFileContent, saveFile, handleChat, handleChatStream, continueChat, runCommand, getFilePreview, getYoloStatus, setYoloStatus, getFallbackStatus, handleImageGen, handleImageProxy } from './api.js';
 import { searchWeb, formatSearchResults, getSearchDiagnostics } from '../tools/web-search.js';
 import { RateLimiter } from './rate-limiter.js';
-import { securityHeaders, getClientIP, createOriginGuard, createEndpointBlocker, rateLimitResponse } from './security.js';
+import { securityHeaders, getClientIP, createOriginGuard, createPublicAccessGuard, createEndpointBlocker, rateLimitResponse } from './security.js';
 import type { Server } from 'node:http';
 
 // Keep server reference alive so GC doesn't close it
@@ -51,12 +51,42 @@ export async function startWebServer(port = 8787, host?: string): Promise<void> 
   app.use(express.json({ limit: '50mb' }));
   app.use(securityHeaders);
   app.use(createOriginGuard());
+  app.use(createPublicAccessGuard());
+
+  // Health check (no auth)
+  app.get('/api/health', (_req, res) => {
+    const mem = process.memoryUsage();
+    res.json({ status: 'ok', uptime: process.uptime(), memory: { rss: mem.rss, heapUsed: mem.heapUsed }, production: process.env.NODE_ENV === 'production', publicUrl: process.env.HYSA_PUBLIC_URL || null, publicAccessKey: !!process.env.HYSA_PUBLIC_API_KEY });
+  });
 
   // General rate limiter for all /api/* routes (baseline)
   app.use('/api', rateLimitRoute(generalLimiter, '/api/*'));
 
   app.get('/api/status', (_req, res) => {
     res.json(getStatus());
+  });
+
+  // ── Live log tail (for LogViewer frontend) ──
+  app.get('/api/logs', (req, res) => {
+    const lines = Math.min(Math.max(parseInt(req.query.lines as string) || 50, 1), 500);
+    const logFile = join(process.cwd(), 'logs', 'hysa-out.log');
+    if (!existsSync(logFile)) return res.json({ ok: true, lines: [], file: logFile, totalLines: 0, truncated: false });
+    try {
+      const { statSync, openSync, readSync, closeSync } = require('node:fs');
+      const st = statSync(logFile);
+      if (st.size === 0) return res.json({ ok: true, lines: [], file: logFile, totalLines: 0, truncated: false });
+      const avgBytesPerLine = 120;
+      const readBytes = Math.min(lines * avgBytesPerLine, st.size);
+      const fd = openSync(logFile, 'r');
+      const buf = Buffer.alloc(readBytes);
+      const br = readSync(fd, buf, 0, readBytes, Math.max(0, st.size - readBytes));
+      closeSync(fd);
+      const content = buf.toString('utf-8', 0, br);
+      const tail = content.split('\n').filter(Boolean).slice(-lines);
+      res.json({ ok: true, lines: tail, file: logFile, totalLines: tail.length, truncated: br < st.size, fileSize: st.size });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
   });
 
 
@@ -301,6 +331,20 @@ export async function startWebServer(port = 8787, host?: string): Promise<void> 
       res.send('HYSA Web UI not built. Run: cd web && npm install && npm run build');
     });
   }
+
+  // Catch-all for non-API GET routes — serve error.html if available
+  app.use((req, res, next) => {
+    if (req.method === 'GET' && !req.path.startsWith('/api/')) {
+      const errorPage = join(process.cwd(), 'web', 'public', 'error.html');
+      if (existsSync(errorPage)) {
+        res.status(503).sendFile(errorPage);
+      } else {
+        res.status(503).type('html').send('<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>HYSA Offline</title><style>body{background:#0d0d10;color:#e4e4e8;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:sans-serif}.c{text-align:center}.t{color:#8a8f98;font-size:14px}.m{color:#555;font-size:12px;margin-top:8px}</style></head><body><div class="c"><div class="t">HYSA System Updating</div><div class="m">Please retry in 30 seconds.</div></div></body></html>');
+      }
+    } else {
+      next();
+    }
+  });
 
   return new Promise<void>((resolveStart, reject) => {
     const listenHost = host || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : undefined);

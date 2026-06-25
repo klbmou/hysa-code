@@ -45,12 +45,12 @@ function CopyButton({ text }: { text: string }) {
 
 function InstallTerminal() {
   const [tab, setTab] = useState<'release' | 'dev'>('release');
-  const releaseCmd = 'npm install -g https://github.com/klbmou/hysa-code/releases/download/v0.2.0/hysa-code-0.2.0.tgz';
+  const releaseCmd = 'npm install -g hysa-code';
   const devCmds = [
     'git clone https://github.com/klbmou/hysa-code',
     'cd hysa-code',
     'npm install && npm run build && npm run build:web',
-    'npm install -g ./hysa-code-0.2.0.tgz',
+    'npm install -g ./hysa-code-1.0.0.tgz',
   ];
 
   return (
@@ -139,7 +139,21 @@ export default function LandingPage() {
     return () => obs.disconnect();
   }, []);
 
+  const [rememberKey, setRememberKey] = React.useState(() => {
+    return localStorage.getItem('hysa_remember_key') === 'true';
+  });
+
   const handleLaunchChat = () => {
+    const requiredKey = (window as any).__HYSA_PUBLIC_API_KEY__;
+    if (requiredKey && !requiredKey.startsWith('$')) {
+      if (rememberKey) {
+        localStorage.setItem('hysa_api_key', requiredKey);
+        localStorage.setItem('hysa_remember_key', 'true');
+      } else {
+        sessionStorage.setItem('hysa_api_key', requiredKey);
+        localStorage.removeItem('hysa_remember_key');
+      }
+    }
     window.location.hash = '#/chat';
   };
 
@@ -178,7 +192,7 @@ export default function LandingPage() {
             </span>
             <span className="lp-hero-badge">
               <span className="lp-badge-dot blue" />
-              v0.2 MVP
+              v1.0.0 Stable
             </span>
           </div>
 
@@ -200,6 +214,12 @@ export default function LandingPage() {
               View on GitHub
             </a>
           </div>
+          {typeof (window as any).__HYSA_PUBLIC_API_KEY__ === 'string' && (
+            <label className="lp-remember-key">
+              <input type="checkbox" checked={rememberKey} onChange={e => setRememberKey(e.target.checked)} />
+              <span>Remember access key on this device</span>
+            </label>
+          )}
         </div>
       </section>
 
@@ -323,8 +343,8 @@ export default function LandingPage() {
                 <span className="lp-os-stat-label">License</span>
               </div>
               <div className="lp-os-stat">
-                <span className="lp-os-stat-num">v0.2</span>
-                <span className="lp-os-stat-label">Current version</span>
+                <span className="lp-os-stat-num">v1.0.0</span>
+                <span className="lp-os-stat-label">Stable release</span>
               </div>
               <div className="lp-os-stat">
                 <span className="lp-os-stat-num">9+</span>

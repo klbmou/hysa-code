@@ -1,0 +1,23 @@
+{
+  "version": "1.0.0",
+  "remote_github": "https://github.com/klbmou/hysa-code",
+  "last_sync_status": "Pending",
+  "active_development_focus": "Production SaaS v1.0.0 — package.json repair, GitHub sync, terminal UI upgrade, deployment automation",
+  "project_state": {
+    "server": "Always-On SaaS Platform",
+    "deployment": "PM2 daemon with one-click deploy",
+    "auth": "HYSA_PUBLIC_API_KEY middleware (private-IP auto-bypass)",
+    "monitoring": "Live log viewer + health endpoint + memory watcher",
+    "ui": "Obsidian-grade dark terminal with neon cyan indicators"
+  },
+  "git": {
+    "remote_origin": "https://github.com/klbmou/hysa-code",
+    "branch": "main",
+    "last_known_status": "Uncommitted changes pending"
+  },
+  "instructions": {
+    "pre_task_check": "Read this file first. Check git remote and status before any coding task.",
+    "sync_reminder": "After every major change, ask user: 'Changes detected. Sync with GitHub?'",
+    "no_temp_scripts": "Use only core project scripts. Never create ad-hoc temp scripts for diagnostics."
+  }
+}

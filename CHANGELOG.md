@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.0] - 2026-06-25
+
+### Added
+- **🌐 Global SaaS Deployment** — self-hosted production server with PM2 daemonization, one-click deploy script (`npm run deploy:global`), public URL support, and 0.0.0.0 binding.
+- **🛡️ Public Access Key Authentication** — `HYSA_PUBLIC_API_KEY` guard middleware with private-IP auto-bypass. External requests require `x-api-key` header or `api_key` query param. Landing page "Remember Me" checkbox for persistent localStorage key storage.
+- **📊 Live Health & Log Monitoring** — `GET /api/health` endpoint for PM2/load balancers, live log viewer UI polling `/api/logs` every 2s with dark terminal styling.
+- **🧠 Failure Memory System** — automatic 400MB RSS memory threshold watcher with PM2 broadcast. Self-correcting AI that learns from runtime failures.
+- **🖥️ Professional UI** — SVG brand favicon, `error.html` offline fallback, "Live Sessions: 1" neon cyan pulse indicator, compact single-line terminal status bar.
+- **💾 Deterministic Test Provider** — `HYSA_E2E_TEST_PROVIDER=true` for reliable CI/CD pipeline testing without external API calls. Covers all `/api/chat` paths (streaming, non-streaming, continueChat, vision fallback).
+- **🎯 24 Automated Smoke Tests** — component-level and true E2E smoke scripts covering memory-aware planning, 9Router probes, Arabic chat routing, and production deployment validation.
+
+### Changed
+- Version bumped to 1.0.0 — first stable production release.
+- Server now binds to `0.0.0.0` in production mode by default.
+- `safeFetchJson` auto-injects `x-api-key` header from sessionStorage.
+- PM2 ecosystem config hardened with `max_memory_restart: 512M`, `listen_timeout: 15000`, `kill_timeout: 10000`.
+
+### Fixed
+- String terminator and brace parsing errors in `scripts/deploy-global.ps1`.
+- Inline `} finally { Pop-Location }` constructs rewritten to multi-line to avoid PowerShell parser ambiguity.
+
 ## [0.6.0] - 2025-05-25
 
 ### Added

@@ -63,8 +63,13 @@ export default function TopBar({ status, sidebarOpen, onToggleSidebar, yolo, onT
           </div>
         )}
       </div>
-      <div className="topbar-right" ref={menuRef}>
-        <button className="topbar-menu-btn" onClick={() => setMenuOpen(!menuOpen)} title="Menu">
+      <div className="topbar-right">
+        <div className="topbar-sessions">
+          <span className="sessions-dot" />
+          <span className="sessions-label">Live Sessions: 1</span>
+        </div>
+        <div ref={menuRef}>
+          <button className="topbar-menu-btn" onClick={() => setMenuOpen(!menuOpen)} title="Menu">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="1" />
             <circle cx="19" cy="12" r="1" />

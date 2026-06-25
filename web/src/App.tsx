@@ -77,7 +77,7 @@ type ChatItem = {
   | { kind: 'image_card'; imageUrl: string; prompt: string; promptUsed?: string }
 );
 
-type RightTab = 'code' | 'diff' | 'terminal';
+type RightTab = 'code' | 'diff' | 'terminal' | 'logs';
 
 function isArabic(text: string): boolean {
   const arabicRange = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
@@ -1844,7 +1844,7 @@ export default function App() {
           <RightPanel tab={rightTab} onTabChange={setRightTab} onClose={() => setRightOpen(false)} selectedFile={selectedFile} fileContent={fileContent} onFileChange={setFileContent} onSave={saveFile} saveMsg={saveMsg} diffContent={diffContent} diffPath={diffPath} terminalOutput={terminalOutput} terminalType={terminalType} />
         )}
       </div>
-      <StatusBar fileCount={fileCount} loading={loading} messageCount={chatItems.length} yolo={yolo} />
+      <StatusBar fileCount={fileCount} loading={loading} messageCount={chatItems.length} yolo={yolo} onLogsClick={() => { setRightOpen(true); setRightTab('logs'); }} />
 
       {settingsOpen && (
         <>
@@ -1935,9 +1935,13 @@ function isRateLimited(text: string): boolean {
 }
 
 async function safeFetchJson(url: string, options?: RequestInit): Promise<{ ok: boolean; data?: any; error?: string; status?: number; contentType?: string }> {
-  console.log(`[WebClient] ${options?.method || 'GET'} ${url}`);
+  const apiKey = typeof window !== 'undefined' ? sessionStorage.getItem('hysa_api_key') : null;
+  const headers = { ...(options?.headers || {}) } as Record<string, string>;
+  if (apiKey) headers['x-api-key'] = apiKey;
+  const opts = { ...options, headers };
+  console.log(`[WebClient] ${opts.method || 'GET'} ${url}`);
   try {
-    const res = await fetch(url, options);
+    const res = await fetch(url, opts);
     const contentType = res.headers.get('content-type') || '';
     console.log(`[WebClient] ${options?.method || 'GET'} ${url} status=${res.status} content-type="${contentType}"`);
     if (contentType.includes('text/html') || contentType.includes('text/plain')) {

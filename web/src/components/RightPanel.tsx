@@ -1,7 +1,8 @@
 import React from 'react';
 import Editor from '@monaco-editor/react';
+import LogViewer from './LogViewer.js';
 
-type RightTab = 'code' | 'diff' | 'terminal';
+type RightTab = 'code' | 'diff' | 'terminal' | 'logs';
 
 interface RightPanelProps {
   tab: RightTab;
@@ -54,6 +55,7 @@ export default function RightPanel({
           <button className={`rp-tab ${tab === 'code' ? 'active' : ''}`} onClick={() => onTabChange('code')}>Code</button>
           <button className={`rp-tab ${tab === 'diff' ? 'active' : ''}`} onClick={() => onTabChange('diff')}>Diff</button>
           <button className={`rp-tab ${tab === 'terminal' ? 'active' : ''}`} onClick={() => onTabChange('terminal')}>Terminal</button>
+          <button className={`rp-tab ${tab === 'logs' ? 'active' : ''}`} onClick={() => onTabChange('logs')}>Logs</button>
         </div>
         <button className="rp-close" onClick={onClose}>x</button>
       </div>
@@ -124,6 +126,9 @@ export default function RightPanel({
           ) : (
             <div className="right-panel-empty">No terminal output</div>
           )
+        )}
+        {tab === 'logs' && (
+          <LogViewer />
         )}
       </div>
     </div>

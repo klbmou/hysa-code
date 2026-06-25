@@ -1,0 +1,21 @@
+{
+  "apps": [{
+    "name": "hysa-prod",
+    "script": "dist/web/prod-cluster.js",
+    "instances": 1,
+    "exec_mode": "fork",
+    "env": {
+      "NODE_ENV": "production",
+      "PORT": 10000
+    },
+    "error_file": "logs/hysa-error.log",
+    "out_file": "logs/hysa-out.log",
+    "merge_logs": true,
+    "max_restarts": 10,
+    "restart_delay": 3000,
+    "max_memory_restart": "512M",
+    "min_uptime": "10000",
+    "listen_timeout": 15000,
+    "kill_timeout": 10000
+  }]
+}
